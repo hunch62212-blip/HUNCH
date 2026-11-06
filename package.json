@@ -1,0 +1,24 @@
+{
+  "name": "llaso-p2-xport-sim",
+  "version": "1.0.0",
+  "description": "NASA HUNCH LLASO-P2-XPORT-2026 external cargo transport rover simulator",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5173",
+    "build": "vite build",
+    "preview": "vite preview --port 5173",
+    "test:physics": "node tests/headless.mjs",
+    "test:rocks": "node tests/rock_climb.mjs",
+    "test:dock": "node tests/dock.mjs 0 && node tests/dock.mjs 1",
+    "test:faults": "node tests/faults.mjs",
+    "test:cycle": "node tests/autonomy.mjs cycle 12000"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.14.0",
+    "three": "0.170.0"
+  },
+  "devDependencies": {
+    "vite": "6.0.7"
+  }
+}

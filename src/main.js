@@ -1,0 +1,371 @@
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import RAPIER from '@dimforge/rapier3d-compat';
+import { Sim } from './sim/sim.js';
+import { ROVER, K } from './sim/config.js';
+import { heightAt } from './sim/terrain.js';
+import { createScene } from './render/scene.js';
+import { TerrainMesh } from './render/terrainMesh.js';
+import { RockField, buildLander, buildHabitat, buildCargo, buildGeofences, MAT, tagMesh, labelTexture as labelTex } from './render/props.js';
+import { AegisModel, buildTeamCargo, buildTeamStands } from './render/aegis.js';
+import { loadTeamModels } from './render/teamModels.js';
+import { Dust, Tracks, LidarCloud, PathOverlay, Pebbles } from './render/effects.js';
+import { HUD } from './ui/hud.js';
+import { trackedRoverCAD } from './render/cadModels.js';
+import { labelTexture } from './render/props.js';
+
+const loadFill = document.getElementById('load-fill'), loadMsg = document.getElementById('load-msg');
+const step = async (pct, msg) => { loadFill.style.width = pct + '%'; loadMsg.textContent = msg; await new Promise((r) => setTimeout(r, 30)); };
+
+// ---------------- persistence (IndexedDB) for the SLAM map + route memory ----------------
+const DB = {
+  open() { return new Promise((res, rej) => { const r = indexedDB.open('span40', 1); r.onupgradeneeded = () => r.result.createObjectStore('slam'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); },
+  async put(k, v) { const db = await this.open(); return new Promise((res, rej) => { const tx = db.transaction('slam', 'readwrite'); tx.objectStore('slam').put(v, k); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); },
+  async wipe() { return new Promise((res) => { const r = indexedDB.deleteDatabase('span40'); r.onsuccess = r.onerror = r.onblocked = () => res(); }); },
+  async get(k) { const db = await this.open(); return new Promise((res, rej) => { const tx = db.transaction('slam', 'readonly'); const q = tx.objectStore('slam').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); },
+};
+
+async function main() {
+  await step(5, 'Initialising Rapier physics (WASM)…');
+  await RAPIER.init();
+  await step(15, 'Generating 2.2 × 2.2 km lunar terrain: fBm highlands, 2,300 craters, 6,600 boulders…');
+  const sim = new Sim(RAPIER);
+  await step(45, 'Building renderer, lunar sky and lighting…');
+  const canvas = document.getElementById('view');
+  const S = createScene(canvas);
+  const { scene, camera, renderer } = S;
+  S.setSun(sim.sunDir);
+  sim.on('sun', () => S.setSun(sim.sunDir));
+
+  await step(55, 'Meshing terrain (chunked LOD, physics-exact heights)…');
+  const terrainMesh = new TerrainMesh(scene, sim.terrain);
+  const p0 = sim.rover.pose();
+  terrainMesh.update(new THREE.Vector3(p0.x, 0, p0.z), 2000);
+  await step(70, 'Placing boulders, lander, supply building and cargo…');
+  const rocks = new RockField(scene, sim.terrain);
+  sim.on('rocks', () => rocks.rebuild());
+  scene.add(buildLander(sim.terrain));
+  const hab = buildHabitat(sim.terrain, sim.ports);
+  scene.add(hab.root);
+  await step(74, 'Loading the team AEGIS-V1, module and stand models…');
+  const TM = await loadTeamModels();
+  scene.add(await buildTeamStands(sim.cargo, heightAt, sim.terrain));
+  const fences = buildGeofences(sim.terrain); scene.add(fences);
+  const cargoVis = [];
+  for (const c of sim.cargo) {
+    let g;
+    if (c.T.shape === 'cylinder') {
+      g = await buildTeamCargo(c);
+      const id = c.id.charCodeAt(3), T = c.T, half = T.radius;
+      const aft = tagMesh(id, 0.8); aft.position.set(-T.length / 2 - 0.02, -half * 0.62, 0); aft.rotation.y = -Math.PI / 2; g.add(aft);
+      const fwd = tagMesh(id + 1, 0.6); fwd.position.set(T.length / 2 + 0.03, half * 0.62, 0); fwd.rotation.y = Math.PI / 2; g.add(fwd);
+      for (const sz of [-1, 1]) { const t = tagMesh(id + 2, 0.8); t.position.set(-1.2, -0.3, sz * (half + 0.035)); t.rotation.y = sz > 0 ? 0 : Math.PI; g.add(t); }
+    } else {
+      g = buildCargo(c);
+      const T = c.T; // ring-adapter sled the saddles and jaws grip
+      const ringM = new THREE.MeshStandardMaterial({ color: 0xb7bec7, metalness: 0.9, roughness: 0.3 });
+      for (const rx of T.adapterRings) { const r = new THREE.Mesh(new THREE.CylinderGeometry(T.adapterR, T.adapterR, 0.82, 48, 1, true), ringM); r.rotation.z = Math.PI / 2; r.position.x = rx; r.castShadow = true; g.add(r); }
+    }
+    g.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+    scene.add(g); cargoVis.push({ c, g });
+  }
+  // receiving stand (team pallet) rises out of the apron under the docked module during berthing step 6
+  const jackVis = new Map();
+  function updateJacks() {
+    for (const port of sim.ports) {
+      const c = port.occupied;
+      if (!c || !(port.jackK > 0)) continue;
+      let v = jackVis.get(port);
+      if (!v) {
+        const t = c.body.translation(), r = c.body.rotation();
+        const q = new THREE.Quaternion(r.x, r.y, r.z, r.w), ax = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+        const wrap = new THREE.Group(); wrap.scale.setScalar(K);
+        const st = TM.ModuleModels.buildStand(port.name);
+        const half = c.T.adapterR || c.T.radius;
+        TM.ModuleModels.placeStand(st, t.x / K, t.z / K, (t.y - half) / K, () => port.ground / K);
+        const pivot = new THREE.Group(); pivot.position.copy(st.position); st.position.set(0, 0, 0); pivot.rotation.y = Math.atan2(-ax.z, ax.x); pivot.add(st);
+        wrap.add(pivot); scene.add(wrap);
+        v = { wrap, depth: (t.y - half - port.ground) };
+        jackVis.set(port, v);
+      }
+      v.wrap.position.y = -(1 - Math.min(1, port.jackK)) * (v.depth + 0.5);
+    }
+  }
+  await step(80, 'Assembling AEGIS-V1 rover model…');
+  const roverModel = await new AegisModel(scene).init();
+  // SCOUT-1 (team tracked-rover CAD, 3x scale)
+  const scoutVis = trackedRoverCAD(3); scene.add(scoutVis);
+  const scoutTag = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTexture('SCOUT-1', { color: '#35d0ff', size: 70, w: 512, h: 128 }), transparent: true, depthWrite: false }));
+  scoutTag.scale.set(3.2, 0.8, 1); scoutTag.position.y = 2.2; scoutVis.add(scoutTag);
+  const scoutCloud = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({ color: 0x7dffb0, size: 2, sizeAttenuation: false, transparent: true, opacity: 0.8, depthWrite: false }));
+  scoutCloud.frustumCulled = false; scene.add(scoutCloud);
+  const dust = new Dust(scene, sim.terrain);
+  const tracks = new Tracks(scene);
+  const lidar = new LidarCloud(scene);
+  const overlay = new PathOverlay(scene, sim.terrain);
+  const pebbles = new Pebbles(scene, sim.terrain);
+
+  // ---------------- UI state & camera ----------------
+  const ui = {
+    view: 'chase', steerMode: 'ackermann', manualHold: false,
+    overlays: { lidar: true, path: true, arcs: false, routes: true, fences: true, dust: true, xray: false },
+    setView(v) { if (['chase', 'orbit', 'top', 'cam', 'free'].includes(v)) { ui.view = v; onViewChange(); sim.log(`View: ${v}`); } },
+    noSave: false,
+    async forgetMap() { ui.noSave = true; sim.slam.clear(); await DB.wipe(); sim.log('Stored map and route memory erased. Reload the page for a completely fresh start (nothing is saved until then).', 'warn'); },
+    async saveMap() { if (ui.noSave) return; try { await DB.put('map', sim.slam.serialize()); sim.log(`SLAM map saved (${sim.slam.tiles.size} tiles, ${sim.slam.routes.length} routes)`, 'ok'); } catch (e) { sim.log('Map save failed: ' + e.message, 'err'); } },
+    async loadMap() { try { const d = await DB.get('map'); if (d && sim.slam.deserialize(d)) sim.log(`Remembered SLAM map loaded: ${d.tiles.length} tiles, ${d.routes.length} proven routes (saved ${new Date(d.savedAt).toLocaleString()})`, 'ok'); else sim.log('No saved map for this world', 'warn'); } catch (e) { sim.log('Map load failed: ' + e.message, 'err'); } },
+  };
+  const controls = new OrbitControls(camera, canvas);
+  controls.enableDamping = true; controls.dampingFactor = 0.08; controls.maxPolarAngle = Math.PI * 0.495; controls.minDistance = 6; controls.maxDistance = 1800;
+  camera.position.set(p0.x - p0.fwd.x * 32 + 14, p0.y + 13, p0.z - p0.fwd.z * 32 + 10);
+  controls.target.set(p0.x, p0.y - 1, p0.z);
+  const lastTarget = new THREE.Vector3().copy(controls.target);
+  // low-rate onboard feed: small render target + full-screen quad (tone-mapped like the main view)
+  const feedRT = new THREE.WebGLRenderTarget(480, 360, { type: THREE.HalfFloatType }); feedRT.ready = false;
+  const feedScene = new THREE.Scene(), feedCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  feedScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshBasicMaterial({ map: feedRT.texture, toneMapped: true, depthTest: false, depthWrite: false })));
+  const roverCam = new THREE.PerspectiveCamera(ROVER.camera.hFovDeg / (4 / 3), 4 / 3, 0.2, 6000);
+  function onViewChange() {
+    const p = sim.rover.pose();
+    controls.enabled = ui.view !== 'cam';
+    if (ui.view === 'top') { camera.position.set(p.x, p.y + 320, p.z + 1); controls.target.set(p.x, p.y, p.z); }
+    if (ui.view === 'chase') { camera.position.set(p.x - p.fwd.x * 34, p.y + 12, p.z - p.fwd.z * 34); controls.target.set(p.x, p.y - 1, p.z); }
+    lastTarget.copy(controls.target);
+  }
+
+  const hud = new HUD(sim, ui);
+  sim.on('routes', () => { overlay.setRoutes(sim.slam.routes); ui.saveMap(); });
+  sim.on('path', () => overlay.setPath(sim.autonomy.path));
+  sim.on('scan', (s) => { if (ui.overlays.lidar && lidar.points.visible) lidar.set(s, sim.rover.pose().y); });
+
+  // double-click on the ground: autonomous drive to that point
+  const rc = new THREE.Raycaster(), mouse = new THREE.Vector2();
+  canvas.addEventListener('dblclick', (e) => {
+    mouse.set(e.clientX / window.innerWidth * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
+    rc.setFromCamera(mouse, camera);
+    const hit = rc.intersectObjects(terrainMesh.group.children.filter((m) => m.visible), false)[0];
+    if (!hit) return;
+    // goals are given in the rover's SLAM frame: apply its current estimate offset
+    const p = sim.rover.pose(), est = sim.slam.est;
+    const gx = hit.point.x + (est.x - p.x), gz = hit.point.z + (est.z - p.z);
+    hud.exec(`goto ${gx.toFixed(1)} ${gz.toFixed(1)}`);
+  });
+
+  // ---------------- manual driving: keyboard + gamepad ----------------
+  const keys = new Set();
+  const drive = { thr: 0, steer: 0, crab: 0 };
+  window.addEventListener('keydown', (e) => {
+    if (document.activeElement && document.activeElement.id === 'cmd') return;
+    const k = e.key.toLowerCase();
+    if (k === 'escape') { sim.emergencyStop('keyboard (Esc)'); e.preventDefault(); return; }
+    if (k === 'enter') { document.getElementById('cmd').focus(); e.preventDefault(); return; }
+    keys.add(k);
+    if (k === '1') ui.steerMode = 'ackermann'; if (k === '2') ui.steerMode = 'crab'; if (k === '3') ui.steerMode = 'pivot';
+    if (k === 'c') { const v = ['chase', 'orbit', 'top', 'cam', 'free']; ui.setView(v[(v.indexOf(ui.view) + 1) % v.length]); }
+    if (k === 'v') { ui.overlays.lidar = !ui.overlays.lidar; }
+    if (k === 'p') sim.paused = !sim.paused;
+    if (k === 'h' || k === '?') hud.toggleHelp();
+    if (k === 'g') { const L = sim.rover.lift; const r = L.clamp === 'open' ? sim.rover.clampClose() : sim.rover.clampOpen(); sim.log(r.ok ? sim.rover.lift.msg : 'Refused: ' + r.why, r.ok ? 'ok' : 'warn'); }
+    if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+  });
+  window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
+  // HUD buttons must not keep keyboard focus (Space/Enter would re-trigger them while driving)
+  document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('button, select'); if (b && b.tagName === 'BUTTON') b.blur(); }, true);
+  canvas.addEventListener('pointerdown', () => { if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur(); });
+  window.addEventListener('blur', () => keys.clear());
+
+  function manualInput(dt) {
+    const R = sim.rover, A = sim.autonomy;
+    const has = (...k) => k.some((x) => keys.has(x));
+    let thrIn = (has('w', 'arrowup') ? 1 : 0) - (has('s', 'arrowdown') ? 1 : 0);
+    let steerIn = (has('a', 'arrowleft') ? 1 : 0) - (has('d', 'arrowright') ? 1 : 0);
+    let crabIn = (has('q') ? -1 : 0) + (has('e') ? 1 : 0);
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (const gp of pads) {
+      if (!gp) continue;
+      const dz = (v) => (Math.abs(v) < 0.12 ? 0 : v);
+      if (dz(gp.axes[1])) thrIn = -gp.axes[1]; if (dz(gp.axes[0])) steerIn = -gp.axes[0]; if (gp.axes.length > 2 && dz(gp.axes[2])) crabIn = gp.axes[2];
+      if (gp.buttons[1]?.pressed) sim.emergencyStop('gamepad');
+    }
+    const active = thrIn || steerIn || crabIn;
+    if (active && A.mode === 'AUTO') A.override();
+    if (A.mode === 'AUTO' || ui.manualHold) { drive.thr = drive.steer = drive.crab = 0; if (!active) return; ui.manualHold = false; }
+    const precise = keys.has('shift') ? 0.3 : 1;
+    const ramp = (cur, tgt, up, down) => { const r = Math.abs(tgt) > Math.abs(cur) && Math.sign(tgt || 1) === Math.sign(cur || tgt || 1) ? up : down; return cur + Math.max(-r * dt, Math.min(r * dt, tgt - cur)); };
+    drive.thr = ramp(drive.thr, thrIn * precise, 0.5, 1.2);
+    drive.steer = ramp(drive.steer, steerIn, 1.5, 2.5);
+    drive.crab = ramp(drive.crab, crabIn * precise, 0.8, 1.5);
+    if (!R.powered || R.estop) { R.cmd.vx = R.cmd.vz = R.cmd.wz = 0; return; }
+    const vmax = R.speedCap();
+    if (active && R.brake && !keys.has(' ')) { R.brake = false; }
+    if (keys.has(' ')) { R.brake = true; drive.thr = drive.crab = 0; }
+    // skid steer: steering is a yaw rate. Moving: curvature steering (R >= 12 m loaded). Stopped: slow point turn
+    // (never loaded - the wheels would dig ruts with the CoM 6.8 m up).
+    const vx = drive.thr * vmax;
+    const kmax = R.loaded ? 1 / 20 : 1 / 8;
+    let wz = Math.abs(vx) > 0.15 ? vx * drive.steer * kmax : (R.loaded ? 0 : drive.steer * 0.25 * precise);
+    R.previewK = null;
+    // turbo is only offered while driving straight at full throttle
+    R.turboOk = drive.thr > 0.9 && Math.abs(drive.steer) < 0.05 && !R.loaded;
+    R.cmd.vx = vx; R.cmd.vz = 0; R.cmd.wz = wz;
+    // ride height: R / F raise / lower (kneel -0.65 .. carry +0.82 m)
+    const L = R.lift;
+    if (keys.has('r')) L.target = Math.min(ROVER.ride.max, L.pos + 0.1);
+    if (keys.has('f')) L.target = Math.max(ROVER.ride.kneel, L.pos - 0.1);
+  }
+
+  // ---------------- remembered map (teach & repeat survives reloads) ----------------
+  if (new URLSearchParams(location.search).has('fresh')) { await DB.wipe(); history.replaceState(null, '', location.pathname); sim.log('Fresh start requested (?fresh): stored map erased', 'warn'); }
+  try { const d = await DB.get('map'); if (d && sim.slam.deserialize(d)) { sim.log(`Remembered SLAM map loaded: ${d.tiles.length} tiles, ${d.routes.length} proven route(s). The rover will reuse routes that worked.`, 'ok'); overlay.setRoutes(sim.slam.routes); } else sim.log('No stored map: the rover will explore and learn the route on its first trip (no pre-mapped path).', 'info'); } catch (e) { /* private mode */ }
+  setInterval(() => ui.saveMap(), 120000);
+  window.addEventListener('beforeunload', () => { if (ui.noSave) return; try { DB.put('map', sim.slam.serialize()); } catch (e) { /* ignore */ } });
+
+  S.csmRegister(scene);
+  // Adaptive quality: 'auto' walks down this ladder when the frame rate sags and back up when there is headroom
+  const LADDER = [['high', 1], ['high', 0.85], ['medium', 0.85], ['medium', 0.7], ['low', 0.7], ['low', 0.55]];
+  let rung = 0, auto = false, slowT = 0, fastT = 0, ema = 1 / 60, simBudget = 20, camEvery = 1;
+  function applyRung(r) {
+    rung = Math.max(0, Math.min(LADDER.length - 1, r)); const [q, sc] = LADDER[rung];
+    S.setQuality(q, sc);
+    simBudget = rung >= 4 ? 10 : rung >= 2 ? 14 : 20;   // ms of physics per frame
+    camEvery = rung >= 4 ? 4 : rung >= 2 ? 3 : rung >= 1 ? 2 : 1; // onboard-camera refresh divisor
+  }
+  ui.setQuality = (q) => {
+    auto = q === 'auto'; ui.quality = q; slowT = fastT = 0;
+    if (auto) { if (rung === 0 || rung === undefined) applyRung(startRung()); else applyRung(rung); } else { S.setQuality(q, 1); simBudget = 20; camEvery = 1; rung = 0; }
+    try { localStorage.setItem('aegis-quality', q); } catch (e) { /* ignore */ }
+    sim.log(`Graphics quality: ${q}`);
+  };
+  // first guess from the hardware; the governor corrects it within a few seconds
+  function startRung() {
+    let weak = 0;
+    const cores = navigator.hardwareConcurrency || 4, mem = navigator.deviceMemory || 4;
+    if (cores <= 4) weak++; if (mem <= 4) weak++;
+    try { const gl = renderer.getContext(), ext = gl.getExtension('WEBGL_debug_renderer_info'); const r = ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)) : '';
+      if (/Intel|Mali|Adreno|PowerVR|SwiftShader|llvmpipe|Microsoft Basic/i.test(r) && !/Arc|Iris Xe/i.test(r)) weak += 2; } catch (e) { /* ignore */ }
+    if (/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)) weak += 2;
+    return weak >= 3 ? 3 : weak >= 2 ? 1 : 0;
+  }
+  { let q = 'auto'; try { q = localStorage.getItem('aegis-quality') || 'auto'; } catch (e) { /* ignore */ } ui.setQuality(q); ui.quality = q; }
+  sim.log('Type "help" for commands, H for controls. Try: mission cycle  |  W/A/S/D to drive  |  Esc = E-STOP', 'info');
+  await step(100, 'Ready');
+  document.getElementById('loading').style.display = 'none';
+
+  // ---------------- frame loop ----------------
+  const clock = new THREE.Clock();
+  let frame = 0;
+  const tmp = new THREE.Vector3();
+  function loop() {
+    requestAnimationFrame(loop);
+    const rawDt = clock.getDelta();
+    const dt = Math.min(rawDt, 0.1);
+    if (auto && !document.hidden && rawDt < 0.25) {   // ignore tab-switch stalls
+      ema += (rawDt - ema) * 0.08;
+      if (ema > 1 / 42) { slowT += rawDt; fastT = 0; } else if (ema < 1 / 56) { fastT += rawDt; slowT = 0; } else { slowT = fastT = 0; }
+      if (slowT > 1.5 && rung < LADDER.length - 1) { applyRung(rung + 1); slowT = 0; ema = 1 / 50; }
+      else if (fastT > 12 && rung > 0) { applyRung(rung - 1); fastT = 0; ema = 1 / 50; }
+    }
+    manualInput(dt);
+    const steps = sim.advance(dt, simBudget);
+    const simDt = steps * (1 / 120);
+    const R = sim.rover, p = R.pose();
+    roverModel.update(R, sim.time);
+    { const sc = sim.scout; scoutVis.visible = true; scoutVis.position.set(sc.x, sc.y, sc.z);
+      scoutVis.rotation.set(0, 0, 0); scoutVis.rotateY(sc.yaw); scoutVis.rotateZ(sc.pitch); scoutVis.rotateX(-sc.roll);
+      scoutTag.visible = sc.enabled; if (scoutVis.userData.lidar) scoutVis.userData.lidar.rotation.z = sim.time * 40;
+      if (sc.lastScan && ui.overlays.lidar && sc.enabled) { scoutCloud.geometry.setAttribute('position', new THREE.Float32BufferAttribute(sc.lastScan, 3)); scoutCloud.visible = true; sc.lastScan = null; }
+      if (!sc.enabled || !ui.overlays.lidar) scoutCloud.visible = false; }
+    for (const v of cargoVis) {
+      const cad = v.g.userData.cad; if (cad && cad.userData.xray !== ui.overlays.xray) { cad.userData.setXray(ui.overlays.xray); v.g.traverse((o) => { if (o.userData.xrayable) { o.material = o.material.clone(); o.material.transparent = true; o.material.opacity = ui.overlays.xray ? 0.15 : 1; o.material.depthWrite = !ui.overlays.xray; } }); }
+      const t = v.c.body.translation(), r = v.c.body.rotation();
+      v.g.position.set(t.x, t.y, t.z); v.g.quaternion.set(r.x, r.y, r.z, r.w);
+      if (v.c.hatchOpen && v.g.userData.hatch) v.g.userData.hatch.scale.setScalar(Math.max(0.02, v.g.userData.hatch.scale.x - dt * 0.4));
+    }
+    updateJacks();
+    for (const pv of hab.portVis) {
+      pv.bellows.scale.z = 1 + (pv.port.occupied ? 2.5 : 0);
+      pv.status.material.emissive.setHex(pv.port.hatchOpen ? 0x33ff88 : pv.port.occupied ? 0xffa31a : sim.autonomy.faults.port[pv.port.id] ? 0xff2010 : 0x3d9bff);
+      if (pv.port.hatchOpen) pv.door.scale.setScalar(Math.max(0.02, pv.door.scale.x - dt * 0.4));
+    }
+    if (ui.overlays.dust && simDt > 0) { dust.emit(R, simDt); dust.update(simDt); }
+    dust.points.visible = ui.overlays.dust;
+    if (simDt > 0) tracks.update(R);
+    lidar.points.visible = ui.overlays.lidar;
+    overlay.pathLine.visible = ui.overlays.path && !!sim.autonomy.gen;
+    overlay.routeGroup.visible = ui.overlays.routes;
+    fences.visible = ui.overlays.fences;
+    if (frame % 6 === 0) overlay.setArcs(sim.autonomy.local.last, sim.slam.est, ui.overlays.arcs && sim.autonomy.mode === 'AUTO');
+    overlay.setGoal(sim.autonomy.gen ? sim.autonomy.goal : null);
+
+    // camera follow
+    const target = tmp.set(p.x, p.y - 1, p.z);
+    if (ui.view === 'chase') {
+      const want = new THREE.Vector3(p.x - p.fwd.x * 30, p.y + 11, p.z - p.fwd.z * 30);
+      const d = target.clone().sub(lastTarget); camera.position.add(d);
+      camera.position.lerp(want, 1 - Math.exp(-dt * 0.8));
+      controls.target.copy(target);
+    } else if (ui.view === 'orbit' || ui.view === 'top') {
+      const d = target.clone().sub(lastTarget); camera.position.add(d); controls.target.add(d);
+    }
+    lastTarget.copy(target);
+    if (ui.view === 'cam') {
+      const cp = sim.sensors.cameraPose();
+      camera.position.copy(cp.pos); camera.quaternion.copy(cp.q).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2));
+      camera.fov = 52;
+    } else controls.update();
+    if (!(camera.aspect > 0)) camera.aspect = 16 / 9;
+    camera.updateProjectionMatrix();
+
+    // shadows follow the area of interest
+    const focus = ui.view === 'cam' ? new THREE.Vector3(p.x, p.y, p.z) : controls.target;
+    S.sun.position.copy(focus).addScaledVector(sim.sunDir, 400); S.sun.target.position.copy(focus);
+    S.sky.position.copy(camera.position);
+    if (frame % 4 === 0) terrainMesh.update(camera.position, 6);
+    if (frame % 10 === 0) pebbles.update(ui.view === 'cam' ? p : controls.target);
+
+    if (frame % 90 === 0) S.csmRegister(scene);
+    S.csm.update(); S.csmGuard(); S.shadowSchedule(frame);
+    renderer.shadowMap.autoUpdate = true;
+    S.composer.render();
+    // onboard camera feed (scissored into the HUD frame)
+    const rect = hud.camRect();
+    if (rect && ui.view !== 'cam') {
+      const H = window.innerHeight;
+      const redraw = camEvery <= 1 || frame % camEvery === 0 || !feedRT.ready;
+      if (camEvery <= 1) {
+        // full rate: straight into the HUD frame (scissored)
+        const cp = sim.sensors.cameraPose();
+        roverCam.position.copy(cp.pos); roverCam.quaternion.copy(cp.q).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2));
+        roverCam.updateMatrixWorld();
+        renderer.shadowMap.autoUpdate = false;
+        renderer.setScissorTest(true);
+        renderer.setScissor(rect.left, H - rect.bottom, rect.width, rect.height); renderer.setViewport(rect.left, H - rect.bottom, rect.width, rect.height);
+        const vis = lidar.points.visible; lidar.points.visible = false;
+        renderer.autoClear = true; renderer.render(scene, roverCam);
+        lidar.points.visible = vis;
+        renderer.setScissorTest(false); renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
+      } else {
+        // reduced rate: render the onboard feed into a small target every few frames, blit it every frame
+        if (redraw) {
+          const cp = sim.sensors.cameraPose();
+          roverCam.position.copy(cp.pos); roverCam.quaternion.copy(cp.q).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2));
+          roverCam.updateMatrixWorld();
+          const vis = lidar.points.visible; lidar.points.visible = false;
+          renderer.shadowMap.autoUpdate = false;
+          renderer.setRenderTarget(feedRT); renderer.autoClear = true; renderer.render(scene, roverCam); renderer.setRenderTarget(null);
+          lidar.points.visible = vis; feedRT.ready = true;
+        }
+        renderer.setScissorTest(true);
+        renderer.setScissor(rect.left, H - rect.bottom, rect.width, rect.height); renderer.setViewport(rect.left, H - rect.bottom, rect.width, rect.height);
+        renderer.autoClear = false; renderer.render(feedScene, feedCam); renderer.autoClear = true;
+        renderer.setScissorTest(false); renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
+      }
+    }
+    hud.update(dt);
+    frame++;
+  }
+  loop();
+  window.sim = sim; window.app = { camera, controls, ui, scene, renderer, applyRung: (r) => { auto = false; applyRung(r); } }; // for debugging in the browser console
+}
+
+main().catch((e) => { console.error(e); loadMsg.textContent = 'Error: ' + e.message; loadMsg.style.color = '#ff4d3a'; });
