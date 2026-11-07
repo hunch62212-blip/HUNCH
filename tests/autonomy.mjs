@@ -1,4 +1,8 @@
-// Headless autonomy run: full logistics cycle (Mission 6) at max speed, no rendering.
+// Headless autonomy run at max speed, no rendering. Modes: m1 (leave landing zone), m2 (approach),
+// m3 (approach + pickup), cycle (Mission 6 full logistics cycle).
+// Pass: mission finished (not timed out) and reported OK; m2/m3 end with the rover under / holding the module;
+// cycle delivers every cargo item that starts at the pad.
+import { check, equal } from './lib/check.mjs';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { Sim } from '../src/sim/sim.js';
 await RAPIER.init();
@@ -22,3 +26,8 @@ while (A.gen && sim.time < maxSim) {
 console.log('SUMMARY', JSON.stringify(A.summary()), 'history', JSON.stringify(A.history));
 console.log('routes', sim.slam.routes.map((r) => `${r.id} ${r.from}->${r.to} ${r.length.toFixed(0)}m`).join(', '));
 console.log('wall s', (Date.now() - t0) / 1000, 'sim s', sim.time.toFixed(0));
+const last = A.history[A.history.length - 1];
+check(`${which}: mission finished before ${maxSim} s sim cap`, !A.gen, `sim ${sim.time.toFixed(0)} s`);
+check(`${which}: mission reported OK`, !!(last && last.ok), last ? `ok=${last.ok}` : 'no mission record');
+if (which === 'm3') check('m3: cargo held', R.loaded, `cargo state ${sim.cargo[0].state}`);
+if (which === 'cycle') equal('cycle: deliveries', A.summary().deliveries ?? last?.deliveries, sim.cargo.length);

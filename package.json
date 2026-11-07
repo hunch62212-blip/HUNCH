@@ -8,11 +8,14 @@
     "dev": "vite --host 127.0.0.1 --port 5173",
     "build": "vite build",
     "preview": "vite preview --port 5173",
-    "test:physics": "node tests/headless.mjs",
-    "test:rocks": "node tests/rock_climb.mjs",
-    "test:dock": "node tests/dock.mjs 0 && node tests/dock.mjs 1",
-    "test:faults": "node tests/faults.mjs",
-    "test:cycle": "node tests/autonomy.mjs cycle 12000"
+    "test": "node tests/run-all.mjs",
+    "test:quick": "node tests/run-all.mjs --quick",
+    "test:long": "node tests/run-all.mjs m3 drift faults nav_bench cycle",
+    "test:physics": "node tests/run-all.mjs physics",
+    "test:rocks": "node tests/run-all.mjs rocks",
+    "test:dock": "node tests/run-all.mjs dock_cyl40 dock_box20",
+    "test:faults": "node tests/run-all.mjs faults",
+    "test:cycle": "node tests/run-all.mjs cycle"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.14.0",

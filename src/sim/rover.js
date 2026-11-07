@@ -652,13 +652,13 @@ export class Rover {
     const steerW = this.bogies.reduce((a, b) => a + (Math.abs(b.steerTarget - b.steer) > 0.002 ? 120 : 8), 0);
     P.driveW = driveW;
     P.loadW = hotel + driveW + lifting + clampW + steerW;
-    P.netW = P.solarW - P.loadW;
+    P.netW = P.solarW + (P.dockW || 0) - P.loadW;
     const dWh = P.netW * dt / 3600;
     P.wh = Math.max(0, Math.min(BAT.capacityWh, P.wh + dWh));
     if (P.netW < 0) P.energyUsedWh += -dWh; else P.energyGenWh += dWh;
     if (driveW < 0) P.regenWh += -driveW * dt / 3600;
     P.soc = P.wh / BAT.capacityWh;
-    P.voltage = BAT.nominalV * (0.9 + 0.15 * P.soc) - (P.loadW - P.solarW) / BAT.nominalV * BAT.internalR;
+    P.voltage = BAT.nominalV * (0.9 + 0.15 * P.soc) - (P.loadW - P.solarW - (P.dockW || 0)) / BAT.nominalV * BAT.internalR;
     if (P.soc <= 0.005 && this.powered) { this.powered = false; this.sim.log('BATTERY DEPLETED - safe mode', 'err'); }
   }
 

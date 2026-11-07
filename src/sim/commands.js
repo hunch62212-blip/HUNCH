@@ -21,12 +21,14 @@ export const HELP = [
   ['timescale <x> | pause', 'simulation speed (1-50x) / pause toggle'],
   ['lidar on|off | lidar channels <n> | lidar res <n>', 'LiDAR power / resolution'],
   ['camera on|off', 'camera power'],
-  ['fault block|lidar|camera|comms|battery <%>|wheel <1-8>|shift|port <1|2>', 'Mission 10 fault injection'],
+  ['fault block|lidar|camera|comms|battery <%>|wheel <1-6>|shift|port <1|2>', 'Mission 10 fault injection'],
   ['clear faults | clear port <n>', 'remove faults'],
   ['map clear|save|load|forget | routes', 'SLAM map & route memory (forget = erase the stored copy too)'],
   ['plan | priority <A|B> <category>', 'Mission 11 logistics plan / set request category'],
   ['reserve <%>', 'battery reserve that triggers solar recharge'],
   ['sun <az> <el>', 'sun azimuth / elevation in degrees'],
+  ['charge [%] | dock status', 'drive to the solar power dock and charge (default 95 %) / dock power report'],
+  ['day | night | lunar on|off [minutes per lunar day]', 'sun up / sun down / run the lunar day-night cycle'],
   ['view chase|orbit|top|cam|free', 'camera view'],
   ['restricted on|off', 'enforce geofenced zones in the planner'],
   ['scout on|off|recall|status', 'Mission 9: SCOUT-1 tracked robot maps the route ahead of AEGIS-V1'],
@@ -52,6 +54,7 @@ export function runCommand(sim, ui, line) {
     const n = (name || '').toLowerCase();
     const P = sim.terrain.pad, H = sim.terrain.hab;
     if (n === 'pad') return { x: WORLD.pad.x - P.dir.x * 45, z: WORLD.pad.z - P.dir.z * 45, name: 'landing pad' };
+    if (n === 'dock') { const L = sim.powerDock.layout; return { ...L.entry, name: 'power dock' }; }
     if (n === 'staging') return { ...P.staging, name: 'staging area' };
     if (n === 'hab') return { x: WORLD.habitat.x + H.nx * 45, z: WORLD.habitat.z + H.nz * 45, name: 'habitat apron' };
     if (n === 'port1' || n === 'port2') { const p = sim.ports[n === 'port1' ? 0 : 1]; return { x: p.x + H.nx * 35, z: p.z + H.nz * 35, name: p.name + ' approach' }; }
@@ -187,6 +190,25 @@ export function runCommand(sim, ui, line) {
       m.category = cat; say(`${m.id} category -> ${cat}`, 'ok'); break;
     }
     case 'reserve': A.reserveSoc = Math.max(0.05, Math.min(0.8, num(a[0], 20) / 100)); say(`Battery reserve ${(A.reserveSoc * 100).toFixed(0)}%`, 'ok'); break;
+    case 'charge': {
+      const tgt = Math.max(0.3, Math.min(1, num(a[0], 95) / 100));
+      if (A.gen) A.abort('charge');
+      A.start(`Charge at power dock to ${(tgt * 100).toFixed(0)}%`, A.missionCharge(tgt));
+      break;
+    }
+    case 'dock': {
+      const D = sim.powerDock;
+      say(`POWER DOCK ${D.status} | bank ${(D.soc * 100).toFixed(1)}% (${(D.bankWh / 1e6).toFixed(2)} MWh) | solar ${(D.solarW / 1000).toFixed(1)} kW | dock load ${(D.loadW / 1000).toFixed(1)} kW | to rover ${(D.chargeW / 1000).toFixed(0)} kW | night endurance ${D.nightHours().toFixed(0)} h (lunar night 354 h)`);
+      break;
+    }
+    case 'day': sim.lunar.on = false; sim.setSun(sim.sunAz, 9); say('Sun up (el 9 deg)', 'ok'); break;
+    case 'night': sim.lunar.on = false; sim.setSun(sim.sunAz, -6); say('Lunar night: sun below the horizon, dock bank supplying', 'ok'); break;
+    case 'lunar': {
+      const on = (a[0] || 'on').toLowerCase() !== 'off';
+      sim.lunar.on = on; if (a[1]) sim.lunar.periodS = Math.max(60, num(a[1], 15) * 60);
+      say(on ? `Lunar day/night cycle ON: one lunar day = ${(sim.lunar.periodS / 60).toFixed(0)} sim min` : 'Lunar cycle OFF', 'ok');
+      break;
+    }
     case 'sun': sim.setSun(num(a[0], sim.sunAz), num(a[1], sim.sunEl)); say(`Sun az ${sim.sunAz} el ${sim.sunEl}`, 'ok'); break;
     case 'view': ui.setView?.((a[0] || 'chase').toLowerCase()); break;
     case 'scout': {

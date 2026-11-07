@@ -154,6 +154,12 @@ export function createScene(canvas) {
     updateEnv(dir);
     for (const l of csm.lights) l.intensity = dir.y > 0 ? 5.2 : 0;
     bounce.position.set(-dir.x * 100, 30, -dir.z * 100); bounce.target.position.set(0, 0, 0);
+    // lunar night: no sunlight or regolith bounce, only earthshine (Earth near full when the site is dark)
+    const day = THREE.MathUtils.smoothstep(dir.y, -0.03, 0.03);
+    fill.intensity = 0.16 * day + 0.42 * (1 - day); fill.color.setHex(day > 0.5 ? 0x9fb3d6 : 0x7f9cd8);
+    bounce.intensity = 0.3 * day;
+    renderer.toneMappingExposure = 1.05 + 0.9 * (1 - day);
+    if (sky.userData.stars) sky.userData.stars.material.opacity = 0.55 + 0.4 * (1 - day);
   }
   function resize() {
     if (!(window.innerWidth > 0 && window.innerHeight > 0)) return; // minimised / hidden: keep last valid size

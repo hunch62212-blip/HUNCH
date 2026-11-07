@@ -1,5 +1,5 @@
 import RAPIER from '@dimforge/rapier3d-compat';
-import { Sim } from '../src/sim/sim.js';
+import { Sim } from '../../src/sim/sim.js';
 await RAPIER.init();
 const sim = new Sim(RAPIER); const A = sim.autonomy, R = sim.rover;
 sim.on('log', (e) => console.log(`[${(e.t / 60).toFixed(2)}] ${e.level} ${e.msg}`));

@@ -1,5 +1,5 @@
-import { generateTerrain, heightAt } from '../src/sim/terrain.js';
-import { WORLD } from '../src/sim/config.js';
+import { generateTerrain, heightAt } from '../../src/sim/terrain.js';
+import { WORLD } from '../../src/sim/config.js';
 const t = generateTerrain();
 // slope map at 4 m scale (rover footprint ~10 m): max slope over 8 m baseline
 const N = 512, S = 4, H = 1024;

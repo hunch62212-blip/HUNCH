@@ -1,5 +1,5 @@
-// Loads the team's own procedural Three.js models (copied from Hunch/nasa-llaso-cad/js into
-// public/team/js) unchanged. They are classic scripts that expect a global THREE (r128 era), so we
+// Loads the team's own procedural Three.js models (copied into public/team/js from the
+// team's CAD repository) unchanged. They are classic scripts that expect a global THREE (r128 era), so we
 // expose this app's Three.js as window.THREE and load them in dependency order.
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';

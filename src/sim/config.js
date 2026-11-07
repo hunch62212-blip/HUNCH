@@ -1,14 +1,22 @@
 // Engineering constants for the LLASO-P2-XPORT-2026 simulation.
 // Units are SI throughout (m, kg, s, N, W, rad). Body frame: +X forward, +Y up, +Z right.
+//
+// Provenance tags used on each group below:
+//   [CAD]     team design files in public/team/js/ (1:16.3 prototype), scaled 1:1 by K
+//   [WONG]    J.Y. Wong, Theory of Ground Vehicles; Apollo soil mechanics (Carrier, Mitchell)
+//   [PHYS]    standard physical constant
+//   [ASSUMED] engineering estimate or sim tuning value, not traced to a source; treat as open
 
+// [PHYS] lunar surface gravity and mean radius; solar constant at 1 AU.
 export const MOON = {
   g: 1.62,                 // m/s^2, lunar surface gravity
   radius: 1737400,         // m, used for horizon curvature in the far terrain
   solarConstant: 1361,     // W/m^2 at 1 AU, no atmosphere
 };
 
-// Lunar regolith terramechanics, Bekker-Wong / Janosi-Hanamoto parameters.
+// [WONG] Lunar regolith terramechanics, Bekker-Wong / Janosi-Hanamoto parameters (n, kc, kphi, c, phi, K).
 // Source values: Wong, "Theory of Ground Vehicles"; Apollo soil mechanics (Carrier, Mitchell).
+// bulk: [ASSUMED] near-surface value in the range Carrier et al. report for the top 15 cm.
 export const REGOLITH = {
   n: 1.0,                  // sinkage exponent
   kc: 1400,                // N/m^(n+1) cohesive modulus
@@ -19,6 +27,8 @@ export const REGOLITH = {
   bulk: 1500,              // kg/m^3, near-surface bulk density
 };
 
+// [ASSUMED] procedural site. Pad-habitat separation set to ~2 km per the LLASO-P2 storyboard; seed, plume
+// and blast radii are sim choices.
 export const WORLD = {
   size: 2048,              // m, square physics terrain, centred on origin
   res: 1,                  // m, heightfield cell size
@@ -30,9 +40,16 @@ export const WORLD = {
   blastCoreRadius: 32,     // m, no-go core (pad surface + lander)
 };
 
-// AEGIS-V1 (the team's design, Hunch/nasa-llaso-cad/js/fusion_rover.js + rocker_bogie.js + module_carry.js +
-// suspension.js + body_control.js) at full scale. The team's module is built at 1:16.3 (0.747 m model of the
-// 12.192 m / 40 ft module), so every dimension of the prototype is multiplied by K.
+// AEGIS-V1 (the team's design: public/team/js/fusion_rover.js + rocker_bogie.js + module_carry.js; the
+// suspension.js and body_control.js files the strut model follows are not in this repo) at full scale. The team's
+// module is built at 1:16.3 (0.747 m model of the 12.192 m / 40 ft module), so every prototype dimension is x K.
+// Provenance by field:
+//   [CAD]     corners, frame, wheel radius/width, ride set points, seatY, ringX, lidar/camera mounts, motor rpm
+//             (rocker_bogie.js GEO, module_carry.js CRADLE, lidar_mount.js, rover_bom.js; dims x K, rpm / sqrt(K))
+//   [ASSUMED] sprungMass, unsprungMassPerBogie, comLocal, inertia, tyre/suspension stiffness and damping,
+//             motor torque/gains/thermal, speedLimitLoaded, accel limits, battery, hotel loads, lift rates,
+//             lidar channels/range/noise, camera FOV/range. Full-scale masses are NOT the BOM mass x K^3.
+//   [ASSUMED] solar = 0 panels: charging is at the dock station (dock_station.js); no on-board array.
 export const K = 12.192 / 0.747; // 16.32
 const k = (v) => +(v * K).toFixed(3);
 export const ROVER = {
@@ -80,14 +97,16 @@ export const ROVER = {
   battery: { capacityWh: 420000, nominalV: 400, internalR: 0.02 },
   solar: { panelArea: 0, panels: 0, efficiency: 0.30, mastHeight: 0 }, // charged at the AEGIS garage (dock_station.js)
   avionicsW: 900, heaterW: 600, lidarW: 22, cameraW: 6, commsW: 90,
-  lift: { travel: 0, rate: 0.25, capacityN: 60000, stageMax: 0, stageRate: 0, lateralMax: 0, jawS: 6 },
+  lift: { travel: 0, rate: 0.5, capacityN: 60000, stageMax: 0, stageRate: 0, lateralMax: 0, jawS: 2.5 },
   // one LiDAR (front deck corner, lidar_mount.js unit FS) and one camera on the avionics pod
   lidar: { mountLocal: { x: k(0.25), y: k(0.266), z: -k(0.15) }, channels: 16, vFovDeg: [-30, 10], tiltDeg: -10, hRes: 180, range: 90, rateHz: 5, noise: 0.02 },
   camera: { mountLocal: { x: k(0.275), y: k(0.29), z: 0 }, hFovDeg: 70, pitchDeg: -12, range: 70 },
   climbMax: 0.85 * k(0.065), // edge height a driven 2.1 m wheel can roll up
 };
 
-// Cargo catalogue (Mission 8). The 40 ft module is the team's module_models.js / module_carry.js design at 1:1.
+// Cargo catalogue (Mission 8).
+// cyl40: [CAD] module_models.js / module_carry.js geometry x K; mass [ASSUMED].
+// box20: [ASSUMED] ISO 668 20-ft external dimensions (6.06 x 2.44 x 2.59 m); mass, sled and lug layout are sim choices.
 export const CARGO_TYPES = {
   cyl40: {
     label: '40-ft cargo module (team design, 12.19 x 7.96 m)', shape: 'cylinder',
@@ -104,7 +123,8 @@ export const CARGO_TYPES = {
   },
 };
 
-// Docking interface: the module's berthing ring meets the supply-building port at the carried axis height
+// Docking interface: the module's berthing ring meets the supply-building port at the carried axis height.
+// portCenterH derived from [CAD] values; opening, vestibule and force limits [ASSUMED].
 export const DOCK = {
   portCenterH: +(ROVER.seatY + CARGO_TYPES.cyl40.radius + ROVER.ride.carry).toFixed(3),
   openingD: 2.0,
@@ -112,6 +132,21 @@ export const DOCK = {
   maxPushN: 6000, softCaptureN: 900,
 };
 
+// AEGIS power dock beside the supply building (positions in the habitat frame: u along the building face,
+// v out from it toward the pad). Sized for the lunar night: ~354 h with zero solar input.
+//  - night survival load (vault heaters + avionics) 2.2 kW x 354 h = 0.78 MWh
+//  - plus 6 full rover recharges per night (6 x 0.42 MWh / 0.95) = 2.65 MWh  ->  bank 4.0 MWh with 15 % floor
+//  - arrays: 4 vertical sun-tracking masts x 120 m^2, 30 % cells -> ~196 kW at a low polar sun; refills the
+//    bank in ~1 day and still covers a 350 kW fast-charge with the bank's help.
+export const POWER_DOCK = {
+  padT: 44, padV: 22, couplerTol: 3.0,
+  arrays: [[60, 8], [60, 28], [70, 12], [70, 32]], arrayArea: 120, efficiency: 0.30, mastH: 22, panelW: 8, panelH: 15,
+  bank: { w: 14, d: 7, h: 4.2 }, bankWh: 4.0e6, bankFloor: 0.15, bankEff: 0.95, bankMaxDischargeW: 400000,
+  chargeMaxW: 350000, chargerEff: 0.95,
+  hotelW: 700, nightHeaterW: 1500, dayHeaterW: 200,
+};
+
+// [ASSUMED] integrator step (120 Hz) and catch-up limit; collision-group bitmasks are code conventions.
 export const PHYS = { dt: 1 / 120, maxSubSteps: 40 };
 
 export const GROUPS = { TERRAIN: 1, ROCK: 2, STRUCT: 4, ROVER: 8, CARGO: 16 };

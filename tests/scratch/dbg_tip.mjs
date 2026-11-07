@@ -1,6 +1,6 @@
 import RAPIER from '@dimforge/rapier3d-compat';
-import { Sim } from '../src/sim/sim.js';
-import { heightAt } from '../src/sim/terrain.js';
+import { Sim } from '../../src/sim/sim.js';
+import { heightAt } from '../../src/sim/terrain.js';
 await RAPIER.init();
 const sim = new Sim(RAPIER); const A = sim.autonomy, R = sim.rover;
 A.start('cycle', A.missionCycle());

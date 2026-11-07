@@ -1,4 +1,7 @@
 // Ground-truth pickup geometry check: rover aligned behind module, kneel, drive straight under, rise, clamp.
+// Pass: grapple check OK after rising, clamps locked, cargo held, loaded tip margin >= 25 deg
+// (autonomy slow-down limit) and every wheel in ground contact while stationary.
+import { check, atLeast, equal } from './lib/check.mjs';
 import RAPIER from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';
 import { Sim } from '../src/sim/sim.js';
@@ -32,11 +35,16 @@ console.log('under: rel', rel().toArray().map((v) => v.toFixed(3)), 'check', JSO
 const y0 = c.body.translation().y;
 R.lift.target = ROVER.ride.carry; run(8);
 console.log('lifted by', (c.body.translation().y - y0).toFixed(3), JSON.stringify(R.grappleCheck(), (k, v) => (k === 'c' ? undefined : v)));
-console.log(R.clampClose()); run(7); console.log('clamp', R.lift.clamp, R.lift.msg);
+const gc = R.grappleCheck(); check('grapple check OK after rising under the module', gc.ok, gc.ok ? `dx ${gc.dx.toFixed(3)} m, seatErr ${gc.seatErr.toFixed(3)} m` : gc.why);
+console.log(JSON.stringify(R.clampClose(), (k, v) => (k === 'c' ? undefined : v))); run(7); console.log('clamp', R.lift.clamp, R.lift.msg);
+equal('ring clamps locked', R.lift.clamp, 'closed');
 R.cmd.vx = 0; run(1); console.log('carry v', R.telemetry().fwdSpeed.toFixed(2), 'margin', R.telemetry().margin.toFixed(1), 'cargo state', c.state);
 if (!process.env.TRACE) { let mn = 99, worst = null; R.cmd.vx = 0; run(4);
   for (const [vx, wz, t] of [[0.5, 0, 6], [0, 0, 3], [0.5, 0.04, 6], [0, 0, 3], [-0.4, 0, 5], [0, 0, 3]]) { R.cmd.vx = vx; R.cmd.wz = wz; run(t, () => { if (R.tilt.margin < mn) { mn = R.tilt.margin; worst = { vx, wz, contacts: R.wheels.map((w) => w.contact ? 1 : 0).join(''), loads: R.wheels.map((w) => (w.load / 1000).toFixed(1)).join(' '), com: R.comWorld.clone().sub(new THREE.Vector3(R.pose().x, R.pose().y, R.pose().z)).toArray().map((v) => v.toFixed(2)) }; } }); }
-  console.log('stability min margin', mn.toFixed(1), JSON.stringify(worst)); }
+  console.log('stability min margin', mn.toFixed(1), JSON.stringify(worst));
+  equal('cargo state after pickup', c.state, 'held');
+  atLeast('loaded tip margin, start/stop/turn/reverse (autonomy slow-down limit)', mn, 25, ' deg', 1);
+  check('all wheels in contact at worst-margin instant', worst && !worst.contacts.includes('0'), `contacts ${worst ? worst.contacts : '-'} (want all 1)`); }
 if (process.env.TRACE) { let k = 0; R.cmd.vx = 0; R.cmd.wz = 0; console.log('--- trace after stability');
   for (const [vx, t] of [[0, 4], [0.5, 6], [0, 6], [-0.4, 5], [0, 5]]) { R.cmd.vx = vx; run(t, () => { if (k++ % 60 === 0) { const tl = R.telemetry(); console.log(`vx ${vx} v ${tl.fwdSpeed.toFixed(2)} pitch ${(tl.pitch * 57.3).toFixed(1)} roll ${(tl.roll * 57.3).toFixed(1)} margin ${R.tilt.margin.toFixed(1)} L ${R.bogies.map((b) => b.L.toFixed(2)).join(' ')} load ${R.wheels.map((w) => (w.load / 1000).toFixed(1)).join(' ')} ride ${R.lift.pos.toFixed(2)}`); } }); } }
 

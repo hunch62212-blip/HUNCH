@@ -1,4 +1,4 @@
-// AEGIS-V1 renderer: the team's own procedural model (Hunch/nasa-llaso-cad/js, loaded unchanged by teamModels.js)
+// AEGIS-V1 renderer: the team's own procedural model (public/team/js, loaded unchanged by teamModels.js)
 // scaled 1:K to full size and driven by the physics. The six wheels follow the rocker-bogie linkage
 // (rocker angle + two bogie angles solved from the wheel heights), the tyres spin with the motors,
 // the air struts show the ride height (kneel / drive / carry) and the ring jaws close on the module.

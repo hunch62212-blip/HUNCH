@@ -11,6 +11,7 @@ import { AegisModel, buildTeamCargo, buildTeamStands } from './render/aegis.js';
 import { loadTeamModels } from './render/teamModels.js';
 import { Dust, Tracks, LidarCloud, PathOverlay, Pebbles } from './render/effects.js';
 import { HUD } from './ui/hud.js';
+import { PowerDockModel } from './render/powerDock.js';
 import { trackedRoverCAD } from './render/cadModels.js';
 import { labelTexture } from './render/props.js';
 
@@ -47,6 +48,7 @@ async function main() {
   scene.add(buildLander(sim.terrain));
   const hab = buildHabitat(sim.terrain, sim.ports);
   scene.add(hab.root);
+  const powerDockVis = new PowerDockModel(scene, sim);
   await step(74, 'Loading the team AEGIS-V1, module and stand models…');
   const TM = await loadTeamModels();
   scene.add(await buildTeamStands(sim.cargo, heightAt, sim.terrain));
@@ -270,6 +272,7 @@ async function main() {
     const simDt = steps * (1 / 120);
     const R = sim.rover, p = R.pose();
     roverModel.update(R, sim.time);
+    powerDockVis.update(dt);
     { const sc = sim.scout; scoutVis.visible = true; scoutVis.position.set(sc.x, sc.y, sc.z);
       scoutVis.rotation.set(0, 0, 0); scoutVis.rotateY(sc.yaw); scoutVis.rotateZ(sc.pitch); scoutVis.rotateX(-sc.roll);
       scoutTag.visible = sc.enabled; if (scoutVis.userData.lidar) scoutVis.userData.lidar.rotation.z = sim.time * 40;

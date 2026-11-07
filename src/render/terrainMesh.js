@@ -30,6 +30,11 @@ export function regolithMaterial() {
         float ls = 2.0 * mu0 / (mu0 + mu + 1e-4);
         float k = (mu0 > 1e-3) ? clamp(ls / max(mu0, 1e-3), 0.6, 2.2) : 1.0;
         reflectedLight.directDiffuse *= mix(1.0, k, 0.55);
+        // opposition surge (Hapke shadow-hiding): regolith brightens sharply toward zero phase angle,
+        // the bright halo around the rover's own shadow seen in every Apollo surface photo
+        float cosG = dot(normalize(vViewPosition), Ld);
+        float g = acos(clamp(cosG, -1.0, 1.0));
+        reflectedLight.directDiffuse *= 1.0 + 0.85 * exp(-g / 0.10) + 0.25 * exp(-g / 0.5);
       }`);
   };
   return mat;

@@ -2,7 +2,7 @@
 // generator one step, so mission scripts read like the procedure they implement.
 // All decisions use estimated (SLAM) state and sensor measurements, never ground truth.
 import * as THREE from 'three';
-import { ROVER, WORLD, DOCK, MOON } from './config.js';
+import { ROVER, WORLD, DOCK, MOON, POWER_DOCK } from './config.js';
 import { Planner, LocalPlanner } from './planner.js';
 
 const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
@@ -191,17 +191,64 @@ export class Autonomy {
   *checkPower(label) {
     const R = this.sim.rover;
     if (R.power.soc >= this.reserveSoc) return;
-    this.log(`Low battery (${(R.power.soc * 100).toFixed(0)}%): parking to recharge before ${label}`, 'warn');
-    this.phase = 'Solar recharge';
-    while (R.power.soc < this.reserveSoc + 0.15) {
-      this.stop(); R.brake = true;
-      this.detail = `SoC ${(R.power.soc * 100).toFixed(1)}%  solar ${(R.power.solarW / 1000).toFixed(2)} kW`;
-      if (R.power.solarW < 100) { this.detail += ' (in shadow - operator: move to sunlight)'; }
+    this.log(`Low battery (${(R.power.soc * 100).toFixed(0)}%): going to the power dock before ${label}`, 'warn');
+    const r = yield* this.chargeAtDock(0.9);
+    if (r && r.ok === false) {
+      // dock unreachable: fall back to waiting (rover has no arrays of its own)
+      this.phase = 'Waiting for power';
+      while (R.power.soc < this.reserveSoc + 0.15 && !(R.power.dockW > 0)) { this.stop(); R.brake = true; this.detail = `SoC ${(R.power.soc * 100).toFixed(1)}%: power dock unreachable (${r.why}), operator assistance required`; yield; }
+      R.brake = false;
+    }
+  }
+
+  // Drive onto the power dock pad, kneel onto the underbody coupler and charge (CC-CV) to `target` SoC.
+  *chargeAtDock(target = 0.95) {
+    const R = this.sim.rover, PD = this.sim.powerDock, L = PD.layout;
+    if (R.loaded) return { ok: false, why: 'cannot charge while carrying cargo' };
+    // goals are in the SLAM frame: add the current estimate offset
+    const off = () => { const p = R.pose(), e = this.est(); return { x: e.x - p.x, z: e.z - p.z }; };
+    this.phase = 'Power dock: approach';
+    let o = off();
+    let r = yield* this.navTo({ x: L.entry.x + o.x, z: L.entry.z + o.z, name: 'power dock entry', tol: 2.0, yaw: L.yaw, yawTol: 3 * DEG });
+    if (r && r.ok === false) return r;
+    this.phase = 'Power dock: line up';
+    yield* this.alignYaw(Math.atan2(-((L.pad.z + o.z) - this.est().z), (L.pad.x + o.x) - this.est().x), 1.5 * DEG);
+    this.phase = 'Power dock: drive onto pad';
+    let t0 = this.sim.time;
+    while (this.sim.time - t0 < 90) {
+      o = off();
+      const rel = this.relBody({ x: L.pad.x + o.x, z: L.pad.z + o.z });
+      if (rel.f < 0.2) break;
+      const v = clamp(rel.f * 0.3, 0.12, 1.2);
+      this.cmd(v, 0, v * clamp(-0.4 * Math.atan2(rel.r, Math.max(2, rel.f)), -1 / 8, 1 / 8));
+      this.detail = `onto charge pad: ${rel.f.toFixed(1)} m, lateral ${rel.r.toFixed(2)} m`;
       yield;
     }
+    this.stop(); R.brake = true;
+    for (let i = 0; i < 30; i++) yield;
+    this.phase = 'Power dock: couple';
+    R.lift.target = ROVER.ride.kneel;
+    t0 = this.sim.time;
+    while (!PD.connected && this.sim.time - t0 < 20) { this.stop(); this.detail = `kneeling onto coupler: ride ${R.lift.pos.toFixed(2)} m`; yield; }
+    if (!PD.connected) { R.lift.target = 0; R.brake = false; this.log('Power dock: coupler did not engage (not centred on the pad)', 'warn'); return { ok: false, why: 'coupler did not engage' }; }
+    this.phase = 'Power dock: charging';
+    const s0 = R.power.soc, ts = this.sim.time;
+    while (R.power.soc < target && PD.connected) {
+      this.stop();
+      const rem = (target - R.power.soc) * ROVER.battery.capacityWh / Math.max(1, PD.chargeW);
+      this.detail = `SoC ${(R.power.soc * 100).toFixed(1)}% -> ${(target * 100).toFixed(0)}% @ ${(PD.chargeW / 1000).toFixed(0)} kW | bank ${(PD.soc * 100).toFixed(1)}% | solar ${(PD.solarW / 1000).toFixed(0)} kW | ~${(rem * 60).toFixed(0)} min left`;
+      if (!(PD.chargeW > 0) && PD.soc <= POWER_DOCK.bankFloor) this.detail += ' (bank at floor: waiting for sunrise)';
+      yield;
+    }
+    this.log(`Charged ${(s0 * 100).toFixed(0)}% -> ${(R.power.soc * 100).toFixed(0)}% in ${((this.sim.time - ts) / 60).toFixed(1)} min (bank ${(PD.soc * 100).toFixed(0)}%)`, 'ok');
+    this.phase = 'Power dock: undock';
+    R.lift.target = 0;
+    while (Math.abs(R.lift.pos) > 0.02) { this.stop(); this.detail = 'rising off the coupler'; yield; }
     R.brake = false;
-    this.log('Recharged, continuing', 'ok');
+    yield* this.backUp(18);
+    return { ok: true };
   }
+  *missionCharge(target = 0.95) { return yield* this.chargeAtDock(target); }
 
   *alignYaw(yaw, tol = 1.2 * DEG) {
     const R = this.sim.rover;
@@ -211,8 +258,8 @@ export class Autonomy {
       const err = wrap(yaw - e.yaw);
       if (Math.abs(err) < tol && Math.abs(this.sensors.imu.yawRate) < 0.004) break;
       const wmax = R.loaded ? 0.07 : 0.11;
-      const w = clamp(err * 0.4, -wmax, wmax);
-      this.cmd(0, 0, Math.abs(w) < 0.006 ? Math.sign(w) * 0.006 : w);
+      const w = clamp(err * 0.9, -wmax, wmax);
+      this.cmd(0, 0, Math.abs(w) < 0.012 ? Math.sign(w) * 0.012 : w);
       this.detail = `pivot turn: heading error ${(err / DEG).toFixed(1)} deg`;
       // stall: steering is set but the gyro sees no rotation -> something is blocking the sweep
       const steerDone = R.bogies.every((b) => Math.abs(b.steerTarget - b.steer) < 0.02);
@@ -479,7 +526,7 @@ export class Autonomy {
     const t0 = this.sim.time;
     while (Math.hypot(this.est().x - s0.x, this.est().z - s0.z) < dist && this.sim.time - t0 < 60) {
       if (!this.rearClear(this.est())) { this.stop(); this.log('Reverse stopped: obstacle behind the vehicle', 'warn'); break; }
-      this.cmd(-0.3, 0, 0); this.detail = 'recovery: reversing (rear strip clear)'; yield;
+      this.cmd(-0.6, 0, 0); this.detail = 'recovery: reversing (rear strip clear)'; yield;
     }
     this.stop();
     this.phase = phase0;
@@ -521,7 +568,7 @@ export class Autonomy {
       this.slam.lcSuspended = true; // the scene around the cargo is about to change (we move it)
       this.phase = `M2 Locate ${c.id} (fiducials)`;
       let t0 = this.sim.time;
-      while (this.sim.time - t0 < 3) { this.stop(); this.detail = `cargo estimate from ${this.cargoGuess(c).src}`; yield; }
+      while (this.sim.time - t0 < 1.5) { this.stop(); this.detail = `cargo estimate from ${this.cargoGuess(c).src}`; yield; }
       g = this.cargoGuess(c);
       if (g.src === 'manifest') this.log(`${c.id}: no fiducial fix yet, using lander offload report`, 'warn');
       else this.detail = `cargo fix +-${Math.sqrt(g.varP).toFixed(2)} m, +-${(Math.sqrt(g.varY) / DEG).toFixed(2)} deg`;
@@ -533,9 +580,9 @@ export class Autonomy {
         yield* this.alignYaw(Math.atan2(-(p1.z - e.z), p1.x - e.x), 2 * DEG);
         const t1 = this.sim.time;
         while (this.sim.time - t1 < 120) {
-          const rel = this.relBody(p1);
+          const rel = this.relBody(pre(this.cargoGuess(c), 12)); // re-aim as the fiducial fix sharpens
           if (rel.f < 0.15) break;
-          this.cmd(clamp(rel.f * 0.25, 0.08, 0.6), 0, clamp(-Math.atan2(rel.r, Math.max(1, rel.f)) * 0.5, -0.05, 0.05));
+          this.cmd(clamp(rel.f * 0.4, 0.15, 1.0), 0, clamp(-Math.atan2(rel.r, Math.max(1, rel.f)) * 0.6, -0.08, 0.08));
           this.detail = `lining up on the module axis (${rel.f.toFixed(1)} m)`;
           yield;
         }
@@ -562,10 +609,10 @@ export class Autonomy {
         if (Math.abs(along) < 0.12 && Math.abs(lat) < 0.15 && Math.abs(yawErr) < 1.5 * DEG) { ok = true; break; }
         if (along < -0.5) break; // overshoot
         if (!(cass && cass.valid) && along < -aft + ROVER.frame.halfLen - carry + 0.5 && Math.abs(lat) > 0.25) { this.log(`${c.id}: lateral ${lat.toFixed(2)} m at the module end (post clearance 0.45 m)`, 'warn'); break; }
-        const v = along > 8 ? 0.45 : along > 2 ? 0.18 : clamp(along * 0.1, 0.02, 0.08);
+        const v = Math.min(along > 8 ? 0.9 : along > 2 ? 0.4 : clamp(along * 0.2, 0.04, 0.2), Math.abs(lat) > 0.12 ? 0.25 : 9); // slow while correcting lateral
         // skid-steer line following: head toward the axis, then along it
         // curvature steering (yaw rate scales with speed, so a skid-steer creep never scrubs in place)
-        const kap = clamp(0.25 * (yawErr - Math.atan(0.35 * lat)), -1 / 12, 1 / 12);
+        const kap = clamp(0.35 * (yawErr - Math.atan(0.6 * lat)), -1 / 6, 1 / 6);
         this.cmd(v, 0, v * kap);
         this.detail = `[${src}] along ${along.toFixed(2)} m  lat ${(lat * 100).toFixed(1)} cm  yaw ${(yawErr / DEG).toFixed(2)} deg`;
         yield;
@@ -589,7 +636,7 @@ export class Autonomy {
       if (!res.ok) { this.log(`Clamp attempt ${attempt} refused: ${res.why}`, 'warn'); yield* waitRide(this, RD.kneel, 'kneeling'); yield* this.backUp(-aft + ROVER.frame.halfLen + 4); continue; }
       while (R.lift.clamp === 'closing') { this.detail = `ring jaws closing ${(R.lift.clampT * 100).toFixed(0)}%  (lugs ${lifted.toFixed(2)} m above the notches)`; yield; }
       if (R.lift.clamp !== 'closed') { this.log(`Clamp attempt ${attempt} failed: ${R.lift.msg}`, 'warn'); while (R.lift.clamp === 'opening') yield; continue; }
-      yield* this.wait(2, 'verifying load path');
+      yield* this.wait(0.5, 'verifying load path');
       c.state = 'held';
       // the module is now part of the vehicle: forget its footprint in the terrain map
       { const e2 = this.est(); const half = (T.adapterR || T.radius) + 0.4;
@@ -684,7 +731,7 @@ export class Autonomy {
         }
         if (along < 1.2 && Math.abs(lat) > 0.06) { bad = true; break; }
         if (along < 0.35) break;
-        const vx = along > 10 ? 0.5 : clamp((along - 0.3) * 0.08, 0.03, 0.35);
+        const vx = along > 10 ? 1.0 : clamp((along - 0.3) * 0.15, 0.05, 0.6);
         const kap = clamp(0.25 * (yawErr - Math.atan(0.5 * lat)), -1 / 12, 1 / 12);
         this.cmd(vx, 0, vx * kap);
         this.detail = `[${src}] range ${along.toFixed(2)} m  lat ${(lat * 100).toFixed(1)} cm  yaw ${(yawErr / DEG).toFixed(2)} deg  ride ${R.lift.pos.toFixed(2)} m`;
@@ -703,7 +750,7 @@ export class Autonomy {
         const f = this.sim.cargoForces.get(c);
         contactF = f ? f.port : 0;
         const vAligned = Math.abs(R.lift.pos - R.lift.target) < 0.01 && Math.abs(ring.vertical) < 0.015;
-        const v = contactF > DOCK.maxPushN ? -0.01 : !vAligned ? 0 : ring.along > 0.1 ? 0.03 : 0.01;
+        const v = contactF > DOCK.maxPushN ? -0.01 : !vAligned ? 0 : ring.along > 0.1 ? 0.06 : 0.02;
         this.cmd(v, 0, Math.abs(v) * clamp(-0.25 * Math.atan(0.5 * ring.lateral), -1 / 12, 1 / 12));
         this.detail = `gap ${ring.along.toFixed(3)} m | lat ${(ring.lateral * 1000).toFixed(1)} mm | vert ${(ring.vertical * 1000).toFixed(1)} mm | contact ${contactF.toFixed(0)} N`;
         if (ring.along < 0.015 && contactF > DOCK.softCaptureN) { captured = true; break; }
@@ -722,13 +769,13 @@ export class Autonomy {
     this.log(`SOFT CAPTURE ${port.name}: lateral ${acc.lateralMm.toFixed(1)} mm, vertical ${acc.verticalMm.toFixed(1)} mm, yaw ${acc.yawDeg.toFixed(2)} deg`, 'ok');
     // berthing sequence: pressure boundary sealed before the module hatch opens
     const steps = [
-      ['Hard capture: latches retract, seal compressed 30 mm', 4],
-      ['Dust-exclusion coupling: bellows seal inflating', 6],
-      ['Electrodynamic dust shield + CO2 purge of interface', 8],
-      ['Leak check: vestibule pressure-decay test', 10],
-      ['Equalising vestibule to 70.3 kPa', 8],
-      ['Receiving cradle jacks extending under module', 6],
-      ['Module hatch opening', 5],
+      ['Hard capture: latches retract, seal compressed 30 mm', 1.5],
+      ['Dust-exclusion coupling: bellows seal inflating', 2],
+      ['Electrodynamic dust shield + CO2 purge of interface', 2.5],
+      ['Leak check: vestibule pressure-decay test', 3],
+      ['Equalising vestibule to 70.3 kPa', 3],
+      ['Receiving cradle jacks extending under module', 2.5],
+      ['Module hatch opening', 2],
     ];
     this.docking = { port, cargo: c, step: 0, steps: steps.map((s) => s[0]), pressure: 0, leakRate: 0 };
     for (let i = 0; i < steps.length; i++) {

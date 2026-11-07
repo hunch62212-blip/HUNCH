@@ -1,5 +1,7 @@
 // Pickup timing: rover placed 30 m behind the module on its axis, then the autonomous acquire sequence.
 // Prints the sim time spent in each phase so pick-up speed changes can be measured.
+// Pass: cargo held at the end, within the 1500 s sim cap.
+import { check, equal } from './lib/check.mjs';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { Sim } from '../src/sim/sim.js';
 import { ROVER } from '../src/sim/config.js';
@@ -25,4 +27,5 @@ while (A.gen && sim.time - t0 < 1500) {
 if (ph) phases.set(ph, (phases.get(ph) || 0) + sim.time - phT);
 for (const [k, v] of phases) console.log(`  ${k.padEnd(40)} ${v.toFixed(1)} s`);
 console.log(`PICKUP ${R.loaded ? 'OK' : 'FAILED'} in ${(sim.time - t0).toFixed(1)} s sim, cargo state ${c.state}`);
-process.exit(R.loaded ? 0 : 1);
+check(`autonomous pickup of ${c.id} (${c.type}) completes`, R.loaded, `${(sim.time - t0).toFixed(1)} s sim (cap 1500 s)`);
+equal('cargo state', c.state, 'held');

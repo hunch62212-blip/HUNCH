@@ -70,7 +70,8 @@ export class HUD {
       </div>
       <div class="bar"><i id="bSoc"></i></div>
       <div class="kv">
-        <span class="k">Solar in / load</span><span class="v" id="vPow">0</span>
+        <span class="k">Dock charge / load</span><span class="v" id="vPow">0</span>
+        <span class="k">Power dock</span><span class="v" id="vDock">-</span>
         <span class="k">Drive power</span><span class="v" id="vDrive">0</span>
         <span class="k">Odometer / energy</span><span class="v" id="vOdo">0</span>
         <span class="k">Payload</span><span class="v" id="vLoad">none</span>
@@ -114,7 +115,7 @@ export class HUD {
         <button class="btn" data-m="5" title="Deliver & place (dock)">M5 Deliver</button>
         <button class="btn on" data-m="6" title="Full logistics cycle">M6 Full cycle</button>
       </div>
-      <div class="btnrow" style="margin-top:6px"><button class="btn" id="resumeBtn">resume</button><button class="btn danger" id="abortBtn">abort</button><button class="btn" data-c="goto hab">goto hab</button><button class="btn" data-c="goto pad">goto pad</button></div>
+      <div class="btnrow" style="margin-top:6px"><button class="btn" id="resumeBtn">resume</button><button class="btn danger" id="abortBtn">abort</button><button class="btn" data-c="goto hab">goto hab</button><button class="btn" data-c="goto pad">goto pad</button><button class="btn" data-c="charge">charge</button><button class="btn" data-c="lunar on">lunar cycle</button><button class="btn" data-c="night">night</button><button class="btn" data-c="day">day</button></div>
       <div class="sect"><div class="t">M9 · SCOUT-1 (team tracked rover)</div>
         <div class="btnrow"><button class="btn" data-c="scout on">deploy</button><button class="btn" data-c="scout recall">recall</button><button class="btn" data-c="scout off">park</button></div>
         <div class="small mono" id="scoutBox" style="margin-top:4px">parked</div></div>
@@ -172,14 +173,14 @@ export class HUD {
     $('#mapLoad').addEventListener('click', () => this.exec('map load'));
     $('#mapClear').addEventListener('click', () => this.exec('map clear'));
     const download = (name, text, type) => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); };
-    $('#csvBtn').addEventListener('click', () => { download(`span40_telemetry_${Math.round(sim.time)}s.csv`, sim.telemetry.csv(), 'text/csv'); sim.log(`Telemetry exported (${sim.telemetry.rows.length} rows @ 1 Hz)`, 'ok'); });
+    $('#csvBtn').addEventListener('click', () => { download(`aegis-v1_telemetry_${Math.round(sim.time)}s.csv`, sim.telemetry.csv(), 'text/csv'); sim.log(`Telemetry exported (${sim.telemetry.rows.length} rows @ 1 Hz)`, 'ok'); });
     $('#repBtn').addEventListener('click', () => {
       const A = sim.autonomy, R = sim.rover;
       const rep = { generated: new Date().toISOString(), sim_time_s: sim.time, vehicle: 'AEGIS-V1', missions: A.history, current: A.summary(), docking_accuracy: A.metrics.accuracy,
         routes: sim.slam.routes.map((r) => ({ id: r.id, from: r.from, to: r.to, length_m: r.length, time_s: r.time, energy_Wh: r.energyWh, uses: r.uses })),
         odometer_m: R.odo.dist, energy_used_Wh: R.power.energyUsedWh, energy_generated_Wh: R.power.energyGenWh, min_tip_margin_deg: R.stats.minMargin,
         manifest: A.manifest.map((m) => ({ id: m.id, category: m.category, port: m.port, status: m.status })), scout: { odometer_m: sim.scout.odo, mapped_cells: sim.scout.cellsMapped } };
-      download(`span40_mission_report_${Math.round(sim.time)}s.json`, JSON.stringify(rep, null, 2), 'application/json');
+      download(`aegis-v1_mission_report_${Math.round(sim.time)}s.json`, JSON.stringify(rep, null, 2), 'application/json');
       sim.log('Mission report exported', 'ok');
     });
     this.mapCanvas.addEventListener('wheel', (e) => { e.preventDefault(); this.mapZoom = Math.max(0.12, Math.min(12, this.mapZoom * (e.deltaY < 0 ? 1.2 : 1 / 1.2))); }, { passive: false });
@@ -255,7 +256,8 @@ export class HUD {
     const mb = $('#bMargin'); mb.style.width = Math.max(0, Math.min(100, tl.margin / 50 * 100)) + '%'; mb.style.background = tl.margin < 15 ? 'var(--err)' : tl.margin < 25 ? 'var(--warn)' : 'var(--ok)';
     $('#vSoc').textContent = `${fmt(R.power.soc * 100, 1)} %  (${fmt(R.power.wh / 1000, 1)} kWh, ${fmt(R.power.voltage, 0)} V)`;
     const sb = $('#bSoc'); sb.style.width = R.power.soc * 100 + '%'; sb.style.background = R.power.soc < A.reserveSoc ? 'var(--err)' : R.power.soc < 0.4 ? 'var(--warn)' : 'var(--ok)';
-    $('#vPow').textContent = `${fmt(R.power.solarW / 1000, 2)} / ${fmt(R.power.loadW / 1000, 2)} kW${R.power.sunlit ? '' : ' (shadow)'}`;
+    $('#vPow').textContent = `${fmt((R.power.dockW || 0) / 1000, 1)} / ${fmt(R.power.loadW / 1000, 2)} kW`;
+    { const D = sim.powerDock; $('#vDock').textContent = `bank ${fmt(D.soc * 100, 0)}% · sun ${fmt(D.solarW / 1000, 0)} kW · ${D.status}`; }
     $('#vDrive').textContent = `${fmt(R.power.driveW / 1000, 2)} kW  regen ${fmt(R.power.regenWh, 1)} Wh`;
     $('#vOdo').textContent = `${fmt(R.odo.dist / 1000, 3)} km / ${fmt(R.power.energyUsedWh / 1000, 2)} kWh`;
     $('#vLoad').textContent = R.loaded ? `${R.lift.cargo.id} ${(R.lift.cargo.T.mass / 1000).toFixed(0)} t (${(R.lift.cargo.T.mass * MOON.g / 1000).toFixed(1)} kN)` : 'none';

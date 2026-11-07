@@ -9,6 +9,7 @@ import { Autonomy } from './autonomy.js';
 import { heightAt } from './terrain.js';
 import { Scout } from './scout.js';
 import { Telemetry } from './telemetry.js';
+import { PowerDock } from './powerDock.js';
 
 export class Sim {
   constructor(RAPIER, opts = {}) {
@@ -42,6 +43,9 @@ export class Sim {
     this.addModule(this.autonomy);
     this.scout = new Scout(this);
     this.addModule(this.scout);
+    this.powerDock = new PowerDock(this);
+    this.addModule(this.powerDock);
+    this.lunar = { on: false, periodS: 900, phase: 0.25, _t: 0 }; // demo lunar day/night cycle (off = fixed sun)
     this.telemetry = new Telemetry(this);
     this.addModule(this.telemetry);
     this.startup = null;
@@ -49,6 +53,7 @@ export class Sim {
   }
 
   setSun(azDeg, elDeg) {
+    if (!this.lunar?.on) this.sunAz0 = azDeg;
     this.sunAz = azDeg; this.sunEl = elDeg;
     const a = azDeg * Math.PI / 180, e = elDeg * Math.PI / 180;
     this.sunDir.set(Math.cos(e) * Math.cos(a), Math.sin(e), -Math.cos(e) * Math.sin(a)).normalize();
@@ -189,7 +194,7 @@ export class Sim {
       case 'camera': this.sensors.faults.camera = true; this.log('FAULT: camera / fiducial pipeline failed', 'err'); break;
       case 'comms': A.faults.comms = true; this.log('FAULT: comms loss with base. Rover continues autonomously; operator commands queued (E-STOP link independent).', 'err'); break;
       case 'battery': { const s = Math.max(0.01, Math.min(1, (arg ?? 15) / 100)); R.power.wh = s * ROVER.battery.capacityWh; R.power.soc = s; this.log(`FAULT: battery state of charge forced to ${(s * 100).toFixed(0)}%`, 'err'); break; }
-      case 'wheel': { const n = Math.max(1, Math.min(8, arg ?? 3)); R.wheels[n - 1].fault = 'motor'; this.log(`FAULT: wheel ${n} motor controller failed (wheel free-rolls). Torque redistributed to 7 wheels, speed derated 30%.`, 'err'); break; }
+      case 'wheel': { const N = R.wheels.length, n = Math.max(1, Math.min(N, arg ?? 3)); R.wheels[n - 1].fault = 'motor'; this.log(`FAULT: wheel ${n} motor controller failed (wheel free-rolls). Torque redistributed to ${N - 1} wheels, speed derated 25% (autonomy.js).`, 'err'); break; }
       case 'shift': {
         if (!R.loaded) { this.log('No cargo to shift', 'warn'); return; }
         R.lift.base.z += 0.11; R.lift.shifted = true;
@@ -223,6 +228,10 @@ export class Sim {
       if (!this._shiftT) { this._shiftT = this.time; this.log('Cradle re-centring cargo (lateral actuator)', 'warn'); }
       L.base.z += Math.max(-0.01 * dt, Math.min(0.01 * dt, -L.base.z * 0.5));
       if (Math.abs(L.base.z) < 0.01) { L.shifted = false; this._shiftT = 0; this.log('Cargo re-centred, load path nominal', 'ok'); }
+    }
+    if (this.lunar.on) {
+      const Ln = this.lunar; Ln.phase = (Ln.phase + dt / Ln.periodS) % 1; Ln._t -= dt;
+      if (Ln._t <= 0) { Ln._t = 1; this.setSun((this.sunAz0 ?? 205) + Ln.phase * 360, 10 * Math.sin(Ln.phase * 2 * Math.PI) - 1); }
     }
     this._streamT -= dt;
     if (this._streamT <= 0) { this._streamT = 1.0; this.streamRocks([this.rover.pose()]); }
