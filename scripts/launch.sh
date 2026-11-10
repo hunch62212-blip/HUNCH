@@ -25,18 +25,13 @@ if [ -z "$want" ] || ! git rev-parse -q --verify "refs/tags/$want" >/dev/null; t
   echo "No such version: '${1:-latest}'. Available:"; tags; exit 1
 fi
 
-tagCommit="$(git rev-list -n 1 "$want")"
-if [ "$tagCommit" = "$(git rev-parse HEAD)" ]; then
-  dir="$REPO"
-  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-    echo "note: running $want from $REPO, which has uncommitted changes on top of it"
-  fi
-else
-  dir="$VERSIONS_DIR/$want"
-  if [ ! -d "$dir" ]; then
-    mkdir -p "$VERSIONS_DIR"
-    git worktree add --detach "$dir" "$want" >/dev/null
-  fi
+# every version runs from its own clean checkout of the tag, never from this working folder (which may hold
+# unreleased edits); use `npm run dev` to run the working folder itself
+dir="$VERSIONS_DIR/$want"
+if [ ! -d "$dir" ]; then
+  mkdir -p "$VERSIONS_DIR"
+  git worktree prune
+  git worktree add --detach "$dir" "$want" >/dev/null
 fi
 
 # dependencies: install if missing, or if iCloud sync mangled the esbuild binary ("esbuild 3" etc.)
@@ -51,12 +46,12 @@ if [ -n "$pids" ]; then kill $pids; sleep 1; fi
 
 mkdir -p "$LOG_DIR"
 log="$LOG_DIR/$want.log"
-(cd "$dir" && nohup ./node_modules/.bin/vite --host 127.0.0.1 --port $PORT --strictPort >"$log" 2>&1 &)
+(cd "$dir" || exit 1; nohup ./node_modules/.bin/vite --host 127.0.0.1 --port $PORT --strictPort >"$log" 2>&1 </dev/null &)
 
 for _ in $(seq 1 60); do
   if curl -s -o /dev/null -m 2 "$URL"; then
     echo "AEGIS-V1 $want running at $URL (from $dir, log $log)"
-    open "$URL"
+    open "$URL" || echo "(could not open the browser automatically; open $URL)"
     exit 0
   fi
   sleep 1

@@ -9,9 +9,10 @@ bash scripts/launch.sh v1.0.0  # launch a specific older version
 bash scripts/launch.sh list    # list all versions, newest first
 ```
 
-If the latest tag is the commit checked out here, it runs from this folder. Any other version runs from its own git
-worktree in `~/.hunch22-versions/<tag>`, outside iCloud so its `node_modules` stay intact. Every version is served at
-http://127.0.0.1:5173.
+Each version runs from its own clean checkout of its tag (a git worktree in `~/.hunch22-versions/<tag>`), never from
+this working folder, so unreleased edits here never leak into a launch. The checkouts are outside iCloud, so their
+`node_modules` stay intact. Every version is served at http://127.0.0.1:5173, and logs go to
+`~/.hunch22-versions/logs/`. Use `npm run dev` to run the working folder itself.
 
 To add a release: commit, bump `version` in `package.json`, add a row at the top of the table, then
 `git tag -a vX.Y.Z -m "<summary>"`. Bump the minor number (1.1 → 1.2) for features and fixes, and the major number for a
