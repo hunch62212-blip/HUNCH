@@ -11,7 +11,8 @@ R.power.wh = 0.3 * 420000; R.power.soc = 0.3;
 console.log('dock solar kW', (D.solarW / 1000).toFixed(1), 'bank', (D.soc * 100).toFixed(1));
 A.start('charge', A.missionCharge(0.9));
 const t0 = sim.time; let last = 0;
-while (A.gen && sim.time - t0 < 20000) { // 30 -> 90 % at the 60 kW thermal charge limit takes ~4.5 h sim.stepOnce(); if (sim.time - last > 60) { last = sim.time; console.log(`  ${A.phase} | ${A.detail.slice(0, 120)}`); } }
+// 30 -> 90 % at the 60 kW thermal charge limit takes ~4.5 h
+while (A.gen && sim.time - t0 < 20000) { sim.stepOnce(); if (sim.time - last > 60) { last = sim.time; console.log(`  ${A.phase} | ${A.detail.slice(0, 120)}`); } }
 console.log(`CHARGE ${R.power.soc >= 0.89 ? 'OK' : 'FAILED'} soc ${(R.power.soc * 100).toFixed(1)}% in ${((sim.time - t0) / 60).toFixed(1)} min, bank ${(D.soc * 100).toFixed(1)}%`);
 // night endurance check (analytic from the model)
 sim.setSun(sim.sunAz, -6); for (let i = 0; i < 240; i++) sim.stepOnce();
