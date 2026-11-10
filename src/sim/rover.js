@@ -8,11 +8,11 @@
 //    (real contact) and locked by the two ring clamps (module_carry.js)
 //  - battery power bus (charged at the AEGIS garage), motor thermal model
 import * as THREE from 'three';
-import { ROVER, K, MOON, REGOLITH, CARGO_TYPES, GROUPS } from './config.js';
+import { ROVER, K, MOON, REGOLITH, CARGO_TYPES, GROUPS, THERMAL } from './config.js';
 export const VEHICLE = ROVER;
 import { wheelSoil, shearFactor } from './terramechanics.js';
 import { G_ROVER, G_CARGO, G_CARGO_HELD, Q_WHEEL, Q_TERRAIN, yawQuat } from './world.js';
-import { heightAt } from './terrain.js';
+import { heightAt, soilAt } from './terrain.js';
 
 const STRUCT_STAND_COS = Math.cos(40 * Math.PI / 180);
 
@@ -116,7 +116,7 @@ export class Rover {
   // top ground speed allowed right now (m/s): smart-rpm tier, the user speed limit, and the payload limit
   speedCap() {
     const v = this.rpm.wheel * 2 * Math.PI / 60 * ROVER.wheel.radius;
-    return Math.min(v, this.limits.speed, this.loaded ? ROVER.speedLimitLoaded : 99);
+    return Math.min(v, this.limits.speed, this.loaded ? ROVER.speedLimitLoaded : ROVER.speedLimitEmpty);
   }
 
   // Smart rpm: the motors are 300 rpm units capped at 180 for normal work. Turbo (up to 300) is released
@@ -166,7 +166,7 @@ export class Rover {
     const lim = this.speedCap();
     if (Math.abs(vx) > lim) vx = Math.sign(vx) * lim;
     // tip-over governor: lateral acceleration v*w and longitudinal acceleration are limited so the
-    // resultant stays inside the support polygon (loaded CoM ~7.8 m up on a 7 m x 7.7 m footprint)
+    // resultant stays inside the support polygon (loaded CoM ~6.8 m up on a 7.8 m x 7.7 m footprint)
     // dynamic tip margin: the static margin minus the lean the manoeuvre adds (atan(a/g)); keep 8 deg spare
     const mgn = this.tilt.marginF ?? this.tilt.margin;
     const aTip = MOON.g * Math.tan(Math.min(60, Math.max(0.3, mgn - 8)) * Math.PI / 180);
@@ -230,8 +230,17 @@ export class Rover {
         let m = 0;
         for (const b of side) { b._own = S0.k * kr * (b.Lfree + b.level - b.L) - S0.c * kr * b.Ldot; m += b._own; }
         m /= side.length;
-        for (const b of side) b._fs = (1 - RB.diff) * m + RB.diff * b._own;
+        side._m = m;
       }
+      // A rocker-bogie with a differential has no warp (diagonal) stiffness: the body cannot preload one diagonal
+      // pair of corners against the other. The per-corner levelling seats could, and did: parked on flat ground the
+      // wheel loads read 3.1 / 1.5 / 2.0 / 1.7 / 1.5 / 3.2 kN. Remove the warp component of the corner spring forces.
+      { let wf = 0, nw = 0;
+        for (const b of this.bogies) if (b.x !== 0) { wf += Math.sign(b.x) * Math.sign(b.z) * b._own; nw++; }
+        wf /= nw || 1;
+        // only with all four corner wheels on the ground: with one in the air the remaining three need that stiffness
+        if (nw === 4 && this.bogies.every((b) => b.x === 0 || b.wheels[0].contact)) for (const b of this.bogies) if (b.x !== 0) b._own -= Math.sign(b.x) * Math.sign(b.z) * wf; }
+      for (const side of this.sides) for (const b of side) b._fs = (1 - RB.diff) * side._m + RB.diff * b._own;
     }
     for (const b of this.bogies) {
       // hardpoint and its velocity
@@ -308,6 +317,7 @@ export class Rover {
           w.Fx = w.Fy = w.H = w.Rc = 0; w.slip = 0; w.sink *= 0.9;
           w.angle += w.omega * dt;
           driveW += this._motorPower(Tm, w.omega);
+          { const Thub = this.sim.health ? this.sim.health.th.hub[w.id] : 0; w.hubQ = (w.temp - Thub) / M.thermalR; w.temp -= dt * w.hubQ / M.thermalC; }
           continue;
         }
         // ---- contact frame -----------------------------------------------------
@@ -332,7 +342,12 @@ export class Rover {
         // unconditionally stable even when the soil thrust saturates (scrubbing turns, stalls).
         const I = Wp.inertia;
         // contact patch + shear capacity from this step's load and last step's slip (sinkage)
-        const base = wheelSoil(N, Wp.width, D, w.slip, tanA);
+        // local soil (terrain.js soilAt): stiffness, cohesion and friction angle vary from patch to patch
+        const sv2 = soilAt(this.sim.terrain, w.cp.x, w.cp.z, this._soilV || (this._soilV = {}));
+        const soilL = this._soilL || (this._soilL = { ...REGOLITH });
+        soilL.kc = REGOLITH.kc * sv2.k; soilL.kphi = REGOLITH.kphi * sv2.k; soilL.c = REGOLITH.c * sv2.k; soilL.phi = REGOLITH.phi + sv2.dphi;
+        w.soilK = sv2.k;
+        const base = wheelSoil(N, Wp.width, D, w.slip, tanA, soilL);
         const kRatio = base.l / REGOLITH.K;
         const Hof = (om) => { const sl = slipOf(om); return Math.sign(sl) * base.Hmax * shearFactor(Math.abs(sl) * kRatio); };
         const piT = (om) => {
@@ -363,7 +378,7 @@ export class Rover {
         w.torque = Tm;
         w.omega = omNew;
         w.angle += w.omega * dt;
-        const soil = wheelSoil(N, Wp.width, D, slipOf(w.omega), tanA);
+        const soil = wheelSoil(N, Wp.width, D, slipOf(w.omega), tanA, soilL);
         w.slip = slipOf(w.omega);
         w.alpha = Math.atan(tanA);
         w.sink += (soil.z - w.sink) * Math.min(1, dt * 8);
@@ -406,7 +421,12 @@ export class Rover {
         // thermal
         // extraHeat: degraded hub cooling path (health.js 'cool' failure; 0 when healthy)
         const loss = (Tm / M.peakTorque) ** 2 * 380 + Math.abs(Tm * w.omega) * (1 - M.efficiency) + (w.extraHeat || 0);
-        w.temp += dt * (loss - (w.temp + 20) / M.thermalR) / M.thermalC;
+        // No air on the Moon: the winding's only heat path is conduction (M.thermalR, K/W) into the hub mass, which
+        // radiates (health.js _thermal, THERMAL.hub). hubQ is that conducted heat, picked up by the hub model.
+        // (Was a fixed 20 W/K path to a constant -20 C "ambient", i.e. convection.)
+        { const Thub = this.sim.health ? this.sim.health.th.hub[w.id] : 0;
+          w.hubQ = (w.temp - Thub) / M.thermalR;
+          w.temp += dt * (loss - w.hubQ) / M.thermalC; }
         w.dragAccum += Math.abs(vL) * dt;
       }
       // ---- strut / unsprung mass ------------------------------------------------
@@ -630,7 +650,7 @@ export class Rover {
   }
 
   // ring jaws + ride-height control (kneel / ride / carry). L.target is the ride set point (m),
-  // L.pos the actual ride offset; the levelling struts follow it (rate-limited high-flow valves).
+  // L.pos the actual ride offset; the levelling struts follow it (rate-limited roller-screw actuators).
   _liftStep(dt, Q, pos) {
     const L = this.lift, LC = ROVER.lift;
     if (L.clamp === 'closing') {
@@ -694,7 +714,10 @@ export class Rover {
     if (P.netW < 0) P.energyUsedWh += -dWh; else P.energyGenWh += dWh;
     if (driveW < 0) P.regenWh += -driveW * dt / 3600;
     P.soc = P.wh / cap; // state of charge of the strings on line
-    P.voltage = BAT.nominalV * (0.9 + 0.15 * P.soc) - (P.loadW - gen) / BAT.nominalV * BAT.internalR;
+    // internal resistance rises in the cold (THERMAL.coldRperK per K below coldRrefC); health.js uses the same value for I^2 R
+    { const Tb = this.sim.health ? this.sim.health.th.Tb : THERMAL.coldRrefC;
+      P.internalR = BAT.internalR * (1 + THERMAL.coldRperK * Math.max(0, THERMAL.coldRrefC - Tb)); }
+    P.voltage = BAT.nominalV * (0.9 + 0.15 * P.soc) - (P.loadW - gen) / BAT.nominalV * P.internalR;
     if (P.soc <= 0.005 && this.powered) { this.powered = false; this.sim.log('BATTERY DEPLETED - safe mode', 'err'); }
   }
 

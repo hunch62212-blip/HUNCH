@@ -53,12 +53,31 @@ export class PowerDock {
     this._shadowT -= dt;
     if (this._shadowT <= 0) {
       this._shadowT = 2;
-      const a = this.layout.arrays[0], g = heightAt(sim.terrain, a.x, a.z);
-      const o = { x: a.x + sun.x * 4, y: g + D.mastH * 0.7 + sun.y * 4, z: a.z + sun.z * 4 };
-      this.sunlit = sun.y > -0.005 && !sim.world.castRay(new sim.RAPIER.Ray(o, { x: sun.x, y: sun.y, z: sun.z }), 3000, true, undefined, Q_TERRAIN) ? 1 : 0;
+      // lit fraction of every mast: terrain / structure shadow (ray from the panel centre) and the shadow of the masts
+      // sunward of it. A panel wing is panelW wide and panelH tall, facing the sun; a wing d metres up-sun and l metres
+      // off the sun line covers (panelW - |l|) of the width and (panelH - d tan(el)) of the height of the wing behind.
+      const A = this.layout.arrays, hs = Math.hypot(sun.x, sun.z) || 1, sx = sun.x / hs, sz = sun.z / hs, tanEl = Math.max(0, sun.y) / hs;
+      let lit = 0;
+      this.litFrac = A.map((a, i) => {
+        if (sun.y <= -0.005) return 0;
+        const g = heightAt(sim.terrain, a.x, a.z);
+        const o = { x: a.x + sun.x * 6, y: g + D.mastH - D.panelH / 2 + sun.y * 6, z: a.z + sun.z * 6 };
+        if (sim.world.castRay(new sim.RAPIER.Ray(o, { x: sun.x, y: sun.y, z: sun.z }), 3000, true, undefined, Q_TERRAIN)) return 0;
+        let f = 1;
+        for (let j = 0; j < A.length; j++) {
+          if (j === i) continue;
+          const dx = A[j].x - a.x, dz = A[j].z - a.z, d = dx * sx + dz * sz, l = Math.abs(-dx * sz + dz * sx);
+          if (d <= 0) continue;
+          const dy = heightAt(sim.terrain, A[j].x, A[j].z) - g - d * tanEl; // shadow of mast j, vertical offset at mast i
+          const cover = Math.max(0, 1 - l / D.panelW) * Math.max(0, 1 - Math.abs(dy) / D.panelH);
+          f *= 1 - cover;
+        }
+        lit += f; return f;
+      });
+      this.sunlit = lit / A.length;
     }
     const cosI = Math.sqrt(Math.max(0, 1 - sun.y * sun.y)); // panel normal horizontal, pointed at the sun azimuth
-    this.solarW = D.arrays.length * D.arrayArea * D.efficiency * 1361 * cosI * this.sunlit;
+    this.solarW = D.arrays.length * D.arrayArea * D.efficiency * (D.arrayDerate ?? 1) * 1361 * cosI * this.sunlit;
     const night = this.solarW < 500;
     // survival load: avionics + vault thermal control (heaters work hardest at night, ~ -170 C)
     this.loadW = D.hotelW + (night ? D.nightHeaterW : D.dayHeaterW);
@@ -73,17 +92,22 @@ export class PowerDock {
       const s = R.power.soc;
       // CC-CV: full power to 80 %, tapering to zero at 100 % (pack C-rate limited)
       want = s >= 0.999 ? 0 : D.chargeMaxW * (s < 0.8 ? 1 : Math.max(0.08, (1 - s) / 0.2));
+      // cell-temperature limits: no charge below chargeMinCellC (lithium plating; the pack heaters warm it first),
+      // taper to zero between 40 C and the 50 C pack limit
+      const Tb = sim.health ? sim.health.th.Tb : 20;
+      this.coldHold = Tb < (D.chargeMinCellC ?? -99);
+      if (this.coldHold) want = 0; else want *= Math.max(0, Math.min(1, (50 - Tb) / 10));
     }
     const avail = Math.max(0, this.solarW - this.loadW) + (this.bankWh > D.bankWh * D.bankFloor ? D.bankMaxDischargeW : 0);
     this.chargeW = Math.min(want, avail);
     this.netW = this.solarW - this.loadW - this.chargeW / D.chargerEff;
     const cap = D.bankWh;
-    const dWh = (this.netW > 0 ? this.netW * D.bankEff : this.netW) * dt / 3600;
+    const dWh = (this.netW > 0 ? this.netW * D.bankEff : this.netW / D.bankEff) * dt / 3600; // loss on the way in and on the way out
     this.bankWh = Math.max(0, Math.min(cap, this.bankWh + dWh));
     this.genWh += this.solarW * dt / 3600; this.deliveredWh += this.chargeW * dt / 3600;
     R.power.dockW = this.chargeW;
-    this.status = coupled ? (this.chargeW > 0 ? 'CHARGING' : 'ROVER FULL') : onPad ? 'rover on pad (kneel to couple)' : night ? 'NIGHT: bank supplying' : this.bankWh >= cap - 1 ? 'bank full' : 'charging bank';
+    this.status = coupled ? (this.chargeW > 0 ? 'CHARGING' : this.coldHold ? 'HOLD: pack below 0 C, warming' : 'ROVER FULL') : onPad ? 'rover on pad (kneel to couple)' : night ? 'NIGHT: bank supplying' : this.bankWh >= cap - 1 ? 'bank full' : 'charging bank';
   }
   // hours the bank can carry the dock's survival load through a night with no solar input
-  nightHours() { return this.bankWh / (POWER_DOCK.hotelW + POWER_DOCK.nightHeaterW); }
+  nightHours() { return this.bankWh * POWER_DOCK.bankEff / (POWER_DOCK.hotelW + POWER_DOCK.nightHeaterW); }
 }

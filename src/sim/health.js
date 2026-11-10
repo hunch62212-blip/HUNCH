@@ -106,19 +106,28 @@ export const MODES = [
     // the vehicle is stalled against something (common mode), not six wheels seizing at once (v1.3.0: four false
     // "seized" isolations against the building wall left 2 driven wheels and the rover ran away from the port)
     sig: (h, n) => { const w = W(h, n); let turning = 0; for (let m = 1; m <= 6; m++) if (m !== n && Math.abs(h.ch.encW(m)) > 0.15) turning++;
-      return turning >= 3 && h.ch.phaseI(n) > 0.95 && Math.abs(h.ch.encW(n)) < 0.05 && Math.abs(w.target) > 0.3 ? `phase I ${h.ch.phaseI(n).toFixed(2)} pu, resolver ${h.ch.encW(n).toFixed(2)} rad/s, cmd ${w.target.toFixed(2)} rad/s` : null; },
+      // ... and the vehicle itself must be moving (IMU / odometry): a seized wheel is dragged along by the other five.
+      // In a tight loaded skid turn some wheels stall at the current limit while others spin and the vehicle stands
+      // still: that is a traction stall for the navigation recovery, not a failed hub (dock tests, false isolations)
+      const bv = h.sim.rover.body.linvel(), moving = Math.hypot(bv.x, bv.z) > 0.12;
+      return moving && turning >= 3 && h.ch.phaseI(n) > 0.95 && Math.abs(h.ch.encW(n)) < 0.05 && Math.abs(w.target) > 0.3 ? `phase I ${h.ch.phaseI(n).toFixed(2)} pu, resolver ${h.ch.encW(n).toFixed(2)} rad/s, cmd ${w.target.toFixed(2)} rad/s` : null; },
     respond: (h, n) => { h.hold(3, `declutching wheel ${n}`); h.after(3, () => { const w = W(h, n); if (w.fault === 'seized') { w.fault = 'motor'; w.declutched = true; h.sim.log(`FDIR: wheel ${n} (${WN[n - 1]}) declutched: free-rolling, 5 driven wheels`, 'warn'); } }); },
   },
   {
     id: 'cool', lru: 'WHL', bay: () => 'WHL', name: 'Hub motor cooling path degraded', sev: 'caution', inst: [1, 2, 3, 4, 5, 6], mtbfH: 80000, fidelity: 'physics',
     cause: 'dust on the hub radiator fins or a cracked thermal strap',
     sensors: ['winding thermistor (each hub)', 'comparison with the other 5 hubs'],
-    detect: 'winding > 40 C and > 20 C above the median of the other hubs, for 10 s', persist: 10, derate: 0.7,
+    detect: 'winding > 40 C, > 20 C above the median of the other hubs and not cooling, for 10 s', persist: 10, derate: 0.7,
     response: 'autonomy speed derated 30 % to cut copper loss; existing torque derate above 110 C still applies',
     operator: ['Prefer flat routes; rest 20 min if the winding passes 100 C', 'Clean fins / replace strap (field 30 min) or wheel end at the dock'],
     apply: (h, n) => { W(h, n).extraHeat = 4000; }, // W of heat the hub can no longer reject
     clear: (h, n) => { W(h, n).extraHeat = 0; },
-    sig: (h, n) => { const t = h.ch.windT(n), o = [1, 2, 3, 4, 5, 6].filter((k) => k !== n).map((k) => h.ch.windT(k)).sort((a, b) => a - b), med = (o[2] + o[3]) / 2; return t > 40 && t - med > 20 ? `hub ${n} ${t.toFixed(0)} C vs median ${med.toFixed(0)} C` : null; },
+    sig: (h, n) => { const t = h.ch.windT(n), o = [1, 2, 3, 4, 5, 6].filter((k) => k !== n).map((k) => h.ch.windT(k)).sort((a, b) => a - b), med = (o[2] + o[3]) / 2;
+      // a hub that is hot but cooling down has a working heat path (it is recovering from a past load or a repaired
+      // fault): in vacuum the winding sheds heat only by conduction into the hub, so it stays warm for many minutes
+      const w = W(h, n), st = w._coolS || (w._coolS = { t: h.sim.time, T: t, falling: false });
+      if (h.sim.time - st.t >= 15) { st.falling = t < st.T - 0.15; st.t = h.sim.time; st.T = t; }
+      return t > 40 && t - med > 20 && !st.falling ? `hub ${n} ${t.toFixed(0)} C vs median ${med.toFixed(0)} C` : null; },
   },
   {
     id: 'enc', lru: 'ENC', bay: () => 'WHL', name: 'Wheel resolver failure', sev: 'caution', inst: [1, 2, 3, 4, 5, 6], mtbfH: 100000, fidelity: 'annunciation',
@@ -464,6 +473,7 @@ export class Health {
       const id = what === 'lidar' ? 'lidar' : 'cam';
       if (!this.alarms.has(id)) return;
       if (this.rngOut() < 0.5) { fix(); this.active.delete(id); this.alarms.delete(id); this.log(`FDIR: ${what} recovered after power cycle (latch-up cleared)`, 'ok'); }
+      else if (what === 'lidar' && this.sim.sensors.switchLidar()) { this.active.delete(id); this.alarms.delete(id); this.log('FDIR: LiDAR head A hard failure after power cycle - switched to the starboard head B (cold spare). Replace head A at the next service (field 10 min).', 'warn'); }
       else this.log(`FDIR: ${what} hard failure after power cycle - replace the head (field 10 min). Autonomy degraded.`, 'err');
     });
   }
@@ -659,13 +669,19 @@ export class Health {
     }
     th.demandW = clamp(T.heaterGainWperK * ((survival ? V.survivalSetC : V.setC) - th.Tv), 0, V.heaterMaxW);
     th.vaultW = htrOK ? th.demandW : 0;
+    const sinkK = Math.sqrt(Math.sqrt(Ts4)); // effective radiative sink; the cold structure the boxes leak to sits near it
+    rej += T.leakWperK.vault * (th.Tv + 273.15 - sinkK);
     th.Tv += dt * (qV + th.vaultW - rej) / V.C;
     th.rejW = rej;
     // battery
-    const I = P.loadW / ROVER.battery.nominalV;
-    const qB = I * I * ROVER.battery.internalR;
+    // pack current is the NET bus current: discharge (loads minus generation) or charge (dock / keep-alive array).
+    // Charging heats the pack exactly like discharging; the old model used the load alone and so missed the
+    // ~15 kW that a 350 kW (875 A) fast charge put into a pack that can radiate ~1 kW.
+    const I = Math.abs(P.netW || 0) / ROVER.battery.nominalV;
+    const qB = I * I * (P.internalR || ROVER.battery.internalR);
+    th.battQ = qB;
     th.louverB = clamp((th.Tb - B.louverOpenC) / (B.louverFullC - B.louverOpenC), B.louverMin, 1);
-    const rejB = th.louverB * B.emis * T.sigma * B.radArea * ((th.Tb + 273.15) ** 4 - Ts4);
+    const rejB = th.louverB * B.emis * T.sigma * B.radArea * ((th.Tb + 273.15) ** 4 - Ts4) + T.leakWperK.battery * (th.Tb + 273.15 - sinkK);
     const dB = clamp(T.heaterGainWperK * ((survival ? B.survivalSetC : B.setC) - th.Tb), 0, B.heaterMaxW);
     th.demandW += dB;
     th.battW = htrOK ? dB : 0;
@@ -680,8 +696,11 @@ export class Health {
       const on = protect && (Th < T.hubFreezeC || (th.hubOn[i] && Th < T.hubFreezeC + T.hubHystK));
       th.hubOn[i] = on;
       const qh = on ? T.hubHeaterW : 0; hubW += qh;
-      const rad = Hb.emis * T.sigma * Hb.radArea * ((Th + 273.15) ** 4 - Ts4);
-      th.hub[i] = Th + dt * (qh + (day ? Hb.solarW : 0) + (R.powered ? Hb.motorW : 0) - rad) / Hb.C;
+      // passive thermal switch: insulated when cold, radiating when hot (THERMAL.hub)
+      const emis = Hb.emis + (Hb.emisHot - Hb.emis) * clamp((Th - Hb.switchLoC) / (Hb.switchHiC - Hb.switchLoC), 0, 1);
+      const rad = emis * T.sigma * Hb.radArea * ((Th + 273.15) ** 4 - Ts4);
+      const qMotor = R.wheels[i].hubQ || 0;   // heat conducted out of the motor winding (rover.js)
+      th.hub[i] = Th + dt * (qh + (day ? Hb.solarW : 0) + (R.powered ? Hb.motorW : 0) + qMotor - rad) / Hb.C;
     }
     th.hubW = hubW;
     this.heaterW = th.vaultW + th.battW + hubW;

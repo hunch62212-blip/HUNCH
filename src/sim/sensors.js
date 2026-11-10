@@ -17,7 +17,7 @@ export class Sensors {
     this.rate = 20; // module update rate (Hz)
     const L = ROVER.lidar;
     this.lidarCfg = { channels: L.channels, hRes: L.hRes, vMin: L.vFovDeg[0], vMax: L.vFovDeg[1], range: L.range, rateHz: L.rateHz };
-    this.lidarOn = true; this.cameraOn = true;
+    this.lidarOn = true; this.cameraOn = true; this.lidarUnit = 'A'; this.lidarDead = {};
     this.faults = { lidar: false, camera: false, imu: false };
     this.scan = null; this.scanId = 0;
     this._lidarT = 0; this._camT = 0;
@@ -74,6 +74,13 @@ export class Sensors {
     if (C.rateHz !== tier[0] || C.hRes !== tier[1]) {
       C.rateHz = tier[0]; C.hRes = tier[1]; this._buildDirs(); this._polT = now;
     }
+  }
+  // Two LiDAR heads sit on the front deck corners (lidar_mount.js: port unit A, starboard unit B, mirrored in z).
+  // A is prime, B a cold spare: FDIR switches to it when A does not come back from a power cycle (health.js).
+  switchLidar() {
+    if (this.lidarUnit === 'B' || this.lidarDead?.B) return false;
+    this.lidarDead = { ...(this.lidarDead || {}), A: true }; this.lidarUnit = 'B'; this._partial = null; this.faults.lidar = false;
+    return true;
   }
   setLidar(channels, hRes) { this.lidarAuto = false; if (channels) this.lidarCfg.channels = channels; if (hRes) this.lidarCfg.hRes = hRes; this._buildDirs(); }
 
@@ -217,7 +224,7 @@ export class Sensors {
   }
   _scanSector(p) {
     const L = ROVER.lidar, P = this._partial;
-    const o = new THREE.Vector3(L.mountLocal.x, L.mountLocal.y, L.mountLocal.z).applyQuaternion(p.q).add(new THREE.Vector3(p.x, p.y, p.z));
+    const o = new THREE.Vector3(L.mountLocal.x, L.mountLocal.y, L.mountLocal.z * (this.lidarUnit === 'B' ? -1 : 1)).applyQuaternion(p.q).add(new THREE.Vector3(p.x, p.y, p.z));
     const { channels, hRes, range } = this.lidarCfg;
     const h0 = Math.floor(P.sector * hRes / P.sectors), h1 = Math.floor((P.sector + 1) * hRes / P.sectors);
     const d = new THREE.Vector3(), q = p.q, dirs = this._dirs, colliderRock = this.sim.colliderRock;
@@ -272,6 +279,19 @@ export class Sensors {
     const hf = C.hFovDeg * Math.PI / 360, vf = Math.atan(Math.tan(hf) * 0.75);
     const out = [];
     const v = new THREE.Vector3();
+    // Lighting (a camera, unlike the LiDAR, needs light and cannot look into the sun):
+    //  - sun in the frame (low polar sun, no atmosphere to soften it): veiling glare halves the usable range, and
+    //    nothing within glareDeg of the sun's direction can be decoded
+    //  - night or the rover in shadow: cargo fiducials and rocks are seen only in the rover's own headlights
+    //    (lampRange); port and surveyed beacons are floodlit by the base
+    const sun = this.sim.sunDir, R0 = this.sim.rover, lit = sun.y > 0 && R0.power.sunlit;
+    const sunFx = sun.dot(cam.fwd), sunInFrame = lit && sunFx > 0 && Math.abs(Math.atan2(sun.dot(cam.right), sunFx)) < hf && Math.abs(Math.atan2(sun.dot(cam.up), sunFx)) < vf;
+    const glareCos = Math.cos(12 * Math.PI / 180), lampRange = 35, glareK = sunInFrame ? 0.5 : 1;
+    this.camLight = { lit, sunInFrame, lamps: !!R0.lights };
+    const visible = (dirx, diry, dirz, range, floodlit) => {
+      if (lit) return !(dirx * sun.x + diry * sun.y + dirz * sun.z > glareCos);
+      return floodlit || (R0.lights && range <= lampRange);
+    };
     for (const tg of this.targets) {
       let wpos, wn;
       if (tg.kind === 'cargo') {
@@ -283,8 +303,9 @@ export class Sensors {
       } else { wpos = tg.world; wn = tg.normal; }
       v.subVectors(wpos, cam.pos);
       const range = v.length();
-      const maxR = tg.size * 85;
+      const maxR = tg.size * 85 * glareK;
       if (range > maxR || range < 0.8) continue;
+      if (!visible(v.x / range, v.y / range, v.z / range, range, tg.kind !== 'cargo')) continue;
       const fx = v.dot(cam.fwd), rx = v.dot(cam.right), uy = v.dot(cam.up);
       if (fx <= 0) continue;
       const ax = Math.atan2(rx, fx), ay = Math.atan2(uy, fx);
@@ -312,7 +333,8 @@ export class Sensors {
       if (r.d < 0.4) continue;
       v.set(r.x, r.top, r.z).sub(cam.pos);
       const range = v.length();
-      if (range > C.range * (this.camRangeK ?? 1)) continue; // camRangeK < 1: dusty window (health.js 'cdust')
+      if (range > C.range * (this.camRangeK ?? 1) * glareK) continue; // camRangeK < 1: dusty window (health.js 'cdust')
+      if (!visible(v.x / range, v.y / range, v.z / range, range, false)) continue;
       const fx = v.dot(cam.fwd), rx = v.dot(cam.right), uy = v.dot(cam.up);
       if (fx <= 0) continue;
       const ax = Math.atan2(rx, fx), ay = Math.atan2(uy, fx);

@@ -1,4 +1,4 @@
-// AEGIS power dock visuals: 4 sun-tracking vertical solar masts, the 4 MWh battery vault, the underbody
+// AEGIS power dock visuals: 4 sun-tracking vertical solar masts, the battery vault (POWER_DOCK.bankWh), the underbody
 // charge-coupler pad and the charger pedestal. Geometry mirrors the colliders in sim/powerDock.js.
 import * as THREE from 'three';
 import { POWER_DOCK } from '../sim/config.js';
@@ -87,7 +87,7 @@ export class PowerDockModel {
     for (const s of [-1, 1]) { const post = box(0.2, 0.6, 0.2, MAT.steel); post.position.set(s * (b.d / 2), b.h + 0.25, 0); vault.add(post); }
     const bermMat = new THREE.MeshStandardMaterial({ color: 0x77726a, roughness: 1 });
     const berm = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, b.w + 3, 4, 1), bermMat); berm.rotation.x = Math.PI / 2; berm.rotation.y = Math.PI / 4; berm.scale.set(1.6, 1, 1.2); berm.position.set(-b.d / 2 - 0.6, 0.2, 0); berm.receiveShadow = true; vault.add(berm);
-    const sign = new THREE.Mesh(new THREE.PlaneGeometry(6.5, 1.0), new THREE.MeshBasicMaterial({ map: labelTexture('BATTERY BANK  4.0 MWh', { color: '#141414' }), transparent: true }));
+    const sign = new THREE.Mesh(new THREE.PlaneGeometry(6.5, 1.0), new THREE.MeshBasicMaterial({ map: labelTexture(`BATTERY BANK  ${(D.bankWh / 1e6).toFixed(1)} MWh`, { color: '#141414' }), transparent: true }));
     sign.position.set(b.d / 2 + 0.03, b.h - 0.55, 0); sign.rotation.y = Math.PI / 2; vault.add(sign);
     // state-of-charge bar: 20 segments
     this.socSegs = [];

@@ -32,6 +32,10 @@ export class Sim {
     this.sunDir = new THREE.Vector3();
     this.setSun(this.sunAz, this.sunEl);
     this.landerPos = { x: WORLD.pad.x, z: WORLD.pad.z };
+    // Operator link. delayS = one-way signal delay: 0 for crew in the habitat 2 km away (default), ~1.3 s light time
+    // plus ground-segment latency for an operator on Earth ("comms earth"). Commands and manual drive inputs reach the
+    // rover delayS late; an Earth operator cannot joystick a moving vehicle, so manual drive is speed-capped there.
+    this.comms = { delayS: 0, mode: 'local', queue: [], earthDelayS: 1.3, earthDriveCap: 0.3 };
     this.rover = new Rover(this, this.terrain.pad.roverStart);
     this.cargoForces = new Map();
     this.colliderOwner = new Map();
@@ -239,6 +243,8 @@ export class Sim {
   stepOnce() {
     const dt = PHYS.dt;
     this._startupTick();
+    // operator link: release uplinked commands whose one-way light time has elapsed (commands.js, "comms")
+    if (this.comms.queue.length) { const q = this.comms.queue; while (q.length && q[0].t <= this.time) q.shift().fn(); }
     for (const m of this.modules) {
       m._acc += dt;
       const period = 1 / (m.rate || 120);

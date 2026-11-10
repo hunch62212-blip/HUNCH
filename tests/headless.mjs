@@ -55,7 +55,7 @@ atLeast('min tip margin, unloaded manoeuvres (autonomy slow-down limit 25 deg)',
 console.log('dist', R.odo.dist.toFixed(1), 'energy Wh', R.power.energyUsedWh.toFixed(1));
 
 R.brake = false; R.cmd.vx = 5; run(25); s = st('top speed');
-atLeast('top speed, unloaded, 5 m/s command', s.tl.fwdSpeed, 4.0, ' m/s', 2);
+within('top speed, unloaded, 5 m/s command: held at speedLimitEmpty', s.tl.fwdSpeed, 2.7, 3.1, ' m/s', 2);
 atMost('upright at top speed (|roll|)', Math.abs(deg(s.tl.roll)), 10, ' deg', 1);
 R.cmd.vx = 0; run(10); st('stop3');
 

@@ -50,6 +50,10 @@ for (const m of MODES) {
   const [n, win, stim] = PLAN[m.id];
   if (stim === 'pad') { const L = sim.powerDock.layout; R.teleport(L.pad.x, L.pad.z, L.yaw); sim.slam.relocalize({ ...R.pose(), x: L.pad.x, z: L.pad.z, yaw: L.yaw }); run(4); cmd('lift kneel'); }
   const key = n == null ? m.id : `${m.id}:${n}`;
+  // a silent sun sensor can only be told from a shadowed one while the rover is in sunlight: if the sweep has left the
+  // rover in the shadow of the terrain or the lander (9 deg sun: a 40 m lander throws a 250 m shadow), put the sun overhead
+  let sunEl0 = null;
+  if (m.id === 'sun' && !R.power.sunlit) { sunEl0 = sim.sunEl; sim.setSun(sim.sunAz, 80); run(2.5); }
   const t0 = sim.time;
   cmd(`fault ${m.id}${n == null ? '' : ' ' + n}`);
   if (stim === 'bit') H.bitT = 0.05;
@@ -59,6 +63,7 @@ for (const m of MODES) {
   const good = hit && a && !a.spurious;
   if (good) ok++;
   check(`detect ${m.id} (${m.name}) on ${key}`, good, hit ? `${(sim.time - t0).toFixed(1)} s: ${a.reading}` : `not detected in ${win} s`);
+  if (sunEl0 != null) sim.setSun(sim.sunAz, sunEl0);
   // response checks
   if (m.id === 'mc') check('mc: wheel 3 free-rolls', R.wheels[2].fault === 'motor');
   if (m.id === 'seize') { run(4); check('seize: wheel 5 declutched to free-roll', R.wheels[4].fault === 'motor' && R.wheels[4].declutched); }

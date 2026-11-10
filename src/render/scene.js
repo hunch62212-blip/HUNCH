@@ -79,7 +79,8 @@ export function createScene(canvas) {
   const glare = new THREE.Sprite(new THREE.SpriteMaterial({ map: glareTexture(), color: 0xffffff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.85 }));
   glare.scale.set(2600, 2600, 1);
   sky.add(sunDisc, glare);
-  // Earth (from the south pole it sits low over the horizon, ~2 deg apparent)
+  // Earth: ~2 deg across, ~10 deg above the horizon. The sim's sun peaks at 9 deg, which puts the site near 80 deg S;
+  // there the Earth hangs about (90 - latitude) up, not on the horizon as it would at the pole itself.
   const earth = new THREE.Mesh(new THREE.SphereGeometry(520, 48, 32), new THREE.MeshStandardMaterial({ map: earthTexture(), roughness: 0.9, metalness: 0, emissive: 0x0a1630, emissiveIntensity: 0.25 }));
   sky.add(earth);
 
@@ -159,7 +160,7 @@ export function createScene(canvas) {
     glare.position.copy(dir).multiplyScalar(21000);
     // Earth: fixed az ~ 90 deg from sun, low elevation
     const az = Math.atan2(-dir.z, dir.x) + 1.9;
-    earth.position.set(Math.cos(az) * 26000 * Math.cos(0.05), 26000 * Math.sin(0.05) + 300, -Math.sin(az) * 26000 * Math.cos(0.05));
+    earth.position.set(Math.cos(az) * 26000 * Math.cos(0.17), 26000 * Math.sin(0.17), -Math.sin(az) * 26000 * Math.cos(0.17));
     earth.lookAt(0, 0, 0);
     sun.intensity = dir.y > 0 ? 5.2 : 0;
     csm.lightDirection.copy(dir).negate();

@@ -1,6 +1,6 @@
 // Procedural lunar terrain: fBm highlands + power-law crater population + boulder field.
 // Deterministic from a seed, so the map the rover learns stays valid between sessions.
-import { WORLD, CARGO_TYPES, DOCK } from './config.js';
+import { WORLD, CARGO_TYPES, DOCK, REGOLITH } from './config.js';
 
 export function mulberry32(seed) {
   let a = seed >>> 0;
@@ -39,6 +39,17 @@ export function makeNoise(rand) {
     if (t2 > 0) { const g = G[perm[ii + 1 + perm[jj + 1]] & 7]; t2 *= t2; n += t2 * t2 * (g[0] * x2 + g[1] * y2); }
     return 70 * n;
   };
+}
+
+// Local soil state at (x, z): { k: stiffness / cohesion multiplier, dphi: friction-angle offset (rad) }.
+// Deterministic from the terrain seed (REGOLITH.vary). Cheap value noise: called per wheel per physics step.
+export function soilAt(t, x, z, out = {}) {
+  const V = t.soilVary;
+  if (!V || !V.amp) { out.k = 1; out.dphi = 0; return out; }
+  const u = x / V.scale, v = z / V.scale, s0 = t.soilSeed || 0;
+  const n = 0.6 * Math.sin(u * 1.31 + s0) * Math.cos(v * 1.17 - s0 * 0.7) + 0.4 * Math.sin(u * 2.9 - v * 2.3 + s0 * 1.9);
+  out.k = 1 + V.amp * n; out.dphi = V.phiDeg * Math.PI / 180 * n;
+  return out;
 }
 
 function smoothstep(a, b, x) { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); }
@@ -253,6 +264,7 @@ export function generateTerrain(seed = WORLD.seed) {
   };
   // Rocks rest on the surface: compute base heights after flattening
   for (const r of rocks) r.y = heightAt(terrain, r.x, r.z);
+  terrain.soilVary = REGOLITH.vary; terrain.soilSeed = (seed % 1000) * 0.0127;
   return terrain;
 }
 

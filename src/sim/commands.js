@@ -23,6 +23,7 @@ export const HELP = [
   ['newmap', 'reload with a new random crater / boulder layout'],
   ['lidar on|off | lidar channels <n> | lidar res <n>', 'LiDAR power / resolution'],
   ['camera on|off', 'camera power'],
+  ['comms earth | comms local | comms delay <s>', 'operator link: Earth (1.3 s one-way delay) or habitat crew (no delay)'],
   ['fault block|lidar|camera|comms|battery <%>|wheel <1-6>|shift|port <1|2>', 'Mission 10 fault injection'],
   ['fault list | fault <id> [unit]', 'hardware failure catalogue (mc 3, seize 5, bat 2, fc A, imu B, ldust, louver L, ...)'],
   ['failures on|off [realistic|100x|1000x|demo]', 'RANDOM FAILURE switch (off by default; demo = one every few minutes)'],
@@ -43,7 +44,7 @@ export const HELP = [
 
 const num = (s, d) => { const v = parseFloat(s); return Number.isFinite(v) ? v : d; };
 
-export function runCommand(sim, ui, line) {
+export function runCommand(sim, ui, line, _uplinked = false) {
   const out = [];
   const say = (m, l = 'info') => out.push({ msg: m, level: l });
   const raw = line.trim();
@@ -51,6 +52,14 @@ export function runCommand(sim, ui, line) {
   const [cmd0, ...a] = raw.split(/\s+/);
   const cmd = cmd0.toLowerCase();
   const R = sim.rover, A = sim.autonomy;
+  // signal delay (Earth operator): everything that acts on the rover arrives one light time late, E-STOP included.
+  // Simulator and display commands are local to the console and run at once.
+  if (sim.comms.delayS > 0 && !_uplinked && !['comms', 'clear', 'help', '?', 'view', 'timescale', 'ts', 'pause', 'ff', 'fastforward', 'warp', 'newmap', 'sun', 'day', 'night', 'fault', 'failures', 'random'].includes(cmd)) {
+    sim.comms.queue.push({ t: sim.time + sim.comms.delayS, fn: () => runCommand(sim, ui, raw, true) });
+    say(`uplink: "${raw}" reaches the rover in ${sim.comms.delayS.toFixed(1)} s`, 'info');
+    for (const o of out) sim.log(o.msg, o.level);
+    return out;
+  }
   // comms loss: only the hard-wired E-stop link, fault clearing and local UI commands get through; the rest is
   // queued at the ground station and sent, in order, when the link is restored ("clear faults" / "clear comms")
   if (A.faults.comms && !['estop', 'e-stop', 'clear', 'help', '?', 'status', 'view', 'timescale', 'ts', 'pause', 'ff', 'fastforward', 'warp', 'newmap', 'health', 'fdir', 'procedure', 'proc', 'repair', 'failures', 'random', 'fault'].includes(cmd)) { // repair = local crew / service robot
@@ -287,6 +296,14 @@ export function runCommand(sim, ui, line) {
       const on = (a[0] || 'on').toLowerCase() !== 'off';
       sim.lunar.on = on; if (a[1]) sim.lunar.periodS = Math.max(60, num(a[1], 15) * 60);
       say(on ? `Lunar day/night cycle ON: one lunar day = ${(sim.lunar.periodS / 60).toFixed(0)} sim min` : 'Lunar cycle OFF', 'ok');
+      break;
+    }
+    case 'comms': {
+      const C = sim.comms, k = (a[0] || '').toLowerCase();
+      if (k === 'earth') { C.mode = 'earth'; C.delayS = C.earthDelayS; }
+      else if (k === 'local') { C.mode = 'local'; C.delayS = 0; }
+      else if (k === 'delay') { C.delayS = Math.max(0, num(a[1], 0)); C.mode = C.delayS > 0 ? 'remote' : 'local'; }
+      say(`Operator link: ${C.mode}, one-way delay ${C.delayS.toFixed(1)} s${C.delayS > 0 ? ` (commands and E-STOP arrive late; manual drive capped at ${C.earthDriveCap} m/s)` : ' (crew in the habitat)'}`, 'ok');
       break;
     }
     case 'sun': sim.setSun(num(a[0], sim.sunAz), num(a[1], sim.sunEl)); say(`Sun az ${sim.sunAz} el ${sim.sunEl}`, 'ok'); break;

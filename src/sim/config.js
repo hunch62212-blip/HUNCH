@@ -25,6 +25,11 @@ export const REGOLITH = {
   phi: 35 * Math.PI / 180, // internal friction angle
   K: 0.018,                // m, shear deformation modulus
   bulk: 1500,              // kg/m^3, near-surface bulk density
+  // [ASSUMED] spatial variation: real regolith is not uniform (loose crater-rim and ejecta soil, compacted inter-crater
+  // plains). Stiffness (kc, kphi) and cohesion scale by 1 +- amp, friction angle by +- phiDeg, over patches ~scale m
+  // across (terrain.js soilAt). The on-board slip estimator only knows the nominal values above.
+  vary: { amp: 0.3, phiDeg: 3, scale: 45 },
+  zMax: 0.5,               // m, sinkage limit of the model (about half the tyre radius: beyond this the hub is buried)
 };
 
 // [ASSUMED] procedural site. Pad-habitat separation is exactly 2 km per the LLASO-P2 storyboard; seed, plume
@@ -113,10 +118,19 @@ export const ROVER = {
   imu: { kScrub: 0, scrubMinWz: 0.005 },
   rb: { diff: 0.45 }, // rocker-bogie: fraction of independent spring kept (differential-bar pitch stiffness)
   steer: { maxAngle: 0, rate: 0, skid: true }, // v6+ skid steer: the wheels do not steer
-  speedLimitLoaded: 3.8, // carrying the module (CoM 6.8 m up); smart-rpm and the tip governor trim it further
+  // Operating speed limits [ASSUMED]. The Froude-scaled motor caps (4.95 m/s cruise, 8.2 m/s no-load) only show that the
+  // prototype is dynamically similar; they are not safe operating speeds. In 1.62 m/s^2 gravity the soil can brake the
+  // vehicle at ~1.1 m/s^2 at most (tan 35 deg x g), obstacles launch a fast vehicle, and the crewed Apollo LRV peaked
+  // near 5 m/s. Empty 3.0 m/s (stops in ~6 m at 0.9 m/s^2); loaded 1.5 m/s (15 t module, CoM 6.8 m up: stops in ~6 m
+  // at the 0.2 m/s^2 nose-over limit). Smart-rpm and the tip governor trim these further.
+  speedLimitEmpty: 3.0,
+  speedLimitLoaded: 1.5,
   // tip-safe acceleration limits (m/s^2, rad/s^2). Loaded static tip threshold is ~0.45 g_moon fore-aft, but the
   // passive (rocker-bogie) pitch lets the body nose over at ~0.4 m/s^2 of braking (less downhill): lonLoaded 0.2 (CHANGES.md §14)
-  accel: { lon: 1.6, lonLoaded: 0.2, lat: 1.2, latLoaded: 0.35, yaw: 0.14, estopFactor: 2.0 },
+  // Traction bound: regolith gives at most c A + W tan(phi) ~ 0.70 W of shear, so no command may ask for more than
+  // ~0.7 x 1.62 = 1.13 m/s^2 in any direction. lon 0.9 / lat 0.8 keep the resultant inside that circle with margin;
+  // estopFactor 1.2 puts an empty E-STOP at 1.08 m/s^2 (was lon 1.6, lat 1.2, E-STOP 3.2 m/s^2 = 2 g_moon: impossible).
+  accel: { lon: 0.9, lonLoaded: 0.2, lat: 0.8, latLoaded: 0.35, yaw: 0.14, estopFactor: 1.2 },
   battery: { capacityWh: 420000, nominalV: 400, internalR: 0.02 },
   solar: { panelArea: 0, panels: 0, efficiency: 0.30, mastHeight: 0 }, // charged at the AEGIS garage (dock_station.js)
   avionicsW: 900, heaterW: 600, lidarW: 22, cameraW: 6, commsW: 90,
@@ -160,14 +174,22 @@ export const DOCK = {
 // AEGIS power dock beside the supply building (positions in the habitat frame: u along the building face,
 // v out from it toward the pad). Sized for the lunar night: ~354 h with zero solar input.
 //  - night survival load (vault heaters + avionics) 2.2 kW x 354 h = 0.78 MWh
-//  - plus 6 full rover recharges per night (6 x 0.42 MWh / 0.95) = 2.65 MWh  ->  bank 4.0 MWh with 15 % floor
-//  - arrays: 4 vertical sun-tracking masts x 120 m^2, 30 % cells -> ~196 kW at a low polar sun; refills the
-//    bank in ~1 day and still covers a 350 kW fast-charge with the bank's help.
+//  - rover parked on the coupler all night in survival mode (~0.3 kW heaters, tests/fdir.mjs) = 0.11 MWh
+//  - 20 night delivery legs at ~6 kWh each (2 km loaded + return, tests) = 0.12 MWh, / 0.95 charger
+//    -> 1.03 MWh needed; bank 1.5 MWh with the 15 % floor leaves ~20 % margin (was 4.0 MWh, sized for six full
+//    0.42 MWh rover recharges a night that no mission needs: ~20 t of cells to land instead of ~7.5 t)
+//  - arrays: 4 vertical sun-tracking masts x 120 m^2, 30 % cells x 0.85 derate (dust, cell temperature, wiring,
+//    ageing) -> ~165 kW unshaded at a low sun; the masts shade each other when the sun lines up with a row
+//    (powerDock.js). Refills the bank in well under a day.
+//  - charger 60 kW (0.14 C): the limit is heat. Charge current I^2 R ends up in the pack, and the pack can only
+//    radiate ~1 kW (THERMAL.battery); 350 kW (875 A) put ~15 kW into it. At 60 kW (150 A) it is 0.45 kW.
+//    No charging below 0 C cell temperature (lithium plating): the heaters warm the pack first.
 export const POWER_DOCK = {
   padT: 44, padV: 22, couplerTol: 3.0,
   arrays: [[60, 8], [60, 28], [70, 12], [70, 32]], arrayArea: 120, efficiency: 0.30, mastH: 22, panelW: 8, panelH: 15,
-  bank: { w: 14, d: 7, h: 4.2 }, bankWh: 4.0e6, bankFloor: 0.15, bankEff: 0.95, bankMaxDischargeW: 400000,
-  chargeMaxW: 350000, chargerEff: 0.95,
+  bank: { w: 14, d: 7, h: 4.2 }, bankWh: 1.5e6, bankFloor: 0.15, bankEff: 0.95, bankMaxDischargeW: 80000,
+  arrayDerate: 0.85,
+  chargeMaxW: 60000, chargerEff: 0.95, chargeMinCellC: 0,
   hotelW: 700, nightHeaterW: 1500, dayHeaterW: 200,
 };
 
@@ -181,10 +203,15 @@ export const POWER_DOCK = {
 //    costs well under a quarter of the pack with no solar input (tests/fdir.mjs measures it)
 export const THERMAL = {
   sigma: 5.670e-8,
-  vault: { C: 120000, radArea: 12, emis: 0.85, louverMin: 0.06, louverOpenC: 15, louverFullC: 30, setC: 5, survivalSetC: -20, heaterMaxW: 800, hotC: 45 },
-  battery: { C: 2.4e6, radArea: 3, emis: 0.85, louverMin: 0.06, louverOpenC: 25, louverFullC: 35, setC: 5, survivalSetC: -10, heaterMaxW: 1500, hotC: 50 },
+  vault: { C: 120000, radArea: 12, emis: 0.85, louverMin: 0.12, louverOpenC: 15, louverFullC: 30, setC: 5, survivalSetC: -20, heaterMaxW: 800, hotC: 45 },
+  battery: { C: 2.4e6, radArea: 3, emis: 0.85, louverMin: 0.12, louverOpenC: 25, louverFullC: 35, setC: 5, survivalSetC: -10, heaterMaxW: 1500, hotC: 50 },
   heaterGainWperK: 200,
   sinkDayK: 230, sinkNightK: 100, skyViewFraction: 0.5,
+  // louverMin 0.12: closed-louver effective emittance fraction (flight louvers close to ~0.10-0.15 of open; 0.06 was
+  // optimistic). leakWperK: parasitic conduction through MLI seams, mounts and harness to the cold structure, per box.
+  leakWperK: { vault: 0.25, battery: 0.4 },
+  // battery internal resistance rises in the cold: R(T) = R0 x (1 + coldRperK x (refC - T)) below refC
+  coldRperK: 0.03, coldRrefC: 20,
   // Wheel-end freeze protection (CHANGES.md §17). The hub gearbox lubricant (perfluoropolyether grease) must stay
   // above its glass-transition region or the planetary gearbox seizes on the first drive after the night. A 25 W film
   // heater on each of the six hubs switches on below hubFreezeC at night or in survival and off hubHystK above it.
@@ -193,7 +220,12 @@ export const THERMAL = {
   //   radArea m^2 radiating surface;  emis effective emissivity of the MLI-wrapped hub (blanket + open drive face)
   //   solarW  W absorbed in daylight (sun + regolith IR);  motorW W dissipated while the drive is powered
   hubHeaterW: 25, hubFreezeC: -65, hubHystK: 5,
-  hub: { C: 120000, radArea: 1.2, emis: 0.05, solarW: 5, motorW: 8, initC: 10 },
+  // The drive motor's losses are real heat (hundreds of W per hub when loaded) and there is no air to carry it away.
+  // Path: winding (rover.js w.temp, ROVER.motor.thermalC) -> conduction motor.thermalR -> this hub mass -> radiation.
+  // The hub rejects through a radiator ring on its outboard face behind a passive thermal switch (paraffin actuator,
+  // [ASSUMED]): effective emissivity emis (MLI-like) below switchLoC, rising to emisHot at switchHiC. Cold = insulated
+  // (the 25 W freeze heater holds it), hot = radiating. motorW: controller idle dissipation while the drive is powered.
+  hub: { C: 120000, radArea: 1.2, emis: 0.05, emisHot: 0.8, switchLoC: 20, switchHiC: 60, solarW: 5, motorW: 8, initC: 10 },
 };
 
 // [ASSUMED] vault radiators (THERMAL.vault.radArea 12 m^2 = 2 x 7.2 x 0.85 m). Measured on the team body: the belly-tub

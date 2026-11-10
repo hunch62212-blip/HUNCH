@@ -7,6 +7,9 @@ export const TELEMETRY_FIELDS = [
   ['hoist', 'm'], ['payload', ''], ['mode', ''], ['phase', ''],
   // vehicle health (health.js), appended so the column indices above stay put
   ['vault_temp', 'C'], ['battery_temp', 'C'], ['heaters', 'W'], ['keepalive_solar', 'W'], ['alarms', ''], ['strings_online', ''], ['fdir_speed_factor', ''],
+  // 1 while the row was produced by the kinematic transit warp (no wheel-soil physics: slip, sinkage and loads in
+  // that row are nominal, not simulated). Filter on it before using a log as physics evidence.
+  ['warp', ''],
 ];
 
 export class Telemetry {
@@ -24,6 +27,7 @@ export class Telemetry {
       mean((w) => Math.abs(w.slip)) * 100, mean((w) => w.sink) * 1000, Math.max(0, ...R.wheels.map((w) => w.load)) / 1000, Math.max(...R.wheels.map((w) => w.temp)),
       R.lift.pos, R.loaded ? R.lift.cargo.id : '', s.autonomy.mode, (s.autonomy.missionName || '') + ' ' + s.autonomy.phase,
       ...(s.health ? [s.health.th.Tv, s.health.th.Tb, s.health.heaterW, s.health.array.W, s.health.alarms.size, 4 - s.health.outStrings.size, s.health.fx.speedK] : [0, 0, 0, 0, 0, 4, 1]),
+      s.warp && s.warp.active ? 1 : 0,
     ]);
     if (this.rows.length > this.max) this.rows.shift();
   }

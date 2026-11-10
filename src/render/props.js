@@ -88,7 +88,14 @@ export class RockField {
     const shapes = rockShapes();
     this.geoms = shapes.map((pts) => {
       const v = []; for (let i = 0; i < pts.length; i += 3) v.push(new THREE.Vector3(pts[i], pts[i + 1], pts[i + 2]));
-      const g = new ConvexGeometry(v); g.computeVertexNormals(); return g;
+      const g = new ConvexGeometry(v); g.computeVertexNormals();
+      // ConvexGeometry has no uv attribute, so the rock texture sampled a single texel (flat grey rocks).
+      // Spherical mapping around the hull centre, two repeats around.
+      const P = g.attributes.position, uv = new Float32Array(P.count * 2);
+      for (let i = 0; i < P.count; i++) { const x = P.getX(i), y = P.getY(i), z = P.getZ(i), L = Math.hypot(x, y, z) || 1;
+        uv[i * 2] = (Math.atan2(z, x) / (2 * Math.PI) + 0.5) * 2; uv[i * 2 + 1] = Math.acos(Math.max(-1, Math.min(1, y / L))) / Math.PI * 1.5; }
+      g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+      return g;
     });
     const tex = rockTexture();
     this.mat = new THREE.MeshStandardMaterial({ color: 0xffffff, map: tex, roughness: 0.92, metalness: 0, flatShading: false });
@@ -125,7 +132,7 @@ function rockTexture() {
   g.fillStyle = '#7d7a75'; g.fillRect(0, 0, 256, 256);
   for (let i = 0; i < 4000; i++) { const v = 90 + rand() * 90; g.fillStyle = `rgba(${v},${v * 0.98},${v * 0.95},${0.25 + rand() * 0.4})`; const s = 1 + rand() * 3; g.fillRect(rand() * 256, rand() * 256, s, s); }
   for (let i = 0; i < 25; i++) { g.strokeStyle = `rgba(40,38,35,${0.2 + rand() * 0.3})`; g.beginPath(); g.moveTo(rand() * 256, rand() * 256); g.lineTo(rand() * 256, rand() * 256); g.stroke(); }
-  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 4; return t;
 }
 
 // ---------------- lander -----------------------------------------------------

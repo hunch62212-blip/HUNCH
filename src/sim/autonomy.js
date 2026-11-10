@@ -1234,8 +1234,8 @@ export class Autonomy {
     // berthing sequence: pressure boundary sealed before the module hatch opens
     const steps = [
       ['Hard capture: latches retract, seal compressed 30 mm', 1.5],
-      ['Dust-exclusion coupling: bellows seal inflating', 2],
-      ['Electrodynamic dust shield + CO2 purge of interface', 2.5],
+      ['Dust-exclusion coupling: spring-loaded metal bellows extending', 2],
+      ['Electrodynamic dust shield pulse + brush-seal sweep of interface', 2.5],
       ['Leak check: vestibule pressure-decay test', 3],
       ['Equalising vestibule to 70.3 kPa', 3],
       ['Receiving cradle jacks extending under module', 2.5],

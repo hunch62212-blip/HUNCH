@@ -202,13 +202,13 @@ the wheels do not steer. All values below are [script] unless marked.
 | Suspension | Rocker-bogie (track 7.67 m, wheelbase 7.82 m) with active struts: kneel −0.65 m / carry +0.82 m / max +0.98 m ride |
 | Steering | Skid steer (fixed wheels): yaw from left/right speed difference; pivot in place |
 | Drive | 6 hub gearmotors, 5,600 N·m peak per wheel, PI speed loop, spring brakes, thermal model |
-| Speed | 4.95 m/s at the 180-rpm-equivalent cap (unloaded); 3.8 m/s loaded limit, further trimmed by the tip governor |
+| Speed | Operating limits 3.0 m/s empty, 1.5 m/s loaded, further trimmed by the tip governor [ASSUMED]. The Froude-scaled motor cap is 4.95 m/s; it shows dynamic similarity with the prototype and is not used as an operating speed. Acceleration and braking commands stay under the soil traction limit (~1.1 m/s² on the Moon) |
 | Power | 420 kWh, 400 V in 4 strings with their own contactors; PDU converters A/B. Charged at the dock; 12 m² keep-alive solar blanket for emergencies (parked only) [ASSUMED] |
 | Thermal | avionics vault + battery: louvered vertical radiators under both deck edges (the module covers the deck), thermostatic heaters on controllers A/B [ASSUMED] |
 | Avionics | flight computers A/B (hot standby), IMU A/B + voter gyro, primary + UHF radios, 4 corner omni antennas, locator beacon, E-STOP hard-wired loop [ASSUMED] |
 | Serviceability | every electronics unit in a bay at 1.0-1.6 m working height with the rover knelt; field kit + dock spares (docs/SURVIVABILITY.md) |
 | Cargo handling | 2 ring clamps (dual-winding jaw motors); lift by strut ride height (no hoist travel, no docking stage) |
-| Sensors | 16-channel LiDAR (90 m, 5 Hz, 10° nose-down), 70° camera, IMU, sun sensor, wheel encoders, strut load cells, cradle alignment suite, docking-ring camera; health sensors on every unit (heartbeats, phase currents, resolvers, thermistors, string voltages, insulation monitor, louver encoders, vent gas) |
+| Sensors | 16-channel LiDAR (90 m, 5 Hz, 10° nose-down; port head prime, starboard head cold spare), 70° camera (blinded within 12° of the sun, headlight range 35 m at night), IMU, sun sensor, wheel encoders, strut load cells, cradle alignment suite, docking-ring camera; health sensors on every unit (heartbeats, phase currents, resolvers, thermistors, string voltages, insulation monitor, louver encoders, vent gas) |
 | Climb limit | 0.90 m edge height [script; test: rocks] |
 
 **Static stability.** The force-angle tip margin is computed live from the wheel contact polygon and the

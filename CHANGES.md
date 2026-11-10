@@ -455,3 +455,44 @@ indicator with the rover's own rollover limits, LMI-style stability plan view, r
 Still open (being worked on for the next version): the navigation watchdog counts newly mapped ground as progress, so a
 rover heading away from its goal is not stopped. A* prices unmapped ground (1.5 /m) below typical mapped ground, so the
 route flips as the map fills in. Point turns at > 50° heading error; smart rpm is 3 fixed tiers capped at 180.
+
+## 23. Lunar-realism review fixes: traction, speeds, thermal, power dock, sensing, comms (2026-11-10)
+
+An engineering review of what would not work on the Moon. Fixed in this pass:
+
+| Where | What | Why |
+|---|---|---|
+| config.js `ROVER.accel` | lon 1.6 → 0.9, lat 1.2 → 0.8 m/s², E-STOP factor 2.0 → 1.2 | regolith gives at most ~0.70 W of shear (tan 35°), so nothing above ~1.13 m/s² is reachable in 1.62 m/s² gravity. The old E-STOP asked for 3.2 m/s² (2 g_moon) |
+| config.js `speedLimitEmpty` 3.0, `speedLimitLoaded` 3.8 → 1.5 m/s; rover.js `speedCap` | operating limits | the Froude-scaled motor caps (4.95 / 8.2 m/s) show similarity with the prototype, they are not safe speeds for an 8 t (23 t loaded) vehicle on cratered ground |
+| rover.js motor thermal, health.js hub node, config.js `THERMAL.hub` | winding heat now conducts into the hub mass, which radiates through a temperature-switched radiator face | the winding was cooled by a fixed 20 W/K path to a constant −20 °C: convection, which does not exist in vacuum. The hub model separately assumed 8 W of motor heat |
+| health.js `_thermal` battery | pack heat uses the net bus current (charge or discharge) and R(T) | charging heat was not modelled: 350 kW (875 A) put ~15 kW into a pack that can radiate ~1 kW |
+| config.js `POWER_DOCK`, powerDock.js | charger 350 → 60 kW; no charge below 0 °C cells, taper 40–50 °C; bank 4.0 → 1.5 MWh with a written budget; bank discharge loss; array derate 0.85; every mast checked for terrain shadow and for the shadow of the masts up-sun of it | heat-limited charging, lithium plating, ~20 t of cells nobody needed, and only mast 0 was ever shadow-tested |
+| config.js `THERMAL` | closed-louver fraction 0.06 → 0.12; parasitic leak 0.25 / 0.4 W/K; battery resistance rises 3 %/K below 20 °C | optimistic louvers and no heat leak. Night survival is now 226 W, 19.1 % of the pack over 354 h (was 147 W, 12.4 %) |
+| terramechanics.js, terrain.js `soilAt`, config.js `REGOLITH.vary / zMax` | soil stiffness, cohesion (±30 %) and friction angle (±3°) vary over ~45 m patches; slip-sinkage digs in above 40 % slip; sinkage limit 0.25 → 0.5 m | the rover could not bog down and the soil was uniform. The on-board slip estimator still assumes nominal soil, so odometry no longer inverts the exact truth model |
+| rover.js rocker-bogie | warp (diagonal) component of the corner spring forces removed while all four corner wheels are grounded | **bug**: parked on flat ground the wheel loads read 3.1 / 1.5 / 2.0 / 1.7 / 1.5 / 3.2 kN. Now 2.0–2.3 kN each. (With a corner wheel in the air the stiffness stays: without it the lander ram test rolled over) |
+| sensors.js `_doCamera` | camera cannot decode within 12° of the sun, loses half its range with the sun in frame, and at night or in shadow sees cargo tags and rocks only inside 35 m of headlight | the camera worked identically in darkness and looking into the sun |
+| sensors.js `switchLidar`, health.js `powerCycle` | starboard LiDAR head is a cold spare: FDIR switches to it when head A does not survive its power cycle | the model has two heads; the sim used one and a hard failure ended autonomy |
+| sim.js `comms`, commands.js `comms earth / local / delay`, main.js | one-way operator delay (0 for habitat crew, 1.3 s for Earth): commands, E-STOP and stick inputs arrive late; delayed manual drive capped at 0.3 m/s | no signal delay existed |
+| health.js `cool` signature | a hot hub that is cooling down is not "cooling path degraded" | with a real (slow) heat path the repaired hub re-alarmed: 1 spurious alarm in `fdir` |
+| health.js `seize` signature | also requires the vehicle to be moving (> 0.12 m/s) | in a tight loaded skid turn some wheels stall at the current limit while others spin and the rover stands still; FDIR isolated 3–4 healthy hubs as "seized" in both dock tests (the v1.3.0 "three others turning" rule did not cover it) |
+| autonomy.js docking steps | bellows "inflating" and "CO2 purge" → spring-loaded metal bellows, EDS pulse + brush-seal sweep | gas consumables with no supply modelled |
+| props.js rocks | spherical UVs on the rock hulls | **bug**: `ConvexGeometry` has no uv attribute, so the rock texture sampled one texel (flat grey rocks) |
+| scene.js | Earth ~10° above the horizon | the sun peaks at 9° (site ≈ 80° S); Earth was drawn on the horizon as at the pole |
+| render/powerDock.js | vault sign reads the configured bank size | sign said 4.0 MWh |
+| telemetry.js | `warp` column | rows produced by the kinematic transit warp carry no wheel-soil physics and must not be used as evidence |
+| tests | `physics` top speed 2.7–3.1 m/s; `odo` speeds 0.5–2.9 m/s; `fdir` raises the sun for the sun-sensor mode if the rover stands in terrain shadow; `power_dock` allows 4.5 h for a 60 kW charge | follow the new limits |
+| CLAUDE.md | simulator section | the file described only the prototype firmware (Python / ROS2), none of which is in this repo |
+
+Not fixed, still open:
+* Rocks are fixed bodies (a 25 cm rock does not move when a 23 t vehicle hits it) and soil traction is applied on rock.
+* Total landed mass (module 15 t, container 8.5 t, rover 8 t, bank ~7.5 t, arrays) is not checked against a lander.
+* The 420 kWh rover pack is not traced to an energy budget (a loaded 2 km leg costs a few kWh; a survival night 80 kWh).
+* No line-of-sight or link budget for comms; the rock detector still reads true rock positions (range- and light-limited).
+* Battery capacity does not fall with temperature (only its resistance rises).
+* The demo day/night cycle (900 s per lunation) runs faster than the thermal time constants, so its temperatures mean nothing.
+* One camera. `cycle`, `faults`, `nav_bench` were not re-run in this pass (25+ min each); their last saved results failed.
+* `dock_cyl40` fails (1/5), on this code and on v1.3.0 alike: the loaded rover circles the PORT-1 lead-in point on
+  9 m-radius turns, is declared boxed in and replans a 470 m detour until the test's time cap. The false "seized"
+  isolations are gone; the navigation problem (see §22 "still open") remains.
+
+Tests after this pass: `npm run test:quick` 14/15 (all but `dock_cyl40`), `fdir` 65/65, `vite build` OK.

@@ -11,8 +11,12 @@ export function wheelSoil(W, b, D, slip, tanAlpha, soil = R) {
   const kEq = soil.kc + b * soil.kphi;
   // static sinkage, rigid equivalent wheel of diameter D
   let z = Math.pow((3 * W) / ((3 - n) * kEq * Math.sqrt(D)), 2 / (2 * n + 1));
-  z *= 1 + 0.55 * Math.min(1, Math.abs(slip));            // slip-sinkage
-  z = Math.min(z, 0.25);
+  // slip-sinkage: mild below ~40 % slip, then the spinning wheel digs itself in (the excavation that embedded
+  // Spirit and bogged the Apollo 15 LRV). Compaction resistance grows with z^(n+1), so a wheel left spinning at
+  // high slip on a slope or in loose soil loses its drawbar pull: back off instead of powering through.
+  const s = Math.min(1, Math.abs(slip)), dig = Math.max(0, s - 0.4);
+  z *= 1 + 0.55 * s + 1.5 * dig * dig;
+  z = Math.min(z, soil.zMax ?? 0.5);
   const l = Math.sqrt(Math.max(1e-6, D * z));             // contact patch length
   const A = b * l;
   const Hmax = A * soil.c + W * Math.tan(soil.phi);

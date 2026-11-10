@@ -19,7 +19,7 @@ const rows = [
   ['steering', ROVER.steer.skid ? `skid steer (maxAngle ${ROVER.steer.maxAngle})` : `+-${ROVER.steer.maxAngle} deg`],
   ['wheel speed cap / turbo / crawl (rpm)', `${M.capRpmWheel} / ${M.turboRpmWheel} / ${M.crawlRpmWheel}`],
   ['ground speed at cap / turbo / crawl (m/s)', `${ms(M.capRpmWheel)} / ${ms(M.turboRpmWheel)} / ${ms(M.crawlRpmWheel)}`],
-  ['speed limit, loaded (m/s)', ROVER.speedLimitLoaded],
+  ['speed limit, empty / loaded (m/s)', `${ROVER.speedLimitEmpty} / ${ROVER.speedLimitLoaded}`],
   ['peak wheel torque (N m)', M.peakTorque],
   ['battery (kWh, V)', `${ROVER.battery.capacityWh / 1000}, ${ROVER.battery.nominalV}`],
   ['on-board solar panels', `${ROVER.solar.panels} x ${ROVER.solar.panelArea} m2`],

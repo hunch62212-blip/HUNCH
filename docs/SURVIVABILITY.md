@@ -84,8 +84,9 @@ and exchange cart. Spares: on-board kit (MC, resolver, harness, load cell, E-STO
 ## 5. Still missing (not modelled or not designed)
 
 * Radiation shielding mass and total-dose life; micrometeoroid protection.
-* Direct-to-Earth link: from the south pole Earth sits near the horizon, so the design relies on the base surface
-  network and a relay. Neither is simulated beyond the radio failure modes.
+* Direct-to-Earth link: at the site (about 80° S, sun peaking at 9°) Earth sits about 10° above the horizon, so
+  terrain can mask it and the design relies on the base surface network and a relay. The sim models the operator
+  delay (`comms earth`: 1.3 s one way, manual drive capped at 0.3 m/s) but not line of sight or link budget.
 * Star tracker for absolute attitude in permanent shadow (VIPER has one).
 * Recovery of a rover that cannot move at all (towing by a second vehicle): tow points are not designed.
 * Multi-node thermal (per-wheel gearbox lubricant, sensor heads) and a real dust deposition model.

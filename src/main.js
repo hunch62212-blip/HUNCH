@@ -235,7 +235,11 @@ async function main() {
     R.previewK = null;
     // turbo is only offered while driving straight at full throttle
     R.turboOk = drive.thr > 0.9 && Math.abs(drive.steer) < 0.05 && !R.loaded;
-    R.cmd.vx = vx; R.cmd.vz = 0; R.cmd.wz = wz;
+    if (sim.comms.delayS > 0) {
+      // delayed link: the stick position reaches the rover one light time late, and speed is capped (move-and-wait driving)
+      const cap = sim.comms.earthDriveCap, k = Math.abs(vx) > cap ? cap / Math.abs(vx) : 1, cvx = vx * k, cwz = wz * k;
+      sim.comms.queue.push({ t: sim.time + sim.comms.delayS, fn: () => { if (A.mode !== 'AUTO' && R.powered && !R.estop) { R.cmd.vx = cvx; R.cmd.vz = 0; R.cmd.wz = cwz; } } });
+    } else { R.cmd.vx = vx; R.cmd.vz = 0; R.cmd.wz = wz; }
     // ride height: R / F raise / lower (kneel -0.65 .. carry +0.82 m)
     const L = R.lift;
     if (keys.has('r')) L.target = Math.min(ROVER.ride.max, L.pos + 0.1);
