@@ -12,6 +12,7 @@ import { loadTeamModels } from './render/teamModels.js';
 import { Dust, Tracks, LidarCloud, PathOverlay, Pebbles } from './render/effects.js';
 import { HUD } from './ui/hud.js';
 import { PowerDockModel } from './render/powerDock.js';
+import { EngineeringOverlay } from './render/engOverlay.js';
 import { trackedRoverCAD } from './render/cadModels.js';
 import { labelTexture } from './render/props.js';
 
@@ -108,12 +109,13 @@ async function main() {
   const tracks = new Tracks(scene);
   const lidar = new LidarCloud(scene);
   const overlay = new PathOverlay(scene, sim.terrain);
+  const engOverlay = new EngineeringOverlay(scene, sim.terrain);
   const pebbles = new Pebbles(scene, sim.terrain);
 
   // ---------------- UI state & camera ----------------
   const ui = {
     view: 'chase', manualHold: false,
-    overlays: { lidar: true, path: true, arcs: false, routes: true, fences: true, dust: true, xray: false },
+    overlays: { lidar: true, path: true, arcs: false, routes: true, fences: true, dust: true, xray: false, eng: true },
     setView(v) { if (['chase', 'orbit', 'top', 'cam', 'free'].includes(v)) { ui.view = v; onViewChange(); sim.log(`View: ${v}`); } },
     noSave: false,
     async forgetMap() { ui.noSave = true; sim.slam.clear(); await DB.wipe(); sim.log('Stored map and route memory erased. Reload the page for a completely fresh start (nothing is saved until then).', 'warn'); },
@@ -188,6 +190,7 @@ async function main() {
     keys.add(k);
     if (k === 'c') { const v = ['chase', 'orbit', 'top', 'cam', 'free']; ui.setView(v[(v.indexOf(ui.view) + 1) % v.length]); }
     if (k === 'v') { ui.overlays.lidar = !ui.overlays.lidar; }
+    if (k === 'i') { ui.overlays.eng = !ui.overlays.eng; document.querySelector('[data-ov="eng"]')?.classList.toggle('on', ui.overlays.eng); }
     if (k === 'p') sim.paused = !sim.paused;
     if (k === 'x') { sim.paused = false; sim.timeScale = sim.timeScale >= 50 ? 1 : 50; sim.log(sim.timeScale >= 50 ? 'FAST FORWARD 50x' : 'Time scale 1x', 'ok'); }
     if (k === 'h' || k === '?') hud.toggleHelp();
@@ -328,6 +331,7 @@ async function main() {
     fences.visible = ui.overlays.fences;
     if (frame % 6 === 0) overlay.setArcs(sim.autonomy.local.last, sim.slam.est, ui.overlays.arcs && sim.autonomy.mode === 'AUTO');
     overlay.setGoal(sim.autonomy.gen ? sim.autonomy.goal : null);
+    engOverlay.update(R, ui.overlays.eng && ui.view !== 'cam' && !(sim.warp.active && sim.timeScale >= sim.warp.minScale));
 
     // camera follow
     const target = tmp.set(p.x, p.y - 1, p.z);

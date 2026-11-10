@@ -414,3 +414,29 @@ The §17/§18 hardware was positioned from `ROVER.frame.halfWid` (4.93 m), but t
 `health.js` BAYS.RAD and `partPos` now read `RADIATOR`, so the failed-part locator points at the new panels. Deck items are seated with a ray cast onto the team model at build time.
 
 Checked: `npx vite build` passes; no console errors; looked at the rover from port-aft, port side (radiator behind the rocker), front and top in the browser; physics, planner and scout tests pass. Earlier the same session, `npm run test:quick` was 12/13: `dock_cyl40` failed in navigation (the rover drove away from PORT-1, "m to go" 1173 → 1364). No test imports render code, so §19 can't have caused it; it is still open.
+
+## 21. Lander collision bug, burned-out headlights, panel labels; physics overlay + dynamics instruments (2026-11-09)
+
+Bugs from the 2026-11-09 9:55 / 9:59 PM screenshots:
+
+* **Rover climbed the lander and rolled over** (pitch 70°, tip margin −84.8°). The lander's colliders were 2.6×
+  (`LANDER_SCALE`) the drawn model: invisible horizontal leg struts 3.8–4.6 m up at 10–18 m from the axis made a
+  ramp. Wheel shape-casts took any face they touched as ground and the strut pushed straight up, so once the body
+  tilted the rover walked up the strut. Fixes: the drawn lander uses the same `LANDER_SCALE`; the leg colliders are
+  diagonal capsules matching the drawn legs (`LANDER_LEG`), plus engine-bell colliders; a wheel on a structure
+  bears only on faces within 40° of both the body axis and true vertical (a contact pushes only along its
+  normal; friction 0.7 climbs ≤ 35°). Regression test `tests/lander.mjs` (`npm test` entry `lander`): driving into
+  a leg now peaks at 3.7° pitch (was 64°).
+* **Lander tags never seen ("fiducials 0").** The four surveyed tags sat 7 m inside the descent-stage collider, so
+  the camera's line-of-sight ray hit the hull first. Now on the scaled descent-stage wall (`LANDER_TAG`).
+* **Camera feed and ground ahead burned out white.** Headlights were 900 cd and always on: 36 at 5 m against the
+  sun's 5.2. Now 150 cd in shadow or at night, 15 cd in sunlight, eased (`src/render/aegis.js`).
+* **Vehicle panel labels wrapped onto 3 lines.** Labels no longer wrap, long values wrap in their own column,
+  shorter labels with tooltips; side panels 320 px.
+
+New: **engineering overlay + dynamics instruments** (toggle **I** / Overlays → physics). Research and formulas:
+[docs/GRAPHICS_PHYSICS_RESEARCH.md](docs/GRAPHICS_PHYSICS_RESEARCH.md). `src/sim/dynamics.js` (SSF, rollover tilt,
+utilisation, stopping distance, drawbar pull, traction / resistance coefficients, slip, power and efficiency,
+Wh/km, cost of transport, Froude number), `src/render/engOverlay.js` (wheel load / traction arrows, CoM + plumb
+line, support polygon with critical edge, predicted path, braking bar), `src/ui/instruments.js` (attitude
+indicator with the rover's own rollover limits, LMI-style stability plan view, readouts with formula tooltips).

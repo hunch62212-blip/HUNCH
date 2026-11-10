@@ -57,6 +57,29 @@ TEST_JOBS=2 npm test   # limit parallel sims (each needs ~0.5-1 GB RAM)
 
 Requirement traceability: [REQUIREMENTS.md](REQUIREMENTS.md). Ad-hoc debug scripts: `tests/scratch/` (not in `npm test`).
 
+## AI copilot (local LLM, optional)
+
+A local language model (**Qwen3.5-9B** on Ollama, on the team Mac mini) sits beside the operator console. It is
+**not in the control loop**: physics, SLAM, planning, FDIR detection and the automatic fault responses stay
+deterministic. The copilot reads a ~1 kB state snapshot plus the last log lines and can only act by typing the
+same console commands an operator would, through an allowlist (`src/ai/copilot.js`). If the model is
+unreachable the sim runs exactly as before. Design report: [docs/AI_COPILOT.md](docs/AI_COPILOT.md).
+
+* **Ask in plain English:** `ai <request>` or just type a sentence (3+ words that are not a command), e.g.
+  "slow down to 2 m/s and turn the lights on" → `speed 2`, `lights on`.
+* **FDIR advisor:** each new alarm gets an assessment with its procedure card; suggested commands wait for
+  `ai ok`. `ai on|off` toggles it.
+* `ai brief` situation summary · `ai status` model, latency, tok/s · `ai model <name>` · `ai forget`.
+* **Never allowed to the AI:** `reset` / `start` (re-arming), `drive` (raw velocity), `turbo on`, `fault`,
+  `failures`, `clear`, `newmap`, `map`, `restricted`, time / sun / world settings. One mission / goto / charge
+  per answer (a second would abort the first).
+* **Where the model runs:** the page calls `/ollama`, which Vite proxies to `OLLAMA_URL`
+  (default `http://100.92.134.100:11434`, the Mac mini over Tailscale, published with
+  `tailscale serve --bg --tcp 11434 tcp://127.0.0.1:11434`; undo with `tailscale serve --tcp=11434 off`).
+  `OLLAMA_URL=http://127.0.0.1:11434 npm run dev` uses a local Ollama. `?noai` turns the copilot off,
+  `?aimodel=qwen3.5:4b` picks another model.
+* Live check against the real model: `node scripts/ai_probe.mjs`. Offline unit checks: [test: ai_copilot].
+
 ## What's new (v3): vehicle health, failures, survival
 
 Design write-up and NASA rover comparison: [docs/SURVIVABILITY.md](docs/SURVIVABILITY.md). Every failure mode,

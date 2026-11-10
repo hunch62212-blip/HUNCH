@@ -51,7 +51,9 @@ log="$LOG_DIR/$want.log"
 for _ in $(seq 1 60); do
   if curl -s -o /dev/null -m 2 "$URL"; then
     echo "AEGIS-V1 $want running at $URL (from $dir, log $log)"
-    open "$URL" || echo "(could not open the browser automatically; open $URL)"
+    # Google Chrome when installed (the sim is tested there), otherwise the default browser
+    if [ -d "/Applications/Google Chrome.app" ]; then open -a "Google Chrome" "$URL" || true
+    else open "$URL" || echo "(could not open the browser automatically; open $URL)"; fi
     exit 0
   fi
   sleep 1

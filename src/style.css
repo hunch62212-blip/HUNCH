@@ -94,6 +94,17 @@ table.wheels td.f { color: var(--err); }
 #autoPanel { left: 340px; right: 360px; bottom: 218px; padding: 6px 10px; display: flex; align-items: center; gap: 10px; min-height: 30px; }
 #autoPanel .phase { font-weight: 600; white-space: nowrap; }
 #autoPanel .detail { color: var(--dim); font-family: var(--mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* dynamics instruments (src/ui/instruments.js): above the autonomy strip, left side of the 3D view */
+#instPanel { left: 340px; bottom: 260px; width: min(640px, calc(100vw - 720px)); min-width: 360px; }
+#instPanel .instRow { display: flex; gap: 10px; align-items: flex-start; }
+#instPanel .instGauge { flex: 0 0 150px; text-align: center; }
+#instPanel .instGauge canvas { width: 150px; height: 150px; display: block; }
+#instPanel .instGauge .cap { color: var(--dim); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; margin-top: 2px; }
+#instPanel .instKv { flex: 1; min-width: 0; gap: 1px 8px; }
+#instPanel .instKv .v.warn { color: var(--warn); } #instPanel .instKv .v.err { color: var(--err); }
+#instPanel .instKv .k { cursor: help; }
+@media (max-width: 1100px) { #instPanel .instKv { display: none; } #instPanel { left: 300px; bottom: 232px; width: auto; min-width: 0; } }
+@media (max-width: 760px), (max-height: 520px) { #instPanel { display: none !important; } }
 #dockPanel { right: 360px; bottom: 260px; width: 330px; display: none; }
 #dockPanel ol { margin: 0; padding-left: 18px; line-height: 1.6; }
 #dockPanel li.done { color: var(--ok); } #dockPanel li.cur { color: var(--warn); font-weight: 600; } #dockPanel li { color: var(--dim); }

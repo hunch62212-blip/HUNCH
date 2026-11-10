@@ -20,6 +20,7 @@ redesign.
 
 | Version | Date | Commit | What changed |
 |---|---|---|---|
+| v1.2.0 | 2026-11-09 | see tag | Engineering overlay + dynamics instruments (toggle **I**): wheel load / traction arrows, CoM and support polygon, predicted path, braking bar, attitude indicator, stability plan view, SSF / rollover / drawbar / slip / cost-of-transport readouts (CHANGES.md §21; `docs/GRAPHICS_PHYSICS_RESEARCH.md`). Lander regression test `tests/lander.mjs` added to `npm test`. AI copilot: repair-command rule in the prompt, docs `docs/AI_COPILOT.md` and `AI_COPILOT_PLAN.md`, README section. Old lander debug scratch scripts removed. (The §21 lander-collision, lander-tag and headlight fixes themselves shipped in v1.1.0.) Launcher opens Google Chrome. Known issue: `dock_cyl40` still fails. |
 | v1.1.0 | 2026-11-09 | see tag | Black-blob fix: NaN wheel tracks smeared by bloom; NaN/Inf guard before bloom (CHANGES.md §19). Survival hardware (radiators, ejecta skirts, whips, beacon, keep-alive outrigger) mounted on the body instead of floating (§20). Also includes all work since v1.0.0 (CHANGES.md §7–§18: audit fixes, vehicle health and FDIR, thermal and survival, loaded traverse, teach & repeat, fenders, 2.5 km random site, 50x transit warp, AI copilot). Known issue: `dock_cyl40` test fails (navigation drives away from PORT-1). |
 | v1.0.0 | 2026-11-06 | 4f74946 | AEGIS-V1 bug fixes, power dock, test harness. |
 | v0.1.0 | 2026-11-06 | f4e7c18 | Initial import of the simulator as found. |
