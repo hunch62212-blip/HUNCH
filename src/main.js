@@ -34,7 +34,8 @@ async function main() {
   const qs = new URLSearchParams(location.search);
   const seed = qs.has('seed') && Number.isFinite(+qs.get('seed')) ? (+qs.get('seed') >>> 0) : (Math.random() * 2 ** 32) >>> 0;
   await step(15, `Generating ${(WORLD.size / 1000).toFixed(1)} × ${(WORLD.size / 1000).toFixed(1)} km lunar terrain (seed ${seed}): craters, boulders, highlands…`);
-  const sim = new Sim(RAPIER, { seed });
+  // thermal scenarios happen at random in the browser (?noscen turns them off); headless tests opt in
+  const sim = new Sim(RAPIER, { seed, thermalScenarios: !qs.has('noscen') });
   sim.log(`Terrain seed ${seed}: crater and boulder layout is random each load (add ?seed=${seed} to the URL to repeat this map, or type "newmap")`, 'info');
   await step(45, 'Building renderer, lunar sky and lighting…');
   const canvas = document.getElementById('view');
@@ -191,6 +192,7 @@ async function main() {
     if (k === 'c') { const v = ['chase', 'orbit', 'top', 'cam', 'free']; ui.setView(v[(v.indexOf(ui.view) + 1) % v.length]); }
     if (k === 'v') { ui.overlays.lidar = !ui.overlays.lidar; }
     if (k === 'i') { ui.overlays.eng = !ui.overlays.eng; document.querySelector('[data-ov="eng"]')?.classList.toggle('on', ui.overlays.eng); }
+    if (k === 't') { const p = document.getElementById('thermPanel'); if (p) p.style.display = p.style.display === 'none' ? '' : 'none'; }
     if (k === 'p') sim.paused = !sim.paused;
     if (k === 'x') { sim.paused = false; sim.timeScale = sim.timeScale >= 50 ? 1 : 50; sim.log(sim.timeScale >= 50 ? 'FAST FORWARD 50x' : 'Time scale 1x', 'ok'); }
     if (k === 'h' || k === '?') hud.toggleHelp();

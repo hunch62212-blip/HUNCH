@@ -7,6 +7,7 @@ import P1 from '../sim/lunar_logistics_manifest.json';
 import { MODE, BAYS, LRUS, bayOf, unitLabel } from '../sim/health.js';
 import { Copilot } from '../ai/copilot.js';
 import { Instruments, instrumentsTemplate } from './instruments.js';
+import { ThermalPanel, thermalTemplate } from './thermalPanel.js';
 
 const SUBSYS = { MOB: 'mobility', PWR: 'power', AVI: 'avionics', NAV: 'navigation sensors', COM: 'comms', THM: 'thermal', CRG: 'cargo', SAF: 'safety / dock' };
 const SUBSYS_OF = { mc: 'MOB', seize: 'MOB', cool: 'MOB', enc: 'MOB', strut: 'MOB', bat: 'PWR', runaway: 'PWR', pdu: 'PWR', imd: 'PWR', fc: 'AVI', seu: 'AVI', imu: 'NAV', sun: 'NAV', lidar: 'NAV', ldust: 'NAV', cam: 'NAV', cdust: 'NAV', com: 'COM', htr: 'THM', louver: 'THM', clamp: 'CRG', lcell: 'CRG', estop: 'SAF', coupler: 'SAF' };
@@ -15,7 +16,7 @@ const SUBSYS_OF = { mc: 'MOB', seize: 'MOB', cool: 'MOB', enc: 'MOB', strut: 'MO
 const KNOWN = new Set(['help', '?', 'estop', 'e-stop', 'reset', 'start', 'status', 'mission', 'abort', 'resume', 'goto', 'speed',
   'limit', 'rpm', 'turbo', 'drive', 'stop', 'brake', 'lift', 'clamp', 'level', 'ride', 'lights', 'timescale', 'ts', 'pause',
   'ff', 'fastforward', 'warp', 'newmap', 'lidar', 'camera', 'fault', 'failures', 'random', 'health', 'fdir', 'procedure',
-  'proc', 'repair', 'survival', 'array', 'clear', 'reroute', 'map', 'routes', 'plan', 'priority', 'reserve', 'sun',
+  'proc', 'repair', 'survival', 'thermal', 'brain', 'scenarios', 'scenario', 'array', 'clear', 'reroute', 'map', 'routes', 'plan', 'priority', 'reserve', 'sun',
   'charge', 'dock', 'day', 'night', 'lunar', 'view', 'restricted', 'scout', 'steer', 'grapple', 'newterrain', 'teleport']);
 
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -33,6 +34,7 @@ export class HUD {
     this.root = $('#hud');
     this.root.innerHTML = this.template();
     this.inst = new Instruments(this.root);
+    this.therm = new ThermalPanel(this.root, sim);
     this.mapZoom = 1.6; // px per metre
     this.mapCanvas = $('#map'); this.mapCtx = this.mapCanvas.getContext('2d');
     this.mapCanvas.width = 636; this.mapCanvas.height = 636;
@@ -75,6 +77,7 @@ export class HUD {
       <span class="pill" id="pCam">CAM</span>
       <span class="pill" id="pSteer">SKID STEER</span>
       <button class="pill" id="pHealth" title="Vehicle health / FDIR panel">HEALTH</button>
+      <button class="pill" id="pTherm" title="Thermal brain panel (T)">THERMAL</button>
       <span class="pill" id="pAI" title="Local LLM copilot on the Mac mini (type: ai help)">AI</span>
       <div class="grow"></div>
       <div class="btnrow timebtns" id="timeBtns">
@@ -173,6 +176,7 @@ export class HUD {
     <div id="autoPanel" class="panel"><span class="pill" id="autoMode">MANUAL</span><span class="phase" id="autoPhase">Idle</span><span class="detail" id="autoDetail"></span></div>
     <div id="console" class="panel"><div id="log"></div><div id="cmdline"><span>&gt;</span><input id="cmd" autocomplete="off" spellcheck="false" placeholder='type a command ("mission cycle", "help") or ask the AI in plain English' /></div></div>
     ${instrumentsTemplate()}
+    ${thermalTemplate()}
     <div id="dockPanel" class="panel"><h3>Berthing sequence</h3><div class="body"><ol id="dockSteps"></ol><div class="kv small" style="margin-top:6px"><span class="k">Vestibule pressure</span><span class="v" id="dockP">0</span><span class="k">Leak rate</span><span class="v" id="dockL">—</span></div></div></div>
     <div id="manifestPanel" class="panel"><h3>CM-40A interior · LLASO-P1 manifest <span class="tog">▾</span></h3><div class="body">
       <div class="small" id="manSum"></div>
@@ -195,7 +199,7 @@ export class HUD {
       <div><b>Driving (manual)</b><br><kbd>W</kbd>/<kbd>S</kbd> forward / reverse (hold)<br><kbd>A</kbd>/<kbd>D</kbd> steer (skid steer: curves while moving, slow point-turn when stopped and unloaded)<br><kbd>Space</kbd> brake · <kbd>Shift</kbd> slow / precise<br>Smart rpm picks 120 / 180 / 300 itself; hold full throttle straight on flat ground for TURBO<br>Gamepad: left stick drive/steer</div>
       <div><b>Cargo handling</b><br><kbd>G</kbd> close / open ring jaws<br><kbd>R</kbd>/<kbd>F</kbd> ride height up / down (kneel under a module, rise to lift it)</div>
       <div><b>Safety</b><br><kbd>Esc</kbd> E-STOP (latching). Restart = RESET then START.<br>Touching the drive keys during a mission pauses autonomy (operator override).</div>
-      <div><b>View</b><br><kbd>C</kbd> cycle camera · mouse drag orbit · wheel zoom<br><kbd>V</kbd> LiDAR overlay · <kbd>I</kbd> physics overlay + instruments · <kbd>P</kbd> pause · <kbd>X</kbd> fast forward 50× · <kbd>H</kbd> this help<br><kbd>Enter</kbd> focus console · <kbd>↑</kbd> history</div>
+      <div><b>View</b><br><kbd>C</kbd> cycle camera · mouse drag orbit · wheel zoom<br><kbd>V</kbd> LiDAR overlay · <kbd>I</kbd> physics overlay + instruments · <kbd>T</kbd> thermal brain panel · <kbd>P</kbd> pause · <kbd>X</kbd> fast forward 50× · <kbd>H</kbd> this help<br><kbd>Enter</kbd> focus console · <kbd>↑</kbd> history</div>
       <div><b>Useful commands</b><br>mission cycle · mission 3 B · goto hab<br>limit rpm 120 · rpm 180 · turbo on/off/auto<br>drive 0.5 0 0.2 · stop<br>lift kneel/carry · clamp close<br>fault block · fault wheel 2 · clear faults<br>map save · routes · plan · timescale 10</div>
     </div></div>`;
   }
@@ -224,6 +228,7 @@ export class HUD {
     const toggleHealth = (v) => { const p = $('#healthPanel'); const show = v ?? p.style.display !== 'block'; p.style.display = show ? 'block' : 'none'; this._hT = 0; };
     this.toggleHealth = toggleHealth;
     $('#pHealth').addEventListener('click', () => toggleHealth());
+    $('#pTherm').addEventListener('click', () => { const p = $('#thermPanel'); p.style.display = p.style.display === 'none' ? '' : 'none'; });
     $('#fdirBtn').addEventListener('click', () => toggleHealth(true));
     $('#healthClose').addEventListener('click', () => toggleHealth(false));
     const rnd = () => this.exec(sim.health.random.on ? 'failures off' : `failures on ${$('#rndRate').value}`);
@@ -355,6 +360,8 @@ export class HUD {
 
   update(dt) {
     this.inst.update(this.sim.rover, dt, !!this.ui.overlays.eng);
+    this.therm.update(dt);
+    { const [txt, cls] = this.therm.status(), e = $('#pTherm'); if (e.textContent !== txt) e.textContent = txt; e.className = 'pill ' + cls; }
     this._t -= dt; if (this._t > 0) return; this._t = 0.1;
     const sim = this.sim, R = sim.rover, A = sim.autonomy, S = sim.sensors, tl = R.telemetry();
     $('#camPanel').style.top = ($('#mapPanel').getBoundingClientRect().bottom + 8) + 'px';

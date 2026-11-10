@@ -149,7 +149,7 @@ export class Rover {
     if (tier !== 'turbo') S.turboT = 0;
     let want = tier === 'turbo' ? M.protoNoLoadRpm : tier === 'crawl' ? 120 : M.protoCapRpm;
     if (R.mode === 'fixed') { want = R.fixed; tier = 'manual'; why = `locked at ${R.fixed} rpm`; }
-    want = Math.min(want, this.limits.rpmCeil);
+    want = Math.min(want, this.limits.rpmCeil, this.thermalRpm ?? Infinity); // thermalRpm: thermal brain REV DOWN (thermal.js)
     // up slowly, down immediately -- except loaded: an instant rpm cut clamps the wheel targets past the
     // _allocate acceleration limiter and brakes the 6.8 m-CoM vehicle onto its front wheels; the pitch that
     // causes then reads as slope (> 7 deg -> crawl) and cuts the rpm again (CHANGES.md §14)
@@ -300,7 +300,7 @@ export class Rover {
         // ---- motor torque (PI speed loop) ---------------------------------------
         const failed = w.fault === 'motor';
         const seized = w.fault === 'seized';
-        const tAvail = M.peakTorque * (this.limits.torquePct / 100) * Math.max(0, Math.min(1, (M.noLoadSpeed - Math.abs(w.omega)) / (M.noLoadSpeed * 0.25))) * (w.temp > 110 ? Math.max(0.2, 1 - (w.temp - 110) / 30) : 1);
+        const tAvail = M.peakTorque * (this.limits.torquePct / 100) * (this.thermalTorqueK ?? 1) * Math.max(0, Math.min(1, (M.noLoadSpeed - Math.abs(w.omega)) / (M.noLoadSpeed * 0.25))) * (w.temp > 110 ? Math.max(0.2, 1 - (w.temp - 110) / 30) : 1);
         let Tm = 0;
         if (parkBrake || failed || seized) w.integ = 0;
         if (!w.contact) {
@@ -420,7 +420,8 @@ export class Rover {
         w.power = this._motorPower(Tm, w.omega);
         // thermal
         // extraHeat: degraded hub cooling path (health.js 'cool' failure; 0 when healthy)
-        const loss = (Tm / M.peakTorque) ** 2 * 380 + Math.abs(Tm * w.omega) * (1 - M.efficiency) + (w.extraHeat || 0);
+        // heatW: thermal brain stator heating (REV UP, d-axis current: heat, no torque) + scenario motor heat (thermal.js)
+        const loss = (Tm / M.peakTorque) ** 2 * 380 + Math.abs(Tm * w.omega) * (1 - M.efficiency) + (w.extraHeat || 0) + (w.heatW || 0);
         // No air on the Moon: the winding's only heat path is conduction (M.thermalR, K/W) into the hub mass, which
         // radiates (health.js _thermal, THERMAL.hub). hubQ is that conducted heat, picked up by the hub model.
         // (Was a fixed 20 W/K path to a constant -20 C "ambient", i.e. convection.)
@@ -700,6 +701,7 @@ export class Rover {
     let hotel = ROVER.avionicsW + ROVER.lidarW + ROVER.cameraW + ROVER.commsW + (this.lights ? 180 : 0);
     if (!this.powered) hotel = 60; // survival: one flight computer at minimum, beacon, BMS
     hotel += heaterW;
+    hotel += this.sim.thermal ? this.sim.thermal.powerW : 0; // instrument heaters / TECs and stator heating (thermal.js)
     const lifting = (this.mass + (this.lift.cargo ? this.lift.cargo.T.mass : 0)) * MOON.g * Math.max(0, this.lift.rateNow || 0) / ROVER.susp.eff; // roller-screw actuators (was an air pump, eta 0.25: suspension.js; CHANGES.md §17)
     const clampW = (this.lift.clamp === 'closing' || this.lift.clamp === 'opening') ? 450 : 0;
     const steerW = this.bogies.reduce((a, b) => a + (Math.abs(b.steerTarget - b.steer) > 0.002 ? 120 : 8), 0);

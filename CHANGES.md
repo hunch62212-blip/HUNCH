@@ -496,3 +496,33 @@ Not fixed, still open:
   isolations are gone; the navigation problem (see §22 "still open") remains.
 
 Tests after this pass: `npm run test:quick` 14/15 (all but `dock_cyl40`), `fdir` 65/65, `vite build` OK.
+
+## 24. Thermal environment, random thermal scenarios and the thermal brain (2026-11-10)
+
+Design and numbers: [docs/THERMAL_BRAIN.md](docs/THERMAL_BRAIN.md). Code: `src/sim/thermal.js`, `src/ui/thermalPanel.js`.
+
+* **Better temperatures.** The regolith surface temperature now follows the sun (radiative equilibrium, lagged):
+  ~242 K at the 9° polar sun, ~344 K (71 °C) on a 30° sun-facing slope, ~95 K at night, ~60 K in a permanently
+  shadowed crater. The vault, battery and wheel-hub radiators radiate to a sink built from it (half sky, half
+  regolith) instead of the fixed 230 K / 100 K. New thermal nodes: LiDAR head, camera (film heater, thermo-electric
+  cooler, sunshade) and the motor-controller bays (losses scale with drive power and the current allowed).
+* **Random preplanned scenarios**, on by default in the browser (`?noscen` turns them off), one every ~3.3 min of sim
+  time on average: sun-facing slope heat soak, crater-shadow cold snap, Earth eclipse, dust on the hub radiators,
+  long heavy climb, sun glint into the sensors, vault heater stuck on, controller switching losses, cold-soaked
+  wheel ends. `scenarios on|off|often|rare`, `scenario <id>|random|end`.
+* **Thermal brain** (utility AI): predicts every temperature 2 min ahead from its rate (spike detection), scores the
+  options of each channel and applies the best, escalating fast and relaxing slowly. Drive: **REV DOWN** 1/2 (rpm cap
+  and torque cut, so I²R losses drop), **COOL-DOWN STOP**, **REV UP** (stator heating 120 / 350 W per motor: heat, no
+  torque). Radiators: pre-cool, shed load, conserve (louvers shut; heater set points +3 K only while driving, never in survival). LiDAR and camera: heat, TEC cool, TEC cool + sunshade.
+  Instruments that leave their range by 8 K are protected OFF; with the brain on that never happens in any scenario.
+  `thermal`, `brain on|off`; panel **T** / THERMAL pill.
+* Hooks: rover rpm cap / torque factor / stator heat into the winding loss and the power budget; health radiator
+  sink, louver override, heater set-point bias, vault load; sensors skip a protected instrument.
+* Night headlights 150 → 70 cd (the near ground still burned out in the camera at night).
+
+Test `tests/thermal.mjs` (`npm test` entry `thermal`), 24 checks: with the brain the LiDAR peaks at 43 °C on a hot
+slope with sun glint (op limit 50 °C); without it, 58 °C and protected off.
+
+Tests after this change: quick set 15/16 (`lander`, `thermal` 24/24 and everything else pass; `dock_cyl40` 1/5 as on
+v1.3.0, see §23), `fdir` 65/65 (survival night 17.5 % of the pack: the brain's heater set-point bias is off in survival).
+`tests/power_dock.mjs` is truncated (syntax error at line 19, from §23) and is not in `npm test`.

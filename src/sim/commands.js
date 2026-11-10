@@ -29,6 +29,8 @@ export const HELP = [
   ['failures on|off [realistic|100x|1000x|demo]', 'RANDOM FAILURE switch (off by default; demo = one every few minutes)'],
   ['health | procedure <id> | repair <id>|all|abort', 'FDIR alarms + redundancy, procedure card, field / dock repair'],
   ['survival on|off|auto | array deploy|stow', 'survival mode (night / dead battery) and the keep-alive solar blanket'],
+  ['thermal | brain on|off', 'thermal state, the thermal brain\'s decisions; brain off = thermostats only (docs/THERMAL_BRAIN.md)'],
+  ['scenarios on|off|often|rare | scenario <id>|random|end', 'random thermal scenarios; ids: slope-heat psr-cold eclipse dust-fins climb glint heater-stuck mc-overload cold-start'],
   ['clear faults | clear comms | clear port <n>', 'remove faults (clearing comms runs the queued commands)'],
   ['reroute <A|B> <1|2>', 'send a module to the other receiving port (e.g. when its port is faulted)'],
   ['map clear|save|load|forget | routes', 'SLAM map & route memory (forget = erase the stored copy too)'],
@@ -204,6 +206,32 @@ export function runCommand(sim, ui, line, _uplinked = false) {
       if (k === 'on' || k === 'off') H.setRandom(k === 'on', a[1]);
       else if (k) H.setRandom(true, k);
       else say(`Random failures ${H.random.on ? 'ON' : 'OFF'} at ${H.random.preset} (${H.random.rateX}x MTBF rate). Usage: failures on|off [realistic|100x|1000x|demo|<n>]`, 'info');
+      break;
+    }
+    case 'thermal': {
+      const T = sim.thermal, b = T.brain;
+      say(`THERMAL: ${T.summary()}`, 'info');
+      for (const [k, n] of [['drive', 'drive'], ['rad', 'radiators'], ['lidar', 'LiDAR'], ['camera', 'camera']]) if (b.reason[k] && !/nominal|auto/.test(b.choice[k].id)) say(`  ${n}: ${b.choice[k].label} - ${b.reason[k]}`, 'warn');
+      break;
+    }
+    case 'brain': {
+      const v = (a[0] || '').toLowerCase();
+      if (v === 'on' || v === 'off') sim.thermal.brain.on = v === 'on';
+      say(`Thermal brain ${sim.thermal.brain.on ? 'ON' : 'OFF (thermostats only)'}`, sim.thermal.brain.on ? 'ok' : 'warn');
+      break;
+    }
+    case 'scenarios': {
+      const v = (a[0] || '').toLowerCase(), T = sim.thermal;
+      if (v === 'on' || v === 'off') T.setScenarios(v === 'on');
+      else if (v === 'often') T.setScenarios(true, 120);
+      else if (v === 'rare') T.setScenarios(true, 600);
+      else say(`Thermal scenarios ${T.scen.on ? 'ON' : 'OFF'}, mean gap ${Math.round(T.scen.meanGapS / 60)} min${T.scen.active ? `, active: ${T.scen.active.name}` : ''}`, 'info');
+      break;
+    }
+    case 'scenario': {
+      const v = (a[0] || 'random').toLowerCase(), T = sim.thermal;
+      if (v === 'end') { if (T.scen.active) T._end(); else say('No thermal scenario active', 'info'); }
+      else if (!T.trigger(v)) say(`Unknown or unavailable scenario "${v}" (help lists them)`, 'warn');
       break;
     }
     case 'health': case 'fdir': {

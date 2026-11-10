@@ -209,10 +209,10 @@ export class AegisModel {
     for (const h of this.heads) h.rotation.y = time * 2 * Math.PI * 10;
     // Headlights sized against the sun (DirectionalLight 5.2 in scene.js): illuminance E = I / d^2. At 900 cd,
     // always on, the ground 5 m ahead got 36 = 7x full sun and the main view and the camera feed burned out white.
-    // Now ~150 cd in shadow or at night (E ~1.5 at 10 m, a usable work light) and dimmed to 10 % in sunlight,
+    // Now ~70 cd in shadow or at night (E ~0.7 at 10 m, a usable work light) and dimmed to 10 % in sunlight,
     // where real vehicle lamps add nothing next to ~1300 W/m^2 of unfiltered sun. Eased so a shadow edge is not a flash.
     const sunlit = Number(rover.power?.sunlit ?? 1) > 0.5 && (rover.sim?.sunDir?.y ?? 1) > 0;
-    const want = rover.lights && rover.powered ? (sunlit ? 15 : 150) : 0;
+    const want = rover.lights && rover.powered ? (sunlit ? 15 : 70) : 0; // 70 cd at night: 150 still burned the near ground white
     this._lampI = this._lampI == null ? want : this._lampI + (want - this._lampI) * 0.08;
     for (const s of this.lights) s.intensity = this._lampI;
     this.updateSurvivalHardware(rover, time);

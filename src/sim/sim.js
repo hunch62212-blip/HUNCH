@@ -11,6 +11,7 @@ import { Scout } from './scout.js';
 import { Telemetry } from './telemetry.js';
 import { PowerDock } from './powerDock.js';
 import { Health } from './health.js';
+import { Thermal } from './thermal.js';
 
 export class Sim {
   constructor(RAPIER, opts = {}) {
@@ -57,6 +58,9 @@ export class Sim {
     this.addModule(this.powerDock);
     this.health = new Health(this); // FDIR, random failures, thermal, survival mode, keep-alive array
     this.addModule(this.health);
+    // thermal environment, instrument nodes, random thermal scenarios (off headless unless asked) and the thermal brain
+    this.thermal = new Thermal(this, { scenarios: opts.thermalScenarios ?? false });
+    this.addModule(this.thermal);
     this.lunar = { on: false, periodS: 900, phase: 0.25, _t: 0 }; // demo lunar day/night cycle (off = fixed sun)
     this.telemetry = new Telemetry(this);
     this.addModule(this.telemetry);
@@ -306,7 +310,7 @@ export class Sim {
     const d = S.odom.dist;
     if (d - W.lastStreamD > 30) { W.lastStreamD = d; this.streamRocks([R.pose()]); this.world.updateSceneQueries(); }
     if (d - W.lastScanD > 6) { W.lastScanD = d; S.warpScan(); }
-    for (const m of [this.powerDock, this.health, this.telemetry]) { m._acc += h; if (m._acc >= 1 / (m.rate || 120) - 1e-9) { m.update(m._acc); m._acc = 0; } }
+    for (const m of [this.powerDock, this.health, this.thermal, this.telemetry]) { m._acc += h; if (m._acc >= 1 / (m.rate || 120) - 1e-9) { m.update(m._acc); m._acc = 0; } }
     this._startupTick();
     if (this.lunar.on) { const Ln = this.lunar; Ln.phase = (Ln.phase + h / Ln.periodS) % 1; this.setSun((this.sunAz0 ?? 205) + Ln.phase * 360, 10 * Math.sin(Ln.phase * 2 * Math.PI) - 1); }
     this.time += h; W.steps++; W.simS += h;

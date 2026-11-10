@@ -105,6 +105,24 @@ table.wheels td.f { color: var(--err); }
 #instPanel .instKv .k { cursor: help; }
 @media (max-width: 1100px) { #instPanel .instKv { display: none; } #instPanel { left: 300px; bottom: 232px; width: auto; min-width: 0; } }
 @media (max-width: 760px), (max-height: 520px) { #instPanel { display: none !important; } }
+/* thermal brain panel (src/ui/thermalPanel.js): top of the 3D view, left side */
+#thermPanel { top: 64px; left: 340px; width: 390px; max-height: calc(100vh - 560px); min-height: 0; overflow: auto; }
+#thermPanel .thScn { margin: 4px 0; padding: 3px 6px; border-radius: 4px; font-size: 11px; }
+#thermPanel .thScn.on { background: rgba(255, 176, 32, 0.15); border: 1px solid rgba(255, 176, 32, 0.45); color: #ffd28a; }
+#thermPanel .dim { color: var(--dim); }
+#thermPanel table.thermT td { vertical-align: middle; }
+#thermPanel td.err { color: var(--err); } #thermPanel td.warn { color: var(--warn); } #thermPanel td.cold { color: var(--accent); }
+#thermPanel .tbar { position: relative; height: 7px; background: rgba(255, 255, 255, 0.08); border-radius: 3px; }
+#thermPanel .tbar span { position: absolute; top: 0; bottom: 0; background: rgba(61, 220, 132, 0.35); border-radius: 3px; }
+#thermPanel .tbar i { position: absolute; top: -2px; width: 3px; height: 11px; margin-left: -1px; background: var(--text); border-radius: 1px; }
+#thermPanel .tbar i.err { background: var(--err); } #thermPanel .tbar i.warn { background: var(--warn); } #thermPanel .tbar i.cold { background: var(--accent); }
+#thermPanel .thBrain { margin-top: 6px; border-top: 1px solid var(--line); padding-top: 4px; }
+#thermPanel .thRow { display: grid; grid-template-columns: 74px 1fr; gap: 0 8px; font-size: 11px; margin: 2px 0; }
+#thermPanel .thRow .k { color: var(--dim); } #thermPanel .thRow .v { font-family: var(--mono); }
+#thermPanel .thRow .v.ok { color: var(--ok); } #thermPanel .thRow .v.warn { color: var(--warn); } #thermPanel .thRow .v.err { color: var(--err); } #thermPanel .thRow .v.dim { color: var(--dim); }
+#thermPanel .thRow .why { grid-column: 2; color: var(--dim); font-size: 10px; }
+@media (max-width: 1100px) { #thermPanel { left: 300px; width: 340px; } }
+@media (max-width: 760px), (max-height: 520px) { #thermPanel { display: none !important; } }
 #dockPanel { right: 360px; bottom: 260px; width: 330px; display: none; }
 #dockPanel ol { margin: 0; padding-left: 18px; line-height: 1.6; }
 #dockPanel li.done { color: var(--ok); } #dockPanel li.cur { color: var(--warn); font-weight: 600; } #dockPanel li { color: var(--dim); }

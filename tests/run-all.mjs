@@ -19,6 +19,7 @@ const TESTS = [
   ['physics', 'headless.mjs', [], false, 600],
   ['rocks', 'rock_climb.mjs', [], false, 600],
   ['lander', 'lander.mjs', [], false, 600],
+  ['thermal', 'thermal.mjs', [], false, 900],
   ['planner', 'planner.mjs', [], false, 600],
   ['ai_copilot', 'ai_copilot.mjs', [], false, 300],
   ['creep', 'creep.mjs', [], false, 600],

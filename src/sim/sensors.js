@@ -186,7 +186,7 @@ export class Sensors {
     this.odom.dist += Math.hypot(ux, uz) * dt;
 
     // --- LiDAR: spinning head, one azimuth sector per sensor tick (rolling scan), de-skewed at scan end
-    if (this.lidarOn && !this.faults.lidar && R.powered) {
+    if (this.lidarOn && !this.faults.lidar && R.powered && this.sim.thermal?.ok.lidar !== false) { // thermal: protected OFF out of range
       if (!this._partial) this._lidarPolicy();
       const sectors = Math.max(1, Math.round(this.rate / this.lidarCfg.rateHz));
       if (!this._partial) this._beginScan(sectors);
@@ -197,7 +197,7 @@ export class Sensors {
     this._camT -= dt;
     if (this._camT <= 0) {
       this._camT += 0.1;
-      if (this.cameraOn && !this.faults.camera && R.powered) this._doCamera(); else { this.detections = []; this.rockDetections = []; }
+      if (this.cameraOn && !this.faults.camera && R.powered && this.sim.thermal?.ok.camera !== false) this._doCamera(); else { this.detections = []; this.rockDetections = []; }
     }
     this._cassN = (this._cassN || 0) + 1;
     if (this.sim.timeScale <= 3 || this._cassN % 2 === 0 || !this.cass) this.cass = this._doCASS(p);

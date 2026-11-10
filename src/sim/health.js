@@ -654,20 +654,24 @@ export class Health {
   _thermal(dt) {
     const T = THERMAL, R = this.sim.rover, P = R.power, th = this.th, sun = this.sim.sunDir;
     const day = P.sunlit && sun.y > 0;
-    const Ts4 = T.skyViewFraction * (day ? T.sinkDayK : T.sinkNightK) ** 4;
+    // radiator sink: half sky, half regolith. With the thermal model (thermal.js) the regolith temperature follows the
+    // sun, slope and shadow (and the scenarios); without it, the fixed day / night values.
+    const TE = this.sim.thermal, tc = TE?.brain?.on ? TE.cmd : null;
+    const Ts4 = T.skyViewFraction * (TE ? TE.env.regK : (day ? T.sinkDayK : T.sinkNightK)) ** 4;
     const survival = !R.powered;
     const V = T.vault, B = T.battery;
     const htrOK = !this.isFailed('htr', this.redund.htr);
     // vault
-    const qV = R.powered ? ROVER.avionicsW + ROVER.lidarW + ROVER.cameraW + ROVER.commsW : 60;
-    th.louverCmd = clamp((th.Tv - V.louverOpenC) / (V.louverFullC - V.louverOpenC), V.louverMin, 1);
+    // thermal brain: SHED LOAD (avionics low-power), louver override (PRE-COOL open / CONSERVE closed); scenario heat
+    const qV = (R.powered ? ROVER.avionicsW + ROVER.lidarW + ROVER.cameraW + ROVER.commsW : 60) * (tc?.vaultLoadK ?? 1) + (TE?.fx.vaultExtraW || 0);
+    th.louverCmd = tc?.louver != null ? clamp(tc.louver, V.louverMin, 1) : clamp((th.Tv - V.louverOpenC) / (V.louverFullC - V.louverOpenC), V.louverMin, 1);
     let rej = 0;
     for (const s of ['L', 'R']) {
       const want = th.stuck[s] != null ? th.stuck[s] : th.louverCmd;
       th.louver[s] += clamp(want - th.louver[s], -0.02 * dt, 0.02 * dt);
       rej += th.louver[s] * V.emis * T.sigma * (V.radArea / 2) * ((th.Tv + 273.15) ** 4 - Ts4);
     }
-    th.demandW = clamp(T.heaterGainWperK * ((survival ? V.survivalSetC : V.setC) - th.Tv), 0, V.heaterMaxW);
+    th.demandW = clamp(T.heaterGainWperK * ((survival ? V.survivalSetC : V.setC) + (tc?.setBias || 0) - th.Tv), 0, V.heaterMaxW);
     th.vaultW = htrOK ? th.demandW : 0;
     const sinkK = Math.sqrt(Math.sqrt(Ts4)); // effective radiative sink; the cold structure the boxes leak to sits near it
     rej += T.leakWperK.vault * (th.Tv + 273.15 - sinkK);
@@ -680,9 +684,9 @@ export class Health {
     const I = Math.abs(P.netW || 0) / ROVER.battery.nominalV;
     const qB = I * I * (P.internalR || ROVER.battery.internalR);
     th.battQ = qB;
-    th.louverB = clamp((th.Tb - B.louverOpenC) / (B.louverFullC - B.louverOpenC), B.louverMin, 1);
+    th.louverB = tc?.louver != null ? clamp(tc.louver, B.louverMin, 1) : clamp((th.Tb - B.louverOpenC) / (B.louverFullC - B.louverOpenC), B.louverMin, 1);
     const rejB = th.louverB * B.emis * T.sigma * B.radArea * ((th.Tb + 273.15) ** 4 - Ts4) + T.leakWperK.battery * (th.Tb + 273.15 - sinkK);
-    const dB = clamp(T.heaterGainWperK * ((survival ? B.survivalSetC : B.setC) - th.Tb), 0, B.heaterMaxW);
+    const dB = clamp(T.heaterGainWperK * ((survival ? B.survivalSetC : B.setC) + (tc?.setBias || 0) - th.Tb), 0, B.heaterMaxW);
     th.demandW += dB;
     th.battW = htrOK ? dB : 0;
     th.Tb += dt * (qB + th.battW - rejB) / B.C;
@@ -698,7 +702,7 @@ export class Health {
       const qh = on ? T.hubHeaterW : 0; hubW += qh;
       // passive thermal switch: insulated when cold, radiating when hot (THERMAL.hub)
       const emis = Hb.emis + (Hb.emisHot - Hb.emis) * clamp((Th - Hb.switchLoC) / (Hb.switchHiC - Hb.switchLoC), 0, 1);
-      const rad = emis * T.sigma * Hb.radArea * ((Th + 273.15) ** 4 - Ts4);
+      const rad = emis * (TE?.fx.hubEmisK ?? 1) * T.sigma * Hb.radArea * ((Th + 273.15) ** 4 - Ts4); // hubEmisK: dust scenario
       const qMotor = R.wheels[i].hubQ || 0;   // heat conducted out of the motor winding (rover.js)
       th.hub[i] = Th + dt * (qh + (day ? Hb.solarW : 0) + (R.powered ? Hb.motorW : 0) + qMotor - rad) / Hb.C;
     }

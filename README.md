@@ -43,6 +43,8 @@ TEST_JOBS=2 npm test   # limit parallel sims (each needs ~0.5-1 GB RAM)
 |---|---|---|
 | physics | headless.mjs | load balance, speed tracking, skid turn, pivot, stop, reverse, park drift, top speed, kneel/carry ride |
 | rocks | rock_climb.mjs | 0.57 m boulder climbed, 1.40 m boulder blocks, stays upright |
+| lander | lander.mjs | driving into the cargo lander: no climb / roll-over, ends upright; lander tags seen; dynamics readouts sane |
+| thermal | thermal.mjs | regolith temperature vs sun; hot slope + glint: instruments stay in range with the thermal brain (overheat without); cold start: rev up; drive heat: rev down; all 9 scenarios; brain idle on a normal day |
 | creep | creep.mjs | 0.01–0.3 m/s speed tracking within 10 % |
 | odo | odo.mjs | odometry within 5 % of truth at 1–4.9 m/s |
 | pickup_gt_cyl40 / _box20 | pickup_gt.mjs | scripted pickup: grapple check, clamps lock, loaded tip margin, wheel contact |
