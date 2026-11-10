@@ -7,6 +7,14 @@ import { rockShapes, rockTransform } from './rockShapes.js';
 
 const ALL = 0xffff;
 export const LANDER_SCALE = 2.6;
+// Lander leg strut in unscaled model units (radius from the lander axis, height above the pad): the rendered
+// leg (props.js) is a 4.4 m tube centred at r 5.4, y 1.75 aimed at (3.8, 3.6). Shared so physics == visuals.
+export const LANDER_LEG = (() => {
+  const cx = 5.4, cy = 1.75, half = 2.2, dx = 3.8 - cx, dy = 3.6 - cy, l = Math.hypot(dx, dy);
+  return { r0: cx - dx / l * half, y0: cy - dy / l * half, r1: cx + dx / l * half, y1: cy + dy / l * half, radius: 0.17 };
+})();
+// Lander navigation tags (unscaled): on the descent-stage wall (r 4.6), 3.2 m up, 1.2 m square.
+export const LANDER_TAG = { r: 4.62, y: 3.2, size: 1.2 };
 // static geometry only needs to interact with moving things (avoids 6000+ static-static pairs)
 const MOVERS = GROUPS.ROVER | GROUPS.CARGO | 32;
 export const G_TERRAIN = groups(GROUPS.TERRAIN, MOVERS);
@@ -55,8 +63,18 @@ export function buildWorld(RAPIER, seed = WORLD.seed) {
     if (!rockGrid.has(key)) rockGrid.set(key, []);
     rockGrid.get(key).push(i);
   }
-  const rockColliders = new Map(); // rock index -> collider
-  const colliderRock = new Map();  // collider handle -> rock index
+  const rockColliders = new Map(); // rock index -> collider, ENABLED (streamed-in) rocks only
+  const colliderRock = new Map();  // collider handle -> rock index (every collider ever created)
+  const rockCache = new Map();     // rock index -> collider, created once, then only enabled / disabled
+  // colliders created / enabled since the last physics step: Sim.stepOnce re-marks them once after that step. A rock
+  // added mid-run could otherwise miss its broadphase proxy (timing dependent): rays and wheel casts saw it but the
+  // chassis never formed a contact pair and drove through it (tests/rock_climb.mjs on the 2.5 km map)
+  const freshRocks = [];
+  // Streaming enables / disables colliders; it never removes them. Removing far rocks and creating near ones in the
+  // same call let Rapier hand a freed collider slot to a new rock before the next step processed the removal, and
+  // the new rock never got a broadphase proxy: rays and wheel casts saw it, the chassis drove through it
+  // (tests/rock_climb.mjs passed or failed depending on the step a boulder was injected; the M10 "block road"
+  // boulders could be ghosts).
   function streamRocks(centers, radius = 140) {
     const want = new Set();
     for (const c of centers) {
@@ -67,15 +85,17 @@ export function buildWorld(RAPIER, seed = WORLD.seed) {
         for (const i of list) { const r = terrain.rocks[i]; if (Math.hypot(r.x - c.x, r.z - c.z) < radius) want.add(i); }
       }
     }
-    for (const [i, col] of rockColliders) if (!want.has(i)) { colliderRock.delete(col.handle); world.removeCollider(col, false); rockColliders.delete(i); }
+    for (const [i, col] of rockColliders) if (!want.has(i)) { col.setEnabled(false); rockColliders.delete(i); }
     for (const i of want) {
       if (rockColliders.has(i)) continue;
+      const cached = rockCache.get(i);
+      if (cached) { cached.setEnabled(true); rockColliders.set(i, cached); freshRocks.push(cached); continue; }
       const r = terrain.rocks[i];
       if (r.skip) continue;
       const desc = RAPIER.ColliderDesc.convexHull(r.pts);
       if (!desc) { r.skip = true; continue; }
       desc.setTranslation(...r.pos).setRotation(r.rot).setFriction(0.8).setCollisionGroups(G_ROCK);
-      try { const col = world.createCollider(desc, fixed); rockColliders.set(i, col); colliderRock.set(col.handle, i); }
+      try { const col = world.createCollider(desc, fixed); rockColliders.set(i, col); rockCache.set(i, col); colliderRock.set(col.handle, i); freshRocks.push(col); }
       catch (e) { r.skip = true; } // rare degenerate hull: dropped entirely so visuals == physics
     }
   }
@@ -97,10 +117,23 @@ export function buildWorld(RAPIER, seed = WORLD.seed) {
   const P = WORLD.pad, pH = terrain.padH, LS = LANDER_SCALE;
   world.createCollider(RAPIER.ColliderDesc.cylinder(4.6 * LS, 3.4 * LS).setTranslation(P.x, pH + (2.6 + 4.6) * LS, P.z).setCollisionGroups(G_STRUCT), fixed);
   world.createCollider(RAPIER.ColliderDesc.cylinder(1.3 * LS, 4.6 * LS).setTranslation(P.x, pH + 2.6 * LS, P.z).setCollisionGroups(G_STRUCT), fixed);
+  // Legs follow the rendered model (props.js buildLander, same LANDER_SCALE): a footpad plus one diagonal strut
+  // from the pad up to the descent stage. The old horizontal strut boxes sat 3.8-4.6 m up at 10-18 m from the
+  // axis where nothing was drawn: an invisible ramp the rover's wheels climbed until it rolled over.
   for (let k = 0; k < 4; k++) {
-    const a = Math.PI / 4 + k * Math.PI / 2;
-    addBox(P.x + Math.cos(a) * 6.6 * LS, pH + 0.12 * LS, P.z + Math.sin(a) * 6.6 * LS, 0.75 * LS, 0.12 * LS, 0.75 * LS, a);
-    addBox(P.x + Math.cos(a) * 5.4 * LS, pH + 1.6 * LS, P.z + Math.sin(a) * 5.4 * LS, 1.4 * LS, 0.15 * LS, 0.15 * LS, -a);
+    const a = Math.PI / 4 + k * Math.PI / 2, ca = Math.cos(a), sa = Math.sin(a);
+    addBox(P.x + ca * 6.6 * LS, pH + 0.12 * LS, P.z + sa * 6.6 * LS, 0.75 * LS, 0.12 * LS, 0.75 * LS, a);
+    const r0 = LANDER_LEG.r0 * LS, y0 = LANDER_LEG.y0 * LS, r1 = LANDER_LEG.r1 * LS, y1 = LANDER_LEG.y1 * LS;
+    const len = Math.hypot(r1 - r0, y1 - y0);
+    const dir = new THREE.Vector3((r1 - r0) * ca, y1 - y0, (r1 - r0) * sa).normalize();
+    const qa = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+    world.createCollider(RAPIER.ColliderDesc.capsule(len / 2, LANDER_LEG.radius * LS)
+      .setTranslation(P.x + (r0 + r1) / 2 * ca, pH + (y0 + y1) / 2, P.z + (r0 + r1) / 2 * sa)
+      .setRotation({ x: qa.x, y: qa.y, z: qa.z, w: qa.w }).setFriction(0.3).setCollisionGroups(G_STRUCT), fixed);
+  }
+  // three descent-engine bells under the deck
+  for (let k = 0; k < 3; k++) {
+    world.createCollider(RAPIER.ColliderDesc.cylinder(0.7 * LS, 1.0 * LS).setTranslation(P.x + (k - 1) * 1.6 * LS, pH + 0.95 * LS, P.z).setCollisionGroups(G_STRUCT), fixed);
   }
 
   // --- supply building + docking vestibules + receiving saddles
@@ -205,5 +238,5 @@ export function buildWorld(RAPIER, seed = WORLD.seed) {
   }
 
   world.step(eventQueue);
-  return { RAPIER, world, eventQueue, terrain, terrainCollider, rockColliders, colliderRock, streamRocks, addRock, fixed, ports, cargo };
+  return { RAPIER, world, eventQueue, terrain, terrainCollider, rockColliders, colliderRock, streamRocks, freshRocks, addRock, fixed, ports, cargo };
 }

@@ -64,7 +64,7 @@ export class PowerDock {
     this.loadW = D.hotelW + (night ? D.nightHeaterW : D.dayHeaterW);
     // charging: underbody coupler engages when the rover is centred on the pad and knelt onto it
     const onPad = this.roverOnPad();
-    const coupled = onPad && R.lift.pos < ROVER.ride.kneel + 0.12 && !R.estop;
+    const coupled = onPad && R.lift.pos < ROVER.ride.kneel + 0.12 && !R.estop && !(sim.health && sim.health.fx.coupler); // coupler fault: no pilot signal
     if (coupled && !this.connected) sim.log(`POWER DOCK: coupler engaged, charging at up to ${(D.chargeMaxW / 1000).toFixed(0)} kW`, 'ok');
     if (!coupled && this.connected) sim.log(`POWER DOCK: coupler released (rover ${(R.power.soc * 100).toFixed(0)}%, bank ${(this.soc * 100).toFixed(0)}%)`, 'info');
     this.connected = coupled;

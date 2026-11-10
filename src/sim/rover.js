@@ -8,11 +8,13 @@
 //    (real contact) and locked by the two ring clamps (module_carry.js)
 //  - battery power bus (charged at the AEGIS garage), motor thermal model
 import * as THREE from 'three';
-import { ROVER, K, MOON, REGOLITH, CARGO_TYPES } from './config.js';
+import { ROVER, K, MOON, REGOLITH, CARGO_TYPES, GROUPS } from './config.js';
 export const VEHICLE = ROVER;
 import { wheelSoil, shearFactor } from './terramechanics.js';
 import { G_ROVER, G_CARGO, G_CARGO_HELD, Q_WHEEL, Q_TERRAIN, yawQuat } from './world.js';
 import { heightAt } from './terrain.js';
+
+const STRUCT_STAND_COS = Math.cos(40 * Math.PI / 180);
 
 const V = () => new THREE.Vector3();
 const ROVER_DT = 1 / 120;
@@ -148,8 +150,11 @@ export class Rover {
     let want = tier === 'turbo' ? M.protoNoLoadRpm : tier === 'crawl' ? 120 : M.protoCapRpm;
     if (R.mode === 'fixed') { want = R.fixed; tier = 'manual'; why = `locked at ${R.fixed} rpm`; }
     want = Math.min(want, this.limits.rpmCeil);
-    // up slowly (60 rpm/s), down immediately
-    R.proto = want < R.proto ? want : Math.min(want, R.proto + 150 * dt);
+    // up slowly, down immediately -- except loaded: an instant rpm cut clamps the wheel targets past the
+    // _allocate acceleration limiter and brakes the 6.8 m-CoM vehicle onto its front wheels; the pitch that
+    // causes then reads as slope (> 7 deg -> crawl) and cuts the rpm again (CHANGES.md §14)
+    const down = loaded ? ROVER.accel.lonLoaded * 60 / (2 * Math.PI * ROVER.wheel.radius * k) * dt : Infinity;
+    R.proto = want < R.proto ? Math.max(want, R.proto - down) : Math.min(want, R.proto + 150 * dt);
     R.wheel = R.proto * k;
     R.tier = tier; R.why = why; R.rough = S.rough;
   }
@@ -249,6 +254,16 @@ export class Rover {
         // Step-climb limit: a wheel can roll up an edge at most ~0.85 r above the ground it is on.
         // Taller faces are walls (the leg and wheel-guard colliders stop the vehicle).
         w.blocked = false;
+        // A wheel on a man-made structure (lander, buildings, posts) only bears on a face it can stand on: the
+        // contact can push only along its normal, so a face steeper than the friction cone (atan 0.7 = 35 deg,
+        // 40 deg allowed) is a wall for the chassis colliders to meet, not ground. A cast that starts inside a
+        // structure (toi 0) is a wall too. Without this the suspension pushed straight up off any face the
+        // cast touched, and the rover walked up the lander's leg struts until it rolled over (pitch 64-70 deg).
+        // Checked against the body axis and true vertical: body-only let a rolled rover see the leg as ground.
+        if (hit && (hit.collider.collisionGroups() >>> 16) & GROUPS.STRUCT) {
+          const ny = hit.normal1.x * Yb.x + hit.normal1.y * Yb.y + hit.normal1.z * Yb.z;
+          if (hit.time_of_impact <= 1e-4 || ny < STRUCT_STAND_COS || hit.normal1.y < STRUCT_STAND_COS) { w.blocked = true; continue; }
+        }
         if (hit && w.groundY != null && hit.witness1.y - w.groundY > ROVER.climbMax && hit.time_of_impact > 1e-4) { w.blocked = true; }
         else if (hit) { Lc[j] = Lstart + hit.time_of_impact + w.sink; hits[j] = hit; }
       }
@@ -267,7 +282,7 @@ export class Rover {
         const Li = b.L + sign * B.halfSpan * s;
         const delta = Lc[j] === Infinity ? -1 : Li - Lc[j];
         const hit = hits[j];
-        const ddot = (delta - w.deltaPrev) / dt;
+        const ddot = w.deltaPrev == null ? 0 : (delta - w.deltaPrev) / dt; // null after a warp hand-back (railsEnd)
         w.deltaPrev = delta;
         let N = 0;
         if (delta > 0 && hit) N = Math.max(0, Math.min(400000, Wp.tireK * delta + Wp.tireC * ddot));
@@ -389,13 +404,14 @@ export class Rover {
         driveW += this._motorPower(Tm, w.omega);
         w.power = this._motorPower(Tm, w.omega);
         // thermal
-        const loss = (Tm / M.peakTorque) ** 2 * 380 + Math.abs(Tm * w.omega) * (1 - M.efficiency);
+        // extraHeat: degraded hub cooling path (health.js 'cool' failure; 0 when healthy)
+        const loss = (Tm / M.peakTorque) ** 2 * 380 + Math.abs(Tm * w.omega) * (1 - M.efficiency) + (w.extraHeat || 0);
         w.temp += dt * (loss - (w.temp + 20) / M.thermalR) / M.thermalC;
         w.dragAccum += Math.abs(vL) * dt;
       }
       // ---- strut / unsprung mass ------------------------------------------------
       // active leveling sets the spring seat (free length) on each corner
-      // air struts: the levelling valves raise pressure with load, so stiffness (and the damping that
+      // roller-screw struts: the servo's impedance schedule raises stiffness with load, so stiffness (and the damping that
       // keeps the same damping ratio) scale with the supported mass; plus skyhook body-rate damping
       // (body_control.js fast loop) on pitch and roll.
       let Fs = b._fs;
@@ -434,15 +450,22 @@ export class Rover {
     const pitch = Math.asin(Math.max(-1, Math.min(1, fwd.y)));
     const roll = Math.asin(Math.max(-1, Math.min(1, right.y)));
     this.tilt.pitch = pitch; this.tilt.roll = roll;
+    const rollRate = this._rollPrev == null ? 0 : (roll - this._rollPrev) / dt;
+    this._rollPrev = roll;
     if (!this.leveling || this.estop) return;
     const Lavg = this.bogies.reduce((a, b) => a + b.L, 0) / this.bogies.length;
     const Ltarget = B.Lnom + this.rideOffset;
+    // damping only while moving (full above 0.4 m/s): near standstill (docking) the seats must settle roll crisply
+    const sp = this.body.linvel(), tdGate = Math.max(0, Math.min(1, (Math.hypot(sp.x, sp.z) - 0.1) / 0.3));
     for (const b of this.bogies) {
       // height of this corner relative to the plane through the centre
       const h = b.z * Math.sin(roll); // pitch is passive (rocker-bogie); only roll is trimmed
       const Ldes = b.L - h * 0.85 + (Ltarget - Lavg);
       const err = Math.max(B.Lmin + 0.06, Math.min(B.Lmax - 0.06, Ldes)) - b.L;
-      const rate = Math.max(-S.levelRate, Math.min(S.levelRate, err * 0.6));
+      // roll-rate damping: driven by roll error alone, the seats pumped a loaded (CoM 6.8 m) roll into a
+      // roll-over; the rate term (S.levelTd s) stops them chasing a roll that is already recovering (CHANGES.md §9)
+      const hdot = b.z * Math.cos(roll) * rollRate * tdGate;
+      const rate = Math.max(-S.levelRate, Math.min(S.levelRate, 0.6 * (err - S.levelTd * 0.85 * hdot)));
       b.level = Math.max(-S.levelRange, Math.min(S.levelRange, b.level + rate * dt));
     }
   }
@@ -454,19 +477,24 @@ export class Rover {
     // briefly unloads a corner without the vehicle actually pivoting off it)
     // Rollover margin uses every corner bogie: tipping about a diagonal only drops the vehicle onto
     // its 4th corner wheel (not a rollover). An unloaded corner uses its wheel's lowest point.
+    // The tyre tips about its outer edge, not its centre line. The reported contact point sits on whichever
+    // tyre edge the cylinder-vs-terrain manifold picked (it flips between the two), which made the
+    // polygon wander by a full tyre width. Re-centre it on the wheel station and use both tyre edges.
     const pts = [];
-    const Yb = V().set(0, 1, 0).applyQuaternion(Q);
+    const Zb = V().set(0, 0, 1).applyQuaternion(Q);
     const t = this.body.translation();
+    const halfW = ROVER.wheel.width / 2;
+    const tp = new THREE.Vector3(t.x, t.y, t.z);
     for (const b of this.bogies) {
       let any = null;
       for (const w of b.wheels) if (w.contact) any = w.cp;
       if (!any) {
         const B = ROVER.bogie;
-        any = V().set(b.x, B.hardpointY - b.L - B.wheelBelowPivot - ROVER.wheel.radius, b.z).applyQuaternion(Q).add(new THREE.Vector3(t.x, t.y, t.z));
+        any = V().set(b.x, B.hardpointY - b.L - B.wheelBelowPivot - ROVER.wheel.radius, b.z).applyQuaternion(Q).add(tp);
       }
-      pts.push(any);
+      const centre = any.clone().addScaledVector(Zb, b.z - any.clone().sub(tp).dot(Zb));
+      pts.push(centre.clone().addScaledVector(Zb, -halfW), centre.addScaledVector(Zb, halfW));
     }
-    void Yb;
     const c = V().copy(com);
     if (this.loaded) {
       const ct = this.lift.cargo.body.translation(), m1 = this.mass, m2 = this.lift.cargo.T.mass;
@@ -475,11 +503,11 @@ export class Rover {
     this.comWorld = c.clone();
     // support polygon = convex hull of the wheel contacts (horizontal plane)
     const poly = convexHullXZ(pts.filter(Boolean));
-    if (poly.length < 3) { this.tilt.margin = 0; return; }
+    if (poly.length < 3) { this.tilt.margin = 0; this.tilt.poly = null; return; }
     let area = 0;
     for (let i = 0; i < poly.length; i++) { const a = poly[i], b = poly[(i + 1) % poly.length]; area += a.x * b.z - b.x * a.z; }
     const orient = Math.sign(area) || 1;
-    let minAng = Infinity;
+    let minAng = Infinity, crit = 0;
     for (let i = 0; i < poly.length; i++) {
       const a = poly[i], b = poly[(i + 1) % poly.length];
       let ex = b.x - a.x, ez = b.z - a.z; const el = Math.hypot(ex, ez) || 1; ex /= el; ez /= el;
@@ -488,9 +516,11 @@ export class Rover {
       const tpar = Math.max(0, Math.min(el, rx * ex + rz * ez));
       const edgeY = a.y + (b.y - a.y) * (tpar / el);
       const h = Math.max(0.1, c.y - edgeY);
-      minAng = Math.min(minAng, Math.atan2(inward, h));
+      const ang = Math.atan2(inward, h);
+      if (ang < minAng) { minAng = ang; crit = i; }
     }
     this.tilt.margin = minAng * 180 / Math.PI;
+    this.tilt.poly = poly; this.tilt.crit = crit; // for the engineering overlay / stability display
     // filtered margin (tau ~0.8 s) for the speed governor; raw value for display/stats
     this.tilt.marginF = this.tilt.marginF == null ? this.tilt.margin : this.tilt.marginF + (this.tilt.margin - this.tilt.marginF) * Math.min(1, ROVER_DT / 0.8);
     // ignore the settling transient after spawn/teleport (wheels not yet on the ground)
@@ -604,7 +634,7 @@ export class Rover {
   _liftStep(dt, Q, pos) {
     const L = this.lift, LC = ROVER.lift;
     if (L.clamp === 'closing') {
-      L.clampT = Math.min(1, L.clampT + dt / LC.jawS);
+      L.clampT = Math.min(1, L.clampT + dt / (LC.jawS * (L.clampSlow || 1))); // clampSlow 2 = backup winding
       if (L.clampT >= 1) {
         const chk = this.grappleCheck();
         if (chk.ok && chk.c === L.pending) { this._attach(L.pending); L.clamp = 'closed'; L.msg = `Ring clamps locked on ${L.pending.id} (worm drives self-locking, 0 W hold)`; }
@@ -612,7 +642,7 @@ export class Rover {
         L.pending = null;
       }
     } else if (L.clamp === 'opening') {
-      L.clampT = Math.max(0, L.clampT - dt / LC.jawS);
+      L.clampT = Math.max(0, L.clampT - dt / (LC.jawS * (L.clampSlow || 1)));
       if (L.clampT <= 0) { L.clamp = 'open'; L.msg = 'Ring jaws open'; }
     }
     if (this.estop) return; // air valves closed: ride held
@@ -645,20 +675,26 @@ export class Rover {
     }
     const cosI = Math.max(0, nrm.dot(sun));
     P.solarW = SOL.panels * SOL.panelArea * SOL.efficiency * 1361 * cosI * P.sunlit * (sun.y > -0.01 ? 1 : 0);
-    let hotel = ROVER.avionicsW + ROVER.heaterW + ROVER.lidarW + ROVER.cameraW + ROVER.commsW + (this.lights ? 180 : 0);
-    if (!this.powered) hotel = 60;
-    const lifting = (this.mass + (this.lift.cargo ? this.lift.cargo.T.mass : 0)) * MOON.g * Math.max(0, this.lift.rateNow || 0) / 0.25; // air pump, eta 0.25 (suspension.js)
+    // heaters: thermostatic demand from the vault / battery thermal model (health.js); ROVER.heaterW only if absent
+    const heaterW = this.sim.health ? this.sim.health.heaterW : ROVER.heaterW;
+    let hotel = ROVER.avionicsW + ROVER.lidarW + ROVER.cameraW + ROVER.commsW + (this.lights ? 180 : 0);
+    if (!this.powered) hotel = 60; // survival: one flight computer at minimum, beacon, BMS
+    hotel += heaterW;
+    const lifting = (this.mass + (this.lift.cargo ? this.lift.cargo.T.mass : 0)) * MOON.g * Math.max(0, this.lift.rateNow || 0) / ROVER.susp.eff; // roller-screw actuators (was an air pump, eta 0.25: suspension.js; CHANGES.md §17)
     const clampW = (this.lift.clamp === 'closing' || this.lift.clamp === 'opening') ? 450 : 0;
     const steerW = this.bogies.reduce((a, b) => a + (Math.abs(b.steerTarget - b.steer) > 0.002 ? 120 : 8), 0);
     P.driveW = driveW;
     P.loadW = hotel + driveW + lifting + clampW + steerW;
-    P.netW = P.solarW + (P.dockW || 0) - P.loadW;
+    // auxSolarW: emergency keep-alive array (health.js); capK: fraction of battery strings on line (health.js)
+    const gen = P.solarW + (P.auxSolarW || 0) + (P.dockW || 0);
+    const cap = Math.max(1, BAT.capacityWh * (P.capK ?? 1)); // >= 1 Wh: all four strings out would otherwise divide by zero (NaN SoC)
+    P.netW = gen - P.loadW;
     const dWh = P.netW * dt / 3600;
-    P.wh = Math.max(0, Math.min(BAT.capacityWh, P.wh + dWh));
+    P.wh = Math.max(0, Math.min(cap, P.wh + dWh));
     if (P.netW < 0) P.energyUsedWh += -dWh; else P.energyGenWh += dWh;
     if (driveW < 0) P.regenWh += -driveW * dt / 3600;
-    P.soc = P.wh / BAT.capacityWh;
-    P.voltage = BAT.nominalV * (0.9 + 0.15 * P.soc) - (P.loadW - P.solarW - (P.dockW || 0)) / BAT.nominalV * BAT.internalR;
+    P.soc = P.wh / cap; // state of charge of the strings on line
+    P.voltage = BAT.nominalV * (0.9 + 0.15 * P.soc) - (P.loadW - gen) / BAT.nominalV * BAT.internalR;
     if (P.soc <= 0.005 && this.powered) { this.powered = false; this.sim.log('BATTERY DEPLETED - safe mode', 'err'); }
   }
 
@@ -671,6 +707,85 @@ export class Rover {
       roll: this.tilt.roll, pitch: this.tilt.pitch, margin: this.tilt.margin,
       wheels: this.wheels, bogies: this.bogies, power: this.power, lift: this.lift,
     };
+  }
+
+  // ---- transit warp (on rails) ----------------------------------------------------
+  // Sim.warpStep moves the rover kinematically along the planned path on long autonomous cruise legs when the time
+  // scale is >= 50x (the full physics cannot run that fast). The body sits on the least-squares terrain plane under
+  // its six wheel stations, at the height above that plane it had when the warp began; held cargo moves rigidly with
+  // it; drive power comes from the planning energy model (rolling resistance 0.09 + grade). railsEnd hands the
+  // vehicle back to the physics at rest.
+  _railsGround(x, z, yaw) {
+    const c = Math.cos(yaw), s = Math.sin(yaw);
+    let n = 0, sx = 0, sz = 0, sh = 0, sxx = 0, szz = 0, sxz = 0, sxh = 0, szh = 0;
+    const pts = [];
+    for (const b of this.bogies) {
+      const dx = b.x * c + b.z * s, dz = -b.x * s + b.z * c;  // body (x fwd, z right) -> world offset
+      const h = heightAt(this.sim.terrain, x + dx, z + dz);
+      pts.push({ x: x + dx, y: h, z: z + dz });
+      n++; sx += dx; sz += dz; sh += h; sxx += dx * dx; szz += dz * dz; sxz += dx * dz; sxh += dx * h; szh += dz * h;
+    }
+    // plane h = a + gx dx + gz dz (normal equations, 3x3)
+    const mx = sx / n, mz = sz / n, mh = sh / n;
+    const cxx = sxx / n - mx * mx, czz = szz / n - mz * mz, cxz = sxz / n - mx * mz, cxh = sxh / n - mx * mh, czh = szh / n - mz * mh;
+    const det = cxx * czz - cxz * cxz || 1e-9;
+    const gx = (cxh * czz - czh * cxz) / det, gz = (czh * cxx - cxh * cxz) / det;
+    return { y: mh - gx * mx - gz * mz, gx, gz, pts };
+  }
+  railsBegin() {
+    const t = this.body.translation(), r = this.body.rotation();
+    const q = new THREE.Quaternion(r.x, r.y, r.z, r.w);
+    const yaw = this.pose().yaw;
+    this._rails = { dy: t.y - this._railsGround(t.x, t.z, yaw).y, cargo: null };
+    if (this.loaded) {
+      const c = this.lift.cargo, ct = c.body.translation(), cr = c.body.rotation(), qinv = q.clone().invert();
+      this._rails.cargo = { rel: new THREE.Vector3(ct.x - t.x, ct.y - t.y, ct.z - t.z).applyQuaternion(qinv), q: qinv.multiply(new THREE.Quaternion(cr.x, cr.y, cr.z, cr.w)) };
+    }
+  }
+  railsPlace(x, z, yaw, h, v) {
+    if (!this._rails) this.railsBegin();
+    const G = this._railsGround(x, z, yaw);
+    const nrm = new THREE.Vector3(-G.gx, 1, -G.gz).normalize();
+    const q = new THREE.Quaternion().setFromUnitVectors(UP, nrm).multiply(new THREE.Quaternion().setFromAxisAngle(UP, yaw));
+    const pos = new THREE.Vector3(x, G.y + this._rails.dy, z);
+    const fwd = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+    this.body.setTranslation(pos, false); this.body.setRotation(q, false);
+    this.body.setLinvel({ x: fwd.x * v, y: fwd.y * v, z: fwd.z * v }, false); this.body.setAngvel({ x: 0, y: 0, z: 0 }, false);
+    const C = this._rails.cargo;
+    if (C && this.lift.cargo) {
+      const cb = this.lift.cargo.body, cp = C.rel.clone().applyQuaternion(q).add(pos), cq = q.clone().multiply(C.q);
+      cb.setTranslation(cp, false); cb.setRotation(cq, false);
+      cb.setLinvel({ x: fwd.x * v, y: fwd.y * v, z: fwd.z * v }, false); cb.setAngvel({ x: 0, y: 0, z: 0 }, false);
+    }
+    const mTot = this.mass + (this.loaded ? this.lift.cargo.T.mass : 0);
+    const om = v / ROVER.wheel.radius;
+    for (let i = 0; i < this.bogies.length; i++) for (const w of this.bogies[i].wheels) {
+      w.cp.set(G.pts[i].x, G.pts[i].y, G.pts[i].z); w.contact = true; w.load = mTot * MOON.g / this.wheels.length;
+      w.omega = om; w.angle += om * h; w.slip = 0; w.airT = 0; w.groundY = G.pts[i].y; w.anchor = null;
+    }
+    // tilt (same definition as _leveling) and the tip-over margin
+    const right = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
+    this.tilt.pitch = Math.asin(Math.max(-1, Math.min(1, fwd.y))); this.tilt.roll = Math.asin(Math.max(-1, Math.min(1, right.y)));
+    const cl = ROVER.comLocal;
+    this._stability(q, new THREE.Vector3(cl.x, cl.y, cl.z).applyQuaternion(q).add(pos));
+    // drive power: rolling resistance + grade, through the motor efficiency (regen at 60 % downhill)
+    const Fdrive = mTot * MOON.g * (0.09 * Math.sqrt(Math.max(0, 1 - fwd.y * fwd.y)) + fwd.y);
+    const P = Fdrive * v;
+    const driveW = P >= 0 ? P / ROVER.motor.efficiency : P * ROVER.motor.efficiency * 0.6;
+    for (const w of this.wheels) { w.torque = Fdrive * ROVER.wheel.radius / this.wheels.length; w.power = driveW / this.wheels.length; }
+    this.lift.rateNow = 0;
+    this._powerStep(h, driveW, q, pos);
+    if (this._prevPos) this.odo.dist += Math.hypot(x - this._prevPos.x, z - this._prevPos.z);
+    this._prevPos = { x, z };
+  }
+  railsEnd() {
+    if (!this._rails) return;
+    this._rails = null;
+    this.body.setLinvel({ x: 0, y: 0, z: 0 }, true); this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    if (this.lift.cargo) { this.lift.cargo.body.setLinvel({ x: 0, y: 0, z: 0 }, true); this.lift.cargo.body.setAngvel({ x: 0, y: 0, z: 0 }, true); }
+    this._cmdF = { vx: 0, wz: 0 };
+    for (const b of this.bogies) { b.Ldot = 0; b.hpVelPrev = null; for (const w of b.wheels) { w.omega = 0; w.integ = 0; w.deltaPrev = null; } }
+    this._spawnT = this.sim.time; // ignore the settling transient in the min-margin statistic
   }
 
   teleport(x, z, yaw) {

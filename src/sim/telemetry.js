@@ -5,6 +5,8 @@ export const TELEMETRY_FIELDS = [
   ['soc', '%'], ['solar', 'W'], ['load', 'W'], ['drive', 'W'], ['energy_used', 'Wh'],
   ['slip_mean', '%'], ['sinkage_mean', 'mm'], ['wheel_load_max', 'kN'], ['motor_temp_max', 'C'],
   ['hoist', 'm'], ['payload', ''], ['mode', ''], ['phase', ''],
+  // vehicle health (health.js), appended so the column indices above stay put
+  ['vault_temp', 'C'], ['battery_temp', 'C'], ['heaters', 'W'], ['keepalive_solar', 'W'], ['alarms', ''], ['strings_online', ''], ['fdir_speed_factor', ''],
 ];
 
 export class Telemetry {
@@ -21,6 +23,7 @@ export class Telemetry {
       R.power.soc * 100, R.power.solarW, R.power.loadW, R.power.driveW, R.power.energyUsedWh,
       mean((w) => Math.abs(w.slip)) * 100, mean((w) => w.sink) * 1000, Math.max(0, ...R.wheels.map((w) => w.load)) / 1000, Math.max(...R.wheels.map((w) => w.temp)),
       R.lift.pos, R.loaded ? R.lift.cargo.id : '', s.autonomy.mode, (s.autonomy.missionName || '') + ' ' + s.autonomy.phase,
+      ...(s.health ? [s.health.th.Tv, s.health.th.Tb, s.health.heaterW, s.health.array.W, s.health.alarms.size, 4 - s.health.outStrings.size, s.health.fx.speedK] : [0, 0, 0, 0, 0, 4, 1]),
     ]);
     if (this.rows.length > this.max) this.rows.shift();
   }

@@ -27,15 +27,19 @@ export const REGOLITH = {
   bulk: 1500,              // kg/m^3, near-surface bulk density
 };
 
-// [ASSUMED] procedural site. Pad-habitat separation set to ~2 km per the LLASO-P2 storyboard; seed, plume
-// and blast radii are sim choices.
+// [ASSUMED] procedural site. Pad-habitat separation is exactly 2 km per the LLASO-P2 storyboard; seed, plume
+// and blast radii are sim choices. The browser picks a random seed on every load (crater / boulder placement
+// changes each time; ?seed=N repeats a map); the headless tests use the fixed default seed below.
+const ROUTE_LEN = 2000;                       // m, landing pad -> habitat
+const ROUTE_DIR = (() => { const x = 1680, z = 1080, L = Math.hypot(x, z); return { x: x / L, z: z / L }; })(); // unit vector pad -> habitat
 export const WORLD = {
-  size: 2048,              // m, square physics terrain, centred on origin
+  size: 2500,              // m, square physics terrain (2.5 x 2.5 km), centred on origin
   res: 1,                  // m, heightfield cell size
   seed: 20262027,
-  // True 2 km separation between landing pad and habitat, per the storyboard.
-  pad: { x: -850, z: -520, radius: 34 },
-  habitat: { x: 830, z: 560 },
+  routeLen: ROUTE_LEN,
+  // pad and habitat sit symmetrically about the map centre, exactly ROUTE_LEN apart
+  pad: { x: -ROUTE_DIR.x * ROUTE_LEN / 2, z: -ROUTE_DIR.z * ROUTE_LEN / 2, radius: 34 },
+  habitat: { x: ROUTE_DIR.x * ROUTE_LEN / 2, z: ROUTE_DIR.z * ROUTE_LEN / 2 },
   plumeHazardRadius: 190,  // m, ejecta hazard ring around the pad
   blastCoreRadius: 32,     // m, no-go core (pad surface + lander)
 };
@@ -62,8 +66,8 @@ export const ROVER = {
   comLocal: { x: 0.0, y: 2.25, z: 0.0 },
   inertia: { x: 54000, y: 99000, z: 54000 },
   rideHeight: 0,
-  // six corners (rocker-bogie wheel stations, rocker_bogie.js GEO: x +0.215 / 0 / -0.215, z +-0.235)
-  corners: [[k(0.215), -k(0.235), 'FL'], [k(0.215), k(0.235), 'FR'], [0, -k(0.235), 'ML'], [0, k(0.235), 'MR'], [-k(0.215), -k(0.235), 'RL'], [-k(0.215), k(0.235), 'RR']],
+  // six corners (rocker-bogie wheel stations, rocker_bogie.js GEO: x +0.24 / 0 / -0.24, z +-0.235; wheelbase 7.82 m, was 7.02 m, widened for the loaded tip margin)
+  corners: [[k(0.24), -k(0.235), 'FL'], [k(0.24), k(0.235), 'FR'], [0, -k(0.235), 'ML'], [0, k(0.235), 'MR'], [-k(0.24), -k(0.235), 'RL'], [-k(0.24), k(0.235), 'RR']],
   frame: { halfLen: k(0.30), halfWid: k(0.302), deckY: k(0.225), tubY0: k(0.065), tubZ: k(0.146) },
   bogie: {
     hardpointY: 3.0,       // strut top (body frame); the active strut stands in for the slow rocker links + fast struts (body_control.js)
@@ -76,7 +80,20 @@ export const ROVER = {
     tireK: 420000, tireC: 7000,   // woven steel hoop tyre with chevron cleats (rover_bom.js), scaled
     effDiameterFactor: 2.0,
   },
-  susp: { k: 42000, c: 9500, sky: 0, bumpK: 1600000, bumpC: 60000, levelRange: 1.75, levelRate: 0.30 },
+  // Strut = roller-screw electromechanical actuator (CHANGES.md §17): brushless DC servomotor driving a planetary
+  // roller screw, welded metal-bellows seal against regolith, impedance-controlled so it presents the same spring and
+  // damper as before (k, c, bumpK, bumpC unchanged: the stiffness scheduling that the air strut got from its levelling
+  // valve is now a servo gain schedule). No gas, no vented volume: lunar-vacuum, thermal-cycle and dust qualified
+  // components at TRL 6+ (roller-screw actuators and bellows seals have flown on lunar and Mars mechanisms).
+  //   k, c, sky, bumpK, bumpC, levelRange, levelRate  [ASSUMED] sim tuning, as before
+  //   levelTd [ASSUMED] roll-rate damping time, s (CHANGES.md §9)
+  //   eff     [ASSUMED] lift efficiency, electrical to mechanical (roller screw ~0.85 x servo + drive ~0.8, derated);
+  //           the air strut's pump was 0.25
+  //   screwLeadMm / peakServoW / backdriveBrake  [ASSUMED] actuator descriptors for the report; not used by the physics
+  susp: {
+    k: 42000, c: 9500, sky: 0, bumpK: 1600000, bumpC: 60000, levelRange: 1.75, levelRate: 0.30, levelTd: 6,
+    kind: 'roller-screw EMA (BLDC servo, metal bellows seal)', eff: 0.6, screwLeadMm: 10, peakServoW: 1800, backdriveBrake: true,
+  },
   // ride set points (module_carry.js CRADLE: kneelExt -40 mm, carryExt +50 mm at 1:16.3)
   ride: { kneel: -k(0.040), carry: k(0.050), max: k(0.060), contact: k(0.310 - 0.318) }, // max = carry + docking trim
   seatY: k(0.318),         // module bottom when seated (rover frame, ride 0)
@@ -89,11 +106,17 @@ export const ROVER = {
     peakTorque: 5600, efficiency: 0.86,
     kp: 9000, ki: 5000, brakeTorque: 9000, thermalR: 0.05, thermalC: 30000,
   },
-  rb: { diff: 0.3 }, // rocker-bogie: fraction of independent spring kept (differential-bar pitch stiffness)
+  // [ASSUMED] gyro skid-scrub model (CHANGES.md §17): yaw_rate_est = yaw_rate_imu - kScrub sgn(wz) |vx wz| while turning loaded.
+  // kScrub is in (rad/s) per (m/s x rad/s). Fitted with tests/scratch/gyro_turn.mjs: the sim gyro reads the true body
+  // rate, and over 55-77 deg constant-curvature turns loaded and empty the IMU heading integral / true heading change is
+  // 0.998-1.005, so the fit is 0. The ~1 % turn error of nav_bench is in the odometry translation (CHANGES.md §15), not in heading.
+  imu: { kScrub: 0, scrubMinWz: 0.005 },
+  rb: { diff: 0.45 }, // rocker-bogie: fraction of independent spring kept (differential-bar pitch stiffness)
   steer: { maxAngle: 0, rate: 0, skid: true }, // v6+ skid steer: the wheels do not steer
   speedLimitLoaded: 3.8, // carrying the module (CoM 6.8 m up); smart-rpm and the tip governor trim it further
-  // tip-safe acceleration limits (m/s^2, rad/s^2). Loaded static tip threshold is ~0.45 g_moon fore-aft.
-  accel: { lon: 1.6, lonLoaded: 0.5, lat: 1.2, latLoaded: 0.35, yaw: 0.14, estopFactor: 2.0 },
+  // tip-safe acceleration limits (m/s^2, rad/s^2). Loaded static tip threshold is ~0.45 g_moon fore-aft, but the
+  // passive (rocker-bogie) pitch lets the body nose over at ~0.4 m/s^2 of braking (less downhill): lonLoaded 0.2 (CHANGES.md §14)
+  accel: { lon: 1.6, lonLoaded: 0.2, lat: 1.2, latLoaded: 0.35, yaw: 0.14, estopFactor: 2.0 },
   battery: { capacityWh: 420000, nominalV: 400, internalR: 0.02 },
   solar: { panelArea: 0, panels: 0, efficiency: 0.30, mastHeight: 0 }, // charged at the AEGIS garage (dock_station.js)
   avionicsW: 900, heaterW: 600, lidarW: 22, cameraW: 6, commsW: 90,
@@ -118,8 +141,8 @@ export const CARGO_TYPES = {
   box20: {
     label: '20-ft ISO container in ring-adapter sled', shape: 'box',
     length: 6.06, height: 2.59, width: 2.44, mass: 8500, color: 0xc9a227,
-    adapterR: k(0.244), adapterRings: [-k(0.085) - 3.1, k(0.085) - 3.1], adapterLen: 8.4, adapterX: -1.0,
-    standY: k(0.310), lugXs: [-5.2, 2.2], lugZ: k(0.345), lugR: k(0.010), carryX: 3.1, lugX: 3.7,
+    adapterR: k(0.244), adapterRings: [-k(0.085) - 0.15, k(0.085) - 0.15], adapterLen: 8.4, adapterX: -1.0,
+    standY: k(0.310), lugXs: [-5.2, 2.2], lugZ: k(0.345), lugR: k(0.010), carryX: 0.15, lugX: 3.7,
   },
 };
 
@@ -128,7 +151,9 @@ export const CARGO_TYPES = {
 export const DOCK = {
   portCenterH: +(ROVER.seatY + CARGO_TYPES.cyl40.radius + ROVER.ride.carry).toFixed(3),
   openingD: 2.0,
-  vestibuleLen: 1.2, vestibuleW: 6.0, vestibuleH: 13.5,
+  // vestibule depth 2.4 m (was 1.2): the 20-ft container rides 1.75 m behind the rover's front (box face 3.18 m,
+  // frame front 4.89 m from the rover centre), so with 1.2 m the rover hit the building wall 0.5 m short of the port
+  vestibuleLen: 2.4, vestibuleW: 6.0, vestibuleH: 13.5,
   maxPushN: 6000, softCaptureN: 900,
 };
 
@@ -144,6 +169,66 @@ export const POWER_DOCK = {
   bank: { w: 14, d: 7, h: 4.2 }, bankWh: 4.0e6, bankFloor: 0.15, bankEff: 0.95, bankMaxDischargeW: 400000,
   chargeMaxW: 350000, chargerEff: 0.95,
   hotelW: 700, nightHeaterW: 1500, dayHeaterW: 200,
+};
+
+// [ASSUMED] AEGIS-V1 thermal control (src/sim/health.js), after the VIPER "warm box" layout: avionics on a
+// heat-spreader vault in the belly-tub nose, heat carried by loop heat pipes to two vertical louvered radiators
+// hung under the deck edges (port + starboard). Radiators are on the sides, not the top, because the carried
+// module (7.96 m dia.) covers the whole deck and would block a zenith view. Battery strings have their own
+// louvered radiator. Thermostatic film heaters (zone controllers A and B) hold the set points.
+//  - day, avionics ~1.0 kW, sink 230 K terrain / 3 K sky: louvers ~30 % open, vault ~19 C, heaters ~0 W
+//  - night or survival (drive off, 60 W in the vault): heaters ~0.15-0.2 kW in all, so a 354 h lunar night
+//    costs well under a quarter of the pack with no solar input (tests/fdir.mjs measures it)
+export const THERMAL = {
+  sigma: 5.670e-8,
+  vault: { C: 120000, radArea: 12, emis: 0.85, louverMin: 0.06, louverOpenC: 15, louverFullC: 30, setC: 5, survivalSetC: -20, heaterMaxW: 800, hotC: 45 },
+  battery: { C: 2.4e6, radArea: 3, emis: 0.85, louverMin: 0.06, louverOpenC: 25, louverFullC: 35, setC: 5, survivalSetC: -10, heaterMaxW: 1500, hotC: 50 },
+  heaterGainWperK: 200,
+  sinkDayK: 230, sinkNightK: 100, skyViewFraction: 0.5,
+  // Wheel-end freeze protection (CHANGES.md §17). The hub gearbox lubricant (perfluoropolyether grease) must stay
+  // above its glass-transition region or the planetary gearbox seizes on the first drive after the night. A 25 W film
+  // heater on each of the six hubs switches on below hubFreezeC at night or in survival and off hubHystK above it.
+  // hub: lumped thermal state of one MLI-wrapped wheel end (health.js _thermal). All [ASSUMED].
+  //   C       J/K, hub motor + gearbox + knuckle (WHL LRU 290 kg of Al / steel, ~0.4 kJ/kg/K)
+  //   radArea m^2 radiating surface;  emis effective emissivity of the MLI-wrapped hub (blanket + open drive face)
+  //   solarW  W absorbed in daylight (sun + regolith IR);  motorW W dissipated while the drive is powered
+  hubHeaterW: 25, hubFreezeC: -65, hubHystK: 5,
+  hub: { C: 120000, radArea: 1.2, emis: 0.05, solarW: 5, motorW: 8, initC: 10 },
+};
+
+// [ASSUMED] vault radiators (THERMAL.vault.radArea 12 m^2 = 2 x 7.2 x 0.85 m). Measured on the team body: the belly-tub
+// side walls are at z = +-2.23..2.33 m between y 1.6 and 3.4 m, and the 7.35 m deck overhangs them to z = +-3.09 m at
+// y 3.4..3.67 m. Each radiator is bolted to its tub wall on two rails, tucked under that overhang (which shades it from
+// sun and falling ejecta) and inboard of the rocker beams (z +-2.95 m) and the fenders (inner edge z +-3.09 m).
+// (Earlier versions put them at z = +-4.86 m, sized from frame.halfWid; nothing on the body reaches out there.)
+//   len, h m panel size;  y m panel centre height;  z m panel centre off the centreline (|z|, port is -z)
+export const RADIATOR = { len: 7.2, h: 0.85, y: 2.95, z: 2.36 };
+
+// [ASSUMED] wheel fenders (CHANGES.md §17, §20). A tyre throws regolith up and back (a "rooster tail", ballistic at
+// 1.62 m/s^2 gravity: a 1.2 m/s tread speed lofts it several metres) and sideways in turns, and it coats the radiator and
+// louvers (the dust-fouled radiator failure mode in health.js). Each wheel gets an arched fender that rides with the wheel
+// on the rocker-bogie, and each radiator an ejecta skirt: a plate hinged to the tub wall along the radiator's lower edge,
+// sloping outboard and down, so regolith thrown up from the wheels and rocker beams cannot reach the louvers.
+//   clearance m gap tyre to fender;  arcDeg arc covered, centred on the top and biased aft;  width m (tyre width 1.22 m + margin)
+//   flapH m trailing flap;  deflector: len m, depth m (hinge to outer edge), angleDeg below horizontal, y m hinge height
+export const FENDER = {
+  clearance: 0.28, arcDeg: 150, aftBiasDeg: 15, width: 1.5, thickness: 0.03, flapH: 0.45,
+  deflector: { len: 7.2, depth: 0.45, angleDeg: 40, y: 2.5 },
+};
+
+// [ASSUMED] emergency keep-alive solar blanket (Lunokhod / Yutu-2 lesson: a rover with no on-board generation
+// cannot recover from a dead battery away from the dock). A 2 x 6 m flexible array on a telescoping mast, deployed
+// only while parked. Vertical, sun-tracking in azimuth. The mast must stand outside the carried module's plan
+// footprint (radius 3.98 m), so its canister sits at the end of an outrigger arm from the port-aft deck corner.
+// armY is the arm centre height: high enough to clear the rear fender at full kneel plus full bogie lift (~4.15 m).
+export const KEEPALIVE = { area: 12, efficiency: 0.30, deployS: 90, mastH: 6.5, massKg: 55, corner: { x: -4.6, z: -4.75 }, armY: 4.35 };
+
+// [ASSUMED] random-failure generator: each catalogue MTBF is divided by rateX (realistic = 1, so a failure
+// every few thousand hours; demo = one every few minutes of sim time). Off by default.
+export const FAILURES = {
+  presets: { realistic: 1, '100x': 100, '1000x': 1000, demo: 20000 },
+  defaultPreset: 'demo', maxActiveRandom: 3, seed: 4242, bitPeriodS: 600,
+  survivalEnterSoc: 0.06, survivalExitSoc: 0.30,
 };
 
 // [ASSUMED] integrator step (120 Hz) and catch-up limit; collision-group bitmasks are code conventions.

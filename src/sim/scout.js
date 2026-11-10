@@ -8,7 +8,7 @@ import { gauss } from './sensors.js';
 
 export const SCOUT = {
   scale: 3, length: 1.05, width: 0.88, height: 0.8, mass: 24,
-  vMax: 2.6, stepMax: 0.13, // 3x prototype: 0.7-0.9 m/s x 3 (speed scales with track size) slopeMax: 25 * Math.PI / 180,
+  vMax: 3.6, stepMax: 0.13, slopeMax: 25 * Math.PI / 180, // vMax: 3x prototype 0.7-0.9 m/s (speed scales with track size)
   lidarRange: 14, lidarH: 0.72, lead: 70, separation: 22,
 };
 
@@ -82,7 +82,7 @@ export class Scout {
     let tgt = null;
     if (this.mode === 'recall') {
       tgt = { x: R.x - R.fwd.x * 14 + R.fwd.z * 8, z: R.z - R.fwd.z * 14 - R.fwd.x * 8 };
-      if (Math.hypot(tgt.x - this.x, tgt.z - this.z) < 2) { this.mode = 'escort'; this.msg = 'docked beside AEGIS-V1'; }
+      this.msg = Math.hypot(tgt.x - this.x, tgt.z - this.z) < 2 ? 'docked beside AEGIS-V1 (recalled)' : 'returning to AEGIS-V1';   // stay in recall until redeployed
     } else {
       tgt = this.target();
       if (!tgt) { this.mode = 'escort'; tgt = { x: R.x + R.fwd.x * 25 + R.fwd.z * 10, z: R.z + R.fwd.z * 25 - R.fwd.x * 10 }; }
@@ -181,6 +181,7 @@ export class Scout {
     if (c === 'on' || c === 'deploy') { this.enabled = true; this.mode = 'escort'; this.msg = 'deployed: will scout ahead whenever a route is active'; }
     else if (c === 'off' || c === 'park') { this.enabled = false; this.msg = 'parked'; }
     else if (c === 'recall') { this.enabled = true; this.mode = 'recall'; this.msg = 'recalled to AEGIS-V1'; }
+    else return `unknown scout command "${c}" (use on | off | recall | status)`;
     return this.msg;
   }
 }

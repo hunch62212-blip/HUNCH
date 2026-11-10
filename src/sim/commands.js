@@ -1,6 +1,7 @@
 // Operator command console. Every capability of the rover is reachable from here.
-import { ROVER, WORLD, K } from './config.js';
+import { ROVER, WORLD, K, FAILURES } from './config.js';
 import { PRIORITY } from './autonomy.js';
+import { MODES } from './health.js';
 
 export const HELP = [
   ['help [topic]', 'this list'],
@@ -13,16 +14,22 @@ export const HELP = [
   ['limit rpm <n> | limit speed <m/s> | limit torque <%>', 'hard limits (rpm = prototype motor rpm, 300 max)'],
   ['rpm auto|<n> | turbo on|off|auto', 'smart rpm 120/180/300 or lock the drive'],
   ['drive <vx> [wz] [vz] | stop', 'direct body-velocity command (m/s, rad/s)'],
-  ['steer ackermann|crab|pivot', 'manual steering mode'],
   ['brake on|off', 'parking brake'],
   ['lift kneel|drive|carry|<m> | clamp open|close', 'ride height (kneel / carry) and ring jaws'],
   ['level on|off | ride <m>', 'active leveling, ride-height offset'],
   ['lights on|off', 'work lights'],
-  ['timescale <x> | pause', 'simulation speed (1-50x) / pause toggle'],
+  ['timescale <x> | pause | ff', 'simulation speed (1-50x) / pause toggle / fast forward 50x on-off'],
+  ['warp on|off', 'transit warp: at >= 50x, long autonomous cruise legs run kinematically (physics for everything else)'],
+  ['newmap', 'reload with a new random crater / boulder layout'],
   ['lidar on|off | lidar channels <n> | lidar res <n>', 'LiDAR power / resolution'],
   ['camera on|off', 'camera power'],
   ['fault block|lidar|camera|comms|battery <%>|wheel <1-6>|shift|port <1|2>', 'Mission 10 fault injection'],
-  ['clear faults | clear port <n>', 'remove faults'],
+  ['fault list | fault <id> [unit]', 'hardware failure catalogue (mc 3, seize 5, bat 2, fc A, imu B, ldust, louver L, ...)'],
+  ['failures on|off [realistic|100x|1000x|demo]', 'RANDOM FAILURE switch (off by default; demo = one every few minutes)'],
+  ['health | procedure <id> | repair <id>|all|abort', 'FDIR alarms + redundancy, procedure card, field / dock repair'],
+  ['survival on|off|auto | array deploy|stow', 'survival mode (night / dead battery) and the keep-alive solar blanket'],
+  ['clear faults | clear comms | clear port <n>', 'remove faults (clearing comms runs the queued commands)'],
+  ['reroute <A|B> <1|2>', 'send a module to the other receiving port (e.g. when its port is faulted)'],
   ['map clear|save|load|forget | routes', 'SLAM map & route memory (forget = erase the stored copy too)'],
   ['plan | priority <A|B> <category>', 'Mission 11 logistics plan / set request category'],
   ['reserve <%>', 'battery reserve that triggers solar recharge'],
@@ -44,9 +51,12 @@ export function runCommand(sim, ui, line) {
   const [cmd0, ...a] = raw.split(/\s+/);
   const cmd = cmd0.toLowerCase();
   const R = sim.rover, A = sim.autonomy;
-  // comms loss: only the hard-wired E-stop link and fault clearing get through
-  if (A.faults.comms && !['estop', 'clear', 'help', 'status', 'view', 'timescale', 'pause'].includes(cmd)) {
-    say('COMMS LOSS: command not delivered (rover continuing autonomously). Use "clear faults" to restore link.', 'err');
+  // comms loss: only the hard-wired E-stop link, fault clearing and local UI commands get through; the rest is
+  // queued at the ground station and sent, in order, when the link is restored ("clear faults" / "clear comms")
+  if (A.faults.comms && !['estop', 'e-stop', 'clear', 'help', '?', 'status', 'view', 'timescale', 'ts', 'pause', 'ff', 'fastforward', 'warp', 'newmap', 'health', 'fdir', 'procedure', 'proc', 'repair', 'failures', 'random', 'fault'].includes(cmd)) { // repair = local crew / service robot
+    (A.queuedCommands = A.queuedCommands || []).push(raw);
+    say(`COMMS LOSS: "${raw}" queued (${A.queuedCommands.length} waiting; rover continuing autonomously). Use "clear comms" to restore the link.`, 'err');
+    for (const o of out) sim.log(o.msg, o.level);
     return out;
   }
   const cargoBy = (k) => { k = (k || 'A').toUpperCase(); return sim.cargo.find((c) => c.id.includes(k === 'A' ? '40A' : k === 'B' ? '20B' : k)) || sim.cargo[0]; };
@@ -64,7 +74,7 @@ export function runCommand(sim, ui, line) {
   switch (cmd) {
     case 'help': case '?':
       for (const [c, d] of HELP) say(`${c.padEnd(52)} ${d}`);
-      say('Keys: W/S drive, A/D steer, Q/E crab, 1/2/3 steer mode, SPACE brake, R/F lift, G grapple, T/Y stage, ESC = E-STOP, C camera, V lidar, H help');
+      say('Keys: W/S drive, A/D turn, SPACE brake, R/F lift, G clamp, ESC = E-STOP, C camera, V lidar, H help');
       break;
     case 'estop': case 'e-stop': sim.emergencyStop('console'); break;
     case 'reset': sim.resetEstop(); break;
@@ -146,10 +156,21 @@ export function runCommand(sim, ui, line) {
       say(r.ok ? R.lift.msg : `Refused: ${r.why}`, r.ok ? 'ok' : 'warn'); break;
     }
     case 'level': R.leveling = (a[0] || 'on').toLowerCase() !== 'off'; if (!R.leveling) for (const b of R.bogies) b.level = 0; say(`Active leveling ${R.leveling ? 'ON' : 'OFF'}`, 'ok'); break;
-    case 'ride': R.rideOffset = Math.max(-0.25, Math.min(0.25, num(a[0], 0))); say(`Ride height offset ${R.rideOffset.toFixed(2)} m`, 'ok'); break;
+    // (was: wrote R.rideOffset directly, which the lift controller pulled straight back to lift.target next step)
+    case 'ride': R.lift.target = Math.max(ROVER.ride.kneel, Math.min(ROVER.ride.max, num(a[0], 0))); say(`Ride height set point ${R.lift.target.toFixed(2)} m`, 'ok'); break;
     case 'lights': R.lights = (a[0] || 'on').toLowerCase() !== 'off'; say(`Lights ${R.lights ? 'ON' : 'OFF'}`, 'ok'); break;
     case 'timescale': case 'ts': sim.timeScale = Math.max(0.1, Math.min(50, num(a[0], 1))); say(`Time scale ${sim.timeScale}x`, 'ok'); break;
     case 'pause': sim.paused = !sim.paused; say(sim.paused ? 'Simulation paused' : 'Simulation running', 'ok'); break;
+    case 'ff': case 'fastforward': sim.paused = false; sim.timeScale = sim.timeScale >= 50 ? 1 : 50; say(sim.timeScale >= 50 ? 'FAST FORWARD 50x (sim time; long drives use transit warp)' : 'Time scale 1x', 'ok'); break;
+    case 'warp': {
+      const k = (a[0] || '').toLowerCase();
+      if (k === 'on' || k === 'off') sim.warp.enabled = k === 'on';
+      say(`Transit warp ${sim.warp.enabled ? 'ON' : 'OFF'} (used at >= ${sim.warp.minScale}x on long autonomous cruise legs; ${sim.warp.steps} warp steps, ${(sim.warp.simS / 60).toFixed(1)} sim min so far)`, 'ok');
+      break;
+    }
+    case 'newmap': case 'newterrain':
+      if (typeof location === 'undefined') { say('newmap: browser only', 'warn'); break; }
+      say('Loading a new random terrain…', 'ok'); setTimeout(() => { location.href = location.pathname; }, 50); break;
     case 'lidar': {
       const k = (a[0] || '').toLowerCase(), S = sim.sensors;
       if (k === 'on' || k === 'off') { S.lidarOn = k === 'on'; say(`LiDAR ${k.toUpperCase()}`, 'ok'); }
@@ -160,11 +181,70 @@ export function runCommand(sim, ui, line) {
       break;
     }
     case 'camera': sim.sensors.cameraOn = (a[0] || 'on').toLowerCase() !== 'off'; say(`Camera ${sim.sensors.cameraOn ? 'ON' : 'OFF'}`, 'ok'); break;
-    case 'fault': sim.injectFault((a[0] || '').toLowerCase(), a[1] != null ? num(a[1]) : undefined); break;
-    case 'clear':
-      if ((a[0] || '').toLowerCase() === 'port') { delete A.faults.port[num(a[1], 1)]; say(`PORT-${num(a[1], 1)} available`, 'ok'); }
-      else sim.clearFaults();
+    case 'fault': {
+      const k = (a[0] || '').toLowerCase();
+      if (k === 'list' || !k) {
+        say('Fault catalogue (fault <id> [unit]): legacy block | lidar | camera | comms | battery <%> | wheel <1-6> | shift | port <1|2>', 'info');
+        for (const m of MODES) say(`  ${m.id.padEnd(8)} ${m.inst[0] == null ? '' : `[${m.inst.join('|')}] `}${m.name} (${m.sev}, ${m.fidelity})`, 'info');
+        break;
+      }
+      sim.injectFault(k, a[1] != null ? (Number.isFinite(+a[1]) ? +a[1] : a[1]) : undefined); break;
+    }
+    case 'failures': case 'random': {
+      const H = sim.health, k = (a[0] || '').toLowerCase();
+      if (k === 'on' || k === 'off') H.setRandom(k === 'on', a[1]);
+      else if (k) H.setRandom(true, k);
+      else say(`Random failures ${H.random.on ? 'ON' : 'OFF'} at ${H.random.preset} (${H.random.rateX}x MTBF rate). Usage: failures on|off [realistic|100x|1000x|demo|<n>]`, 'info');
       break;
+    }
+    case 'health': case 'fdir': {
+      const H = sim.health, st = H.stats;
+      say(`FDIR: ${H.alarms.size} alarm(s), ${H.active.size} failure(s) in the vehicle. Injected ${st.injected} (${st.random} random), detected ${st.detected}${st.detected ? `, mean latency ${(st.latSum / st.detected).toFixed(1)} s` : ''}, spurious ${st.spurious}, repaired ${st.repaired}`, 'info');
+      say(`Redundancy: FC-${H.redund.fc} | IMU-${H.redund.imu} | radio-${H.redund.com} | heaters ${H.redund.htr} | strings ${4 - H.outStrings.size}/4 | vault ${H.th.Tv.toFixed(1)} C battery ${H.th.Tb.toFixed(1)} C heaters ${H.heaterW.toFixed(0)} W (hubs ${Math.min(...H.th.hub).toFixed(0)} C, ${H.th.hubW.toFixed(0)} W)`, 'info');
+      for (const s of H.summary()) say('  ' + s, 'warn');
+      if (H.alarms.size) say('"procedure <id>" for the procedure card, "repair <id>" or "repair all" to fix', 'info');
+      break;
+    }
+    case 'procedure': case 'proc': {
+      const g = (a[0] || '').toLowerCase(); const p = sim.health.procedure(g.split(/[:\s-]/)[0]);
+      if (!p) { say(`usage: procedure <${MODES.map((m) => m.id).join('|')}>`, 'warn'); break; }
+      for (const l of p.lines) say(l, 'info');
+      break;
+    }
+    case 'repair': sim.health.startRepair(a.join(' ')); break;
+    case 'survival': {
+      const k = (a[0] || '').toLowerCase(), H = sim.health;
+      if (k === 'auto') { H.survival.auto = a[1] !== 'off'; say(`Automatic survival mode ${H.survival.auto ? 'ON' : 'OFF'} (enter < ${(FAILURES.survivalEnterSoc * 100).toFixed(0)} % away from the dock)`, 'ok'); }
+      else H.setSurvival(k !== 'off', 'operator');
+      break;
+    }
+    case 'array': sim.health.deployArray((a[0] || 'deploy').toLowerCase() !== 'stow'); break;
+    case 'clear': {
+      const k = (a[0] || '').toLowerCase();
+      if (k === 'port') { delete A.faults.port[num(a[1], 1)]; say(`PORT-${num(a[1], 1)} available`, 'ok'); }
+      else if (k === 'comms') { A.faults.comms = false; say('Comms link restored', 'ok'); }
+      else sim.clearFaults();
+      // link back: send what the operator queued during the outage, in order
+      if (!A.faults.comms && A.queuedCommands && A.queuedCommands.length) {
+        const q = A.queuedCommands; A.queuedCommands = [];
+        say(`Sending ${q.length} queued command${q.length > 1 ? 's' : ''}`, 'ok');
+        for (const o of out) sim.log(o.msg, o.level);
+        out.length = 0;
+        for (const line of q) out.push(...runCommand(sim, ui, line));
+        return out;
+      }
+      break;
+    }
+    case 'reroute': {
+      const c = cargoBy(a[0]), id = Math.round(num(a[1], NaN));
+      if (!a[0] || !sim.ports.some((p) => p.id === id)) { say(`usage: reroute <A|B> <${sim.ports.map((p) => p.id).join('|')}>`, 'warn'); break; }
+      if (c.state === 'delivered') { say(`${c.id} is already delivered`, 'warn'); break; }
+      const other = sim.cargo.find((x) => x !== c && x.dest === id && x.state !== 'delivered');
+      if (other) say(`Note: ${other.id} is also bound for PORT-${id}`, 'warn');
+      c.dest = id; const m = A.manifest.find((x) => x.cargo === c); if (m) m.port = id;
+      say(`${c.id} rerouted to PORT-${id}`, 'ok');
+      break;
+    }
     case 'map': {
       const k = (a[0] || '').toLowerCase();
       if (k === 'clear') { sim.slam.clear(); say('SLAM map and route memory cleared', 'ok'); }

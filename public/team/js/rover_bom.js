@@ -25,7 +25,7 @@
     { id: 'wheel', name: '130 x 75 mm sand tyre (woven steel hoop, 20 chevron cleats, flotation flares, PETG hub)', count: 6, spare: 1, massKg: 0.125, heatW: 0, size: [0.13, 0.075, 0.13], pos: [0, 0.065, 0], estimate: true, onVehicle: true },
     // v6 rocker-bogie (js/rocker_bogie.js): link masses are estimates for printed PETG, geometry is a placeholder
     { id: 'rocker', name: 'Rocker link, printed PETG, bent (front wheel + bogie pivot)', count: 2, spare: 1, massKg: 0.085, heatW: 0, size: [0.33, 0.018, 0.012], pos: [0.03, 0.150, 0], estimate: true, onVehicle: true },
-    { id: 'bogie', name: 'Bogie link, printed PETG (middle + rear wheel)', count: 2, spare: 1, massKg: 0.045, heatW: 0, size: [0.23, 0.018, 0.012], pos: [-0.1075, 0.105, 0], estimate: true, onVehicle: true },
+    { id: 'bogie', name: 'Bogie link, printed PETG (middle + rear wheel)', count: 2, spare: 1, massKg: 0.045, heatW: 0, size: [0.255, 0.018, 0.012], pos: [-0.12, 0.105, 0], estimate: true, onVehicle: true },
     { id: 'pivot', name: 'Pivot pins, flanged bearings and axle stubs (2 rocker, 2 bogie, 6 axles)', count: 1, spare: 0, massKg: 0.12, heatW: 0, size: [0.05, 0.05, 0.40], pos: [-0.03, 0.120, 0], estimate: true, onVehicle: true },
     { id: 'diff', name: 'Bevel-gear differential + transverse pivot shaft (body pitch = mean of the rockers)', count: 1, spare: 0, massKg: 0.16, heatW: 0, size: [0.03, 0.03, 0.36], pos: [0, 0.194, 0], estimate: true, onVehicle: true },
     { id: 'motor', name: '12V 300 RPM high-torque gearmotor, one per wheel (datasheet TBC)', count: 6, spare: 0, massKg: 0.200, heatW: 0, size: [0.074, 0.037, 0.037], pos: [0, 0.065, 0], onVehicle: true },
@@ -119,7 +119,7 @@
 
   /** Bogie axle X (m): front, mid, rear — matches fusion_rover axle tubes. */
   function axleXM() {
-    return [0.215, 0, -0.215];          // wheel rows (rocker_bogie.js GEO.xF / xM / xR)
+    return [0.24, 0, -0.24];          // wheel rows (rocker_bogie.js GEO.xF / xM / xR)
   }
 
   /**

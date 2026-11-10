@@ -6,6 +6,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { Lensflare, LensflareElement } from 'three/examples/jsm/objects/Lensflare.js';
 import { mulberry32 } from '../sim/terrain.js';
@@ -48,7 +49,8 @@ export function createScene(canvas) {
     vertexShader: 'varying vec3 vd; void main(){ vd = normalize(position); gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
     fragmentShader: 'uniform vec3 sun; varying vec3 vd; void main(){ float g = smoothstep(0.02, -0.12, vd.y); vec3 c = mix(vec3(0.0), vec3(0.42,0.41,0.39), g); c += vec3(0.06,0.07,0.09) * smoothstep(0.0, 0.5, vd.y) * 0.3; c += vec3(40.0,38.0,35.0) * pow(max(dot(vd, normalize(sun)), 0.0), 900.0); gl_FragColor = vec4(c, 1.0); }' });
   envScene.add(new THREE.Mesh(envGeo, envMat));
-  function updateEnv(dir) { envMat.uniforms.sun.value.copy(dir); const rt = pmrem.fromScene(envScene, 0.02); if (scene.environment) scene.environment.dispose(); scene.environment = rt.texture; }
+  let _lastEnvUpdate = -999;
+  function updateEnv(dir) { envMat.uniforms.sun.value.copy(dir); const now = performance.now(); if (now - _lastEnvUpdate < 2000) return; _lastEnvUpdate = now; const rt = pmrem.fromScene(envScene, 0.02); if (scene.environment) scene.environment.dispose(); scene.environment = rt.texture; }
   scene.environmentIntensity = 0.9;
 
   // --- sky dome objects
@@ -81,13 +83,20 @@ export function createScene(canvas) {
   const earth = new THREE.Mesh(new THREE.SphereGeometry(520, 48, 32), new THREE.MeshStandardMaterial({ map: earthTexture(), roughness: 0.9, metalness: 0, emissive: 0x0a1630, emissiveIntensity: 0.25 }));
   sky.add(earth);
 
-  const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, { samples: 4, type: THREE.HalfFloatType }));
+  const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType }));
   composer.addPass(new RenderPass(scene, camera));
+  // NaN/Inf guard: one bad pixel must stay one pixel - bloom's blur and SMAA would otherwise spread it into
+  // a screen-sized black blob. Also caps HDR (well above the sun disc) so bloom can't overflow half-float.
+  composer.addPass(new ShaderPass({
+    uniforms: { tDiffuse: { value: null } },
+    vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
+    fragmentShader: 'uniform sampler2D tDiffuse; varying vec2 vUv; void main(){ vec4 c = texture2D(tDiffuse, vUv); if (any(isnan(c)) || any(isinf(c))) c = vec4(0.0, 0.0, 0.0, 1.0); c.rgb = clamp(c.rgb, 0.0, 1000.0); gl_FragColor = c; }',
+  }));
   const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.22, 0.45, 1.35);
   composer.addPass(bloom);
-  composer.addPass(new OutputPass());
-  const smaa = new SMAAPass(window.innerWidth * renderer.getPixelRatio(), window.innerHeight * renderer.getPixelRatio());
+  const smaa = new SMAAPass(window.innerWidth, window.innerHeight);
   composer.addPass(smaa);
+  composer.addPass(new OutputPass());
   composer.setSize(window.innerWidth, window.innerHeight);
 
   // Cascaded shadow maps: crisp contact shadows near the rover AND long low-sun shadows to the horizon
@@ -128,8 +137,11 @@ export function createScene(canvas) {
     baseQ = q; renderScale = scale;
     const pr = ({ low: 0.75, medium: 1.0, high: Math.min(window.devicePixelRatio, 1.5), ultra: Math.min(window.devicePixelRatio, 2) }[q] ?? 1) * scale;
     renderer.setPixelRatio(Math.max(0.5, pr));
-    const sm = { low: 1024, medium: 2048, high: 2048, ultra: 4096 }[q] ?? 2048;
+    // never ask for a shadow map bigger than the GPU supports (some browsers/GPUs silently render black)
+    const sm = Math.min({ low: 1024, medium: 2048, high: 2048, ultra: 2048 }[q] ?? 2048, renderer.capabilities.maxTextureSize || 2048);
     for (const l of csm.lights) { if (l.shadow.mapSize.x !== sm) { l.shadow.mapSize.set(sm, sm); if (l.shadow.map) { l.shadow.map.dispose(); l.shadow.map = null; } } }
+    // the cascades only refresh every few frames; force them all to redraw now so a resized/disposed map is never shown empty (black boxes)
+    for (const l of csm.lights) l.shadow.needsUpdate = true;
     bloom.enabled = q !== 'low'; smaa.enabled = q !== 'low' && scale >= 0.7; flare.visible = q !== 'low';
     resize();
   }
@@ -165,11 +177,17 @@ export function createScene(canvas) {
     if (!(window.innerWidth > 0 && window.innerHeight > 0)) return; // minimised / hidden: keep last valid size
     renderer.setSize(window.innerWidth, window.innerHeight);
     composer.setSize(window.innerWidth, window.innerHeight);
-    if (typeof smaa !== 'undefined') smaa.setSize(window.innerWidth * renderer.getPixelRatio(), window.innerHeight * renderer.getPixelRatio());
+    if (typeof smaa !== 'undefined') smaa.setSize(window.innerWidth, window.innerHeight);
     if (typeof csm !== 'undefined') csm.updateFrustums();
     camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
   }
   window.addEventListener('resize', resize);
+  // GPU context loss (common on Safari / low-memory GPUs): keep the page alive and rebuild everything when it comes back
+  renderer.domElement.addEventListener('webglcontextlost', (e) => { e.preventDefault(); });
+  renderer.domElement.addEventListener('webglcontextrestored', () => {
+    for (const l of csm.lights) { if (l.shadow.map) { l.shadow.map.dispose(); l.shadow.map = null; } l.shadow.needsUpdate = true; }
+    setQuality(baseQ === 'ultra' ? 'high' : baseQ, renderScale);
+  });
     // self-heal: recompute cascade frustums if they were ever built from an invalid camera
   function csmGuard() {
     const l = csm.lights[0];

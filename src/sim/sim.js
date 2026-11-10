@@ -10,6 +10,7 @@ import { heightAt } from './terrain.js';
 import { Scout } from './scout.js';
 import { Telemetry } from './telemetry.js';
 import { PowerDock } from './powerDock.js';
+import { Health } from './health.js';
 
 export class Sim {
   constructor(RAPIER, opts = {}) {
@@ -18,6 +19,11 @@ export class Sim {
     Object.assign(this, w);
     this.time = 0;
     this.timeScale = 1;
+    // Transit warp: at >= minScale the long autonomous cruise legs run kinematically (Rover.railsPlace) in H-second
+    // steps; pickup, docking, charging, pivots, recoveries and anything the rails check refuses stay on full physics.
+    this.warp = { enabled: opts.warp ?? true, minScale: 50, H: 0.5, active: false, steps: 0, simS: 0, lastScanD: 0, lastStreamD: 0 };
+    this.warping = false;   // true only inside warpStep, while the autonomy tick runs
+    this.actualRate = 0;    // achieved sim seconds per wall second (EMA), for the HUD
     this.paused = false;
     this.logs = [];
     this.listeners = {};
@@ -45,6 +51,8 @@ export class Sim {
     this.addModule(this.scout);
     this.powerDock = new PowerDock(this);
     this.addModule(this.powerDock);
+    this.health = new Health(this); // FDIR, random failures, thermal, survival mode, keep-alive array
+    this.addModule(this.health);
     this.lunar = { on: false, periodS: 900, phase: 0.25, _t: 0 }; // demo lunar day/night cycle (off = fixed sun)
     this.telemetry = new Telemetry(this);
     this.addModule(this.telemetry);
@@ -85,6 +93,7 @@ export class Sim {
   resetEstop() {
     const R = this.rover;
     if (!R.estop) { this.log('E-STOP is not latched', 'info'); return; }
+    if (this.health.fx.estopLoop) { this.log('RESET refused: E-STOP loop is open circuit (repair it first: "repair estop")', 'err'); return; }
     R.estop = false; R.powered = false; R.brake = true;
     this.log('E-STOP released. Drive system still DISARMED: press START to run power-on self-test.', 'warn');
     this.emit('estop', false);
@@ -94,6 +103,9 @@ export class Sim {
     if (R.estop) { this.log('START refused: E-STOP still latched (reset it first)', 'err'); return; }
     if (R.powered) { this.log('Drive system already armed', 'info'); return; }
     if (R.power.soc < 0.01) { this.log('START refused: battery depleted', 'err'); return; }
+    const noArm = this.health.canArm();
+    if (noArm) { this.log(`START refused: ${noArm} (see "health")`, 'err'); return; }
+    if (this.health.survival.on) this.health.survival.on = false;
     this.startup = { t0: this.time, dur: 4 };
     this.log('Power-on self-test: motor controllers, brakes, steering, IMU, LiDAR, camera...', 'info');
   }
@@ -133,6 +145,11 @@ export class Sim {
       const ex = (t.x - s.px) - v.x * dt, ey = (t.y - s.py) - v.y * dt, ez = (t.z - s.pz) - v.z * dt;
       if (Math.abs(ex) > 2e-3 || Math.abs(ey) > 2e-3 || Math.abs(ez) > 2e-3) { s.x = t.x; s.y = t.y; s.z = t.z; continue; }
       s.x += v.x * dt; s.y += v.y * dt; s.z += v.z * dt;
+      // Only correct at creep speeds, where the rounding swallows the motion (the reason this guard exists). Re-setting
+      // the position after every step at driving speed left the rover's broadphase proxy stale: it never paired with a
+      // rock streamed in nearby, and the chassis drove through a 1.4 m boulder (tests/rock_climb.mjs on the 2.5 km map;
+      // ray and wheel queries still saw the rock). Above 0.1 m/s one ulp is < 1.5 % of a step and unbiased.
+      if (Math.hypot(v.x, v.z) > 0.1) { s.x = t.x; s.y = t.y; s.z = t.z; continue; }
       if (s.x !== t.x || s.y !== t.y || s.z !== t.z) b.setTranslation({ x: s.x, y: s.y, z: s.z }, false);
     }
   }
@@ -194,7 +211,7 @@ export class Sim {
       case 'camera': this.sensors.faults.camera = true; this.log('FAULT: camera / fiducial pipeline failed', 'err'); break;
       case 'comms': A.faults.comms = true; this.log('FAULT: comms loss with base. Rover continues autonomously; operator commands queued (E-STOP link independent).', 'err'); break;
       case 'battery': { const s = Math.max(0.01, Math.min(1, (arg ?? 15) / 100)); R.power.wh = s * ROVER.battery.capacityWh; R.power.soc = s; this.log(`FAULT: battery state of charge forced to ${(s * 100).toFixed(0)}%`, 'err'); break; }
-      case 'wheel': { const N = R.wheels.length, n = Math.max(1, Math.min(N, arg ?? 3)); R.wheels[n - 1].fault = 'motor'; this.log(`FAULT: wheel ${n} motor controller failed (wheel free-rolls). Torque redistributed to ${N - 1} wheels, speed derated 25% (autonomy.js).`, 'err'); break; }
+      case 'wheel': { const N = R.wheels.length, a = Math.round(Number(arg ?? 3)), n = Math.max(1, Math.min(N, Number.isFinite(a) ? a : 3)); R.wheels[n - 1].fault = 'motor'; this.log(`FAULT: wheel ${n} motor controller failed (wheel free-rolls). Torque redistributed to ${N - 1} wheels, speed derated 25% (autonomy.js).`, 'err'); break; }
       case 'shift': {
         if (!R.loaded) { this.log('No cargo to shift', 'warn'); return; }
         R.lift.base.z += 0.11; R.lift.shifted = true;
@@ -202,7 +219,11 @@ export class Sim {
         break;
       }
       case 'port': { const n = arg ?? 1; A.faults.port[n] = true; this.log(`FAULT: PORT-${n} receiving location unavailable`, 'err'); break; }
-      default: this.log(`Unknown fault "${kind}"`, 'warn');
+      default:
+        // the FDIR catalogue (src/sim/health.js): mc, seize, cool, enc, strut, bat, runaway, pdu, imd, fc, seu,
+        // imu, sun, ldust, cdust, com, htr, louver, clamp, lcell, estop, coupler
+        if (!this.health.inject(kind, arg)) { this.log(`Unknown fault "${kind}" ("fault list" shows the catalogue)`, 'warn'); return; }
+        return;
     }
     this.emit('fault', kind);
   }
@@ -210,6 +231,7 @@ export class Sim {
     this.sensors.faults.lidar = this.sensors.faults.camera = false;
     this.autonomy.faults.comms = false; this.autonomy.faults.port = {};
     for (const w of this.rover.wheels) w.fault = null;
+    this.health.clearAll();
     this.log('All faults cleared', 'ok');
     this.emit('fault', 'clear');
   }
@@ -238,6 +260,7 @@ export class Sim {
     this.rover.step(dt);
     this._precisionPre();
     this.world.step(this.eventQueue);
+    if (this.freshRocks.length) { for (const c of this.freshRocks.splice(0)) if (c.isEnabled()) c.setTranslation(c.translation()); }
     this._precisionPost(dt);
     this.cargoForces.clear();
     this.eventQueue.drainContactForceEvents((e) => {
@@ -256,20 +279,66 @@ export class Sim {
     this.stepCount++;
   }
 
-  // advance by wall-clock dt with time scaling, within a CPU budget per frame
+  // ---------------- transit warp ----------------
+  warpWanted() { return this.warp.enabled && this.timeScale >= this.warp.minScale && !this.paused; }
+  // One kinematic step of H seconds. Returns the sim time advanced (0 if the autonomy declined the rails this tick:
+  // the caller then runs physics steps, and the autonomy keeps driving them until the rails check passes again).
+  warpStep(h = this.warp.H) {
+    const A = this.autonomy, R = this.rover, S = this.sensors, W = this.warp;
+    if (!W.active) { W.active = true; R.railsBegin(); W.lastScanD = -1e9; W.lastStreamD = -1e9; }
+    // camera at 1 Hz on rails: the fiducial beacons (habitat face, power dock, lander) must still be seen, or the SLAM
+    // drift is never corrected on the warped approach to the base (the loaded rover then circled the lead-in point
+    // 17-20 m off). Each frame is fused by this tick's autonomy update and then cleared, so it is never re-fused.
+    S.detections = []; S.rockDetections = [];
+    W.camT = (W.camT ?? 0) - h;
+    if (W.camT <= 0) { W.camT = 1; if (S.cameraOn && !S.faults.camera && R.powered) S._doCamera(); }
+    this.warping = true; A._railsMoved = false;
+    try { A.update(h); } finally { this.warping = false; S.detections = []; S.rockDetections = []; }
+    if (!A._railsMoved) return 0;
+    S.sunTick(h);
+    this.slam.update(h);   // integrates the odometry the rails produced (est stays in its own SLAM frame)
+    const d = S.odom.dist;
+    if (d - W.lastStreamD > 30) { W.lastStreamD = d; this.streamRocks([R.pose()]); this.world.updateSceneQueries(); }
+    if (d - W.lastScanD > 6) { W.lastScanD = d; S.warpScan(); }
+    for (const m of [this.powerDock, this.health, this.telemetry]) { m._acc += h; if (m._acc >= 1 / (m.rate || 120) - 1e-9) { m.update(m._acc); m._acc = 0; } }
+    this._startupTick();
+    if (this.lunar.on) { const Ln = this.lunar; Ln.phase = (Ln.phase + h / Ln.periodS) % 1; this.setSun((this.sunAz0 ?? 205) + Ln.phase * 360, 10 * Math.sin(Ln.phase * 2 * Math.PI) - 1); }
+    this.time += h; W.steps++; W.simS += h;
+    return h;
+  }
+  endWarp() {
+    if (!this.warp.active) return;
+    this.warp.active = false;
+    this.rover.railsEnd();
+    this.streamRocks([this.rover.pose()]);
+    this._shadow = null; // float64 position shadows restart from the solver's positions
+  }
+  // one step of whichever kind applies; returns the sim seconds advanced
+  stepAuto() {
+    if (this.warpWanted() && this.autonomy.railsOk) {
+      const h = this.warpStep();
+      if (h > 0) return h;
+    }
+    this.endWarp();
+    this.stepOnce();
+    return PHYS.dt;
+  }
+
+  // advance by wall-clock dt with time scaling, within a CPU budget per frame; returns the sim seconds advanced
   advance(realDt, budgetMs = 20) {
-    if (this.paused) return 0;
+    if (this.paused) { this.actualRate = 0; return 0; }
     this._acc = (this._acc || 0) + Math.min(realDt, 0.1) * this.timeScale;
-    const t0 = performance.now();
-    let n = 0;
+    const t0 = performance.now(), simT0 = this.time;
     while (this._acc >= PHYS.dt) {
-      this.stepOnce();
-      this._acc -= PHYS.dt; n++;
+      this._acc -= this.stepAuto();
       if (performance.now() - t0 > budgetMs) break;
     }
     // carry a little backlog between frames; beyond that the CPU cannot keep up with the time scale
-    if (this._acc > 0.25) { this._acc = 0.25; this._lagT = (this._lagT || 0) + realDt; } else this._lagT = Math.max(0, (this._lagT || 0) - realDt);
+    const cap = Math.max(0.25, this.timeScale * 0.05);
+    if (this._acc > cap) { this._acc = cap; this._lagT = (this._lagT || 0) + realDt; } else this._lagT = Math.max(0, (this._lagT || 0) - realDt);
     this.lagging = this._lagT > 1;
-    return n;
+    const adv = this.time - simT0;
+    if (realDt > 0) this.actualRate += (adv / Math.min(realDt, 0.1) - this.actualRate) * Math.min(1, realDt / 1.5);
+    return adv;
   }
 }

@@ -18,6 +18,13 @@ export class Planner {
     this.closed = new Uint32Array(PN * PN);
     this.search = 0;
     this.unknownCost = 1.5;
+    // CHANGES.md §17: unmapped ground within unknownHazardRadius of mapped SLOPE / CRATER ground is a likely rim or pocket
+    // (A* "explore" at 1.5 /m routed the loaded rover straight into such pockets and it could not turn round)
+    this.unknownNearHazardCost = 12.0;
+    this.unknownHazardRadius = 15;   // m
+    this.loadedMinRadius = 18;       // m, smallest turning radius the planned centre line may have while carrying a module
+    this.knownMask = new Uint8Array(PN * PN);
+    this.lastSmooth = { corners: 0, forced: 0, filleted: 0, unfilleted: 0 };
     this.routeBonus = 0.5;
     this.inflate = 5.8;   // m, hard inflation (AEGIS-V1 half width 4.9 m + margin)
     this.soft = 15;       // m, soft cost falloff
@@ -37,24 +44,38 @@ export class Planner {
     const lethal = [];
     const sub = PRES / RES; // 4
     const perTile = TILE / sub; // 16 planning cells per tile side
+    const KM = this.knownMask; KM.fill(0);
+    const hazK = [];        // planning cells that hold mapped CLS.SLOPE / CLS.CRATER ground
+    const partial = [];     // k, frac, c of partly mapped cells: finished below, once the near-hazard mask exists
     for (const t of this.slam.tiles.values()) {
       if (t.dirty) this.slam.computeHazard(t);
       const ox = t.tx * TILE * RES, oz = t.tz * TILE * RES;
       for (let pj = 0; pj < perTile; pj++) for (let pi = 0; pi < perTile; pi++) {
-        let known = 0, sum = 0, worst = 0;
+        let known = 0, sum = 0, worst = 0, hz = false;
         for (let a = 0; a < sub; a++) for (let b = 0; b < sub; b++) {
           const i = (pj * sub + a) * TILE + (pi * sub + b);
           if (!t.n[i]) continue;
           known++; const h = t.haz[i]; sum += h; if (h > worst) worst = h;
+          const cl = t.cls[i]; if (cl === CLS.SLOPE || cl === CLS.CRATER) hz = true;
         }
         if (!known) continue;
         const k = this.idx(ox + (pi + 0.5) * PRES, oz + (pj + 0.5) * PRES);
         if (k < 0) continue;
+        KM[k] = 1;
+        if (hz) hazK.push(k);
         if (worst >= 255 && known >= 2) { C[k] = LETHAL; lethal.push(k); continue; }
         const frac = known / (sub * sub);
         const c = Math.max(1, (sum / known) / 20) + (worst > 120 ? 2 : 0);
         C[k] = frac * c + (1 - frac) * this.unknownCost;
+        if (frac < 1) partial.push(k, frac, c);
       }
+    }
+    // unmapped ground next to mapped slopes / craters costs 12 /m instead of 1.5 /m (CHANGES.md §17)
+    this.unknownInflated = 0;
+    if (hazK.length && this.unknownNearHazardCost > this.unknownCost) {
+      const near = this.nearMask(hazK, this.unknownHazardRadius), uh = this.unknownNearHazardCost;
+      for (let k = 0; k < C.length; k++) if (near[k] && !KM[k]) { C[k] = uh; this.unknownInflated++; }
+      for (let q = 0; q < partial.length; q += 3) { const k = partial[q]; if (near[k]) C[k] = partial[q + 1] * partial[q + 2] + (1 - partial[q + 1]) * uh; }
     }
     // known infrastructure (from the base database, not terrain): lander, building, restricted zones
     const stampDisk = (x, z, r, val) => {
@@ -72,6 +93,26 @@ export class Planner {
     stampDisk(WORLD.pad.x, WORLD.pad.z, 8.5, LETHAL);
     const H = this.sim.terrain.hab;
     for (let s = -16; s <= 16; s += 2) for (let d = 0; d <= 16; d += 2) stampDisk(H.face.x - H.nx * d + H.tx * s, H.face.z - H.nz * d + H.tz * s, 2, LETHAL);
+    // surveyed base structures (terrain.baseStructures, the same list that builds their colliders) and the
+    // power dock. Thin poles (apron light masts, array posts: r 0.2 m) are easy for the LiDAR height map to miss
+    // and an 8 m wide carried module clips them; mapped-in keep-outs stop the planner routing past them.
+    // a carried module (6 m up, longer and wider than the deck) sweeps beyond the rover's own inflation radius;
+    // only tall structures reach it, so they alone get the extra margin
+    const cg = this.sim.rover && this.sim.rover.lift.cargo;
+    const tall = cg ? Math.max(0, Math.hypot(cg.T.length / 2 + Math.abs(cg.T.carryX || 0), cg.T.shape === 'cylinder' ? cg.T.radius : cg.T.width / 2) + 0.5 - this.inflate) : 0;
+    const line = (x, z, ax, az, len, r) => { const n = Math.max(1, Math.ceil(len / r)); for (let i = 0; i <= n; i++) { const s = -len / 2 + len * i / n; stampDisk(x + ax * s, z + az * s, r, LETHAL); } };
+    for (const it of this.sim.terrain.base || []) {
+      if (it.kind === 'dome') stampDisk(it.x, it.z, it.r, LETHAL);
+      else if (it.kind === 'mast' || it.kind === 'light') stampDisk(it.x, it.z, it.r + tall, LETHAL);
+      else if (it.kind === 'array') { stampDisk(it.x, it.z, 0.2 + tall, LETHAL); line(it.x, it.z, 1, 0, it.w, 0.5 + tall); } // post + panel (world-x aligned, as world.js)
+      else if (it.len) line(it.x, it.z, Math.cos(it.yaw), -Math.sin(it.yaw), it.len, it.r); // tunnel / modules (horizontal cylinders)
+    }
+    const PD = this.sim.powerDock && this.sim.powerDock.layout;
+    if (PD) {
+      for (const a of PD.arrays) stampDisk(a.x, a.z, 0.45 + tall, LETHAL);
+      const b = PD.bank; // bank box: depth along the face normal, width along the face
+      line(b.x, b.z, H.tx, H.tz, b.w, b.d / 2);
+    }
     if (this.useRestricted) for (const z of this.sim.terrain.restricted) stampDisk(z.x, z.z, z.r, LETHAL);
     const now = this.sim.time;
     this.blocked = this.blocked.filter((b) => b.fault || now - b.t < (b.ttl ?? 150));
@@ -109,6 +150,23 @@ export class Planner {
     }
     this.lethalCount = lethal.length;
     this.buildMs = performance.now() - t0;
+  }
+
+  // 1 where a planning cell lies within radiusM of any listed cell (circular dilation, one run per row)
+  nearMask(cells, radiusM) {
+    const rc = radiusM / PRES, n = Math.floor(rc), W = PN + 1;
+    const diff = new Int32Array(PN * W);
+    for (const k of cells) {
+      const ci = k % PN, cj = (k / PN) | 0;
+      for (let dj = -n; dj <= n; dj++) {
+        const j = cj + dj; if (j < 0 || j >= PN) continue;
+        const w = Math.floor(Math.sqrt(rc * rc - dj * dj));
+        diff[j * W + Math.max(0, ci - w)]++; diff[j * W + Math.min(PN - 1, ci + w) + 1]--;
+      }
+    }
+    const mask = new Uint8Array(PN * PN);
+    for (let j = 0; j < PN; j++) { let run = 0; for (let i = 0; i < PN; i++) { run += diff[j * W + i]; if (run > 0) mask[j * PN + i] = 1; } }
+    return mask;
   }
 
   passable(k, startK, escapeR2) {
@@ -201,9 +259,26 @@ export class Planner {
     }
     return sum / (n + 1) * d;
   }
-  // string pulling, accepting a shortcut only if it is not costlier than the grid path
+  // Can a corner at p1 (path p0 -> p1 -> p2) be rounded with an arc of radius R? The arc's tangent length is
+  // R tan(theta/2) and may use at most half of each adjacent segment (the neighbouring corners share the other half);
+  // the first and last segment give all of theirs.
+  cornerOK(p0, p1, p2, R, first = false, last = false) {
+    const ax = p1.x - p0.x, az = p1.z - p0.z, bx = p2.x - p1.x, bz = p2.z - p1.z;
+    const la = Math.hypot(ax, az), lb = Math.hypot(bx, bz);
+    if (la < 1e-6 || lb < 1e-6) return true;
+    const th = Math.acos(Math.max(-1, Math.min(1, (ax * bx + az * bz) / (la * lb))));
+    if (th < 0.02) return true;
+    const T = R * Math.tan(th / 2);
+    return T <= (first ? la : la / 2) && T <= (last ? lb : lb / 2);
+  }
+  // string pulling, accepting a shortcut only if it is not costlier than the grid path. Loaded (CHANGES.md §17): the
+  // carried module's CoM is 6.8 m up and the skid-steer cannot point-turn, so a shortcut is also refused when the
+  // corner it makes with the previous segment cannot be rounded at loadedMinRadius; after pulling, the corners are
+  // replaced by arcs (fillet).
   smooth(pts) {
     if (pts.length < 3) return pts;
+    const R = this.sim.rover && this.sim.rover.loaded ? this.loadedMinRadius : 0;
+    this.lastSmooth = { corners: 0, forced: 0, filleted: 0, unfilleted: 0 };
     const out = [pts[0]];
     let i = 0;
     while (i < pts.length - 1) {
@@ -211,11 +286,59 @@ export class Planner {
       for (; j > i + 1; j--) {
         let along = 0; for (let k = i; k < j; k++) along += this.segmentCost(pts[k], pts[k + 1]);
         const direct = this.segmentCost(pts[i], pts[j]);
-        if (direct <= along * 1.02) break;
+        if (direct > along * 1.02) continue;
+        if (R && out.length >= 2 && !this.cornerOK(out[out.length - 2], pts[i], pts[j], R, out.length === 2, j === pts.length - 1)) continue;
+        break;
       }
+      if (R && j === i + 1 && out.length >= 2 && !this.cornerOK(out[out.length - 2], pts[i], pts[j], R, out.length === 2, j === pts.length - 1)) this.lastSmooth.forced++;
       out.push(pts[j]); i = j;
     }
+    return R ? this.fillet(out, R) : out;
+  }
+  // Replace each corner by a circular arc of radius R where the tangent length fits; a corner that does not fit (or
+  // whose arc would leave the mapped free space) stays a sharp vertex and is counted in lastSmooth.unfilleted
+  fillet(pts, R) {
+    if (pts.length < 3) return pts;
+    const out = [pts[0]], L = this.lastSmooth;
+    for (let v = 1; v < pts.length - 1; v++) {
+      const p0 = pts[v - 1], p1 = pts[v], p2 = pts[v + 1];
+      const ax = p1.x - p0.x, az = p1.z - p0.z, bx = p2.x - p1.x, bz = p2.z - p1.z;
+      const la = Math.hypot(ax, az), lb = Math.hypot(bx, bz);
+      const th = la > 1e-6 && lb > 1e-6 ? Math.acos(Math.max(-1, Math.min(1, (ax * bx + az * bz) / (la * lb)))) : 0;
+      if (th < 0.02) { out.push(p1); continue; }
+      L.corners++;
+      const T = R * Math.tan(th / 2);
+      const prev = out[out.length - 1];
+      const room = Math.min(v === 1 ? la : la / 2, v === pts.length - 2 ? lb : lb / 2, Math.hypot(p1.x - prev.x, p1.z - prev.z));
+      if (T > room + 1e-6) { out.push(p1); L.unfilleted++; continue; }
+      const ua = { x: ax / la, z: az / la }, ub = { x: bx / lb, z: bz / lb };
+      const t1 = { x: p1.x - ua.x * T, z: p1.z - ua.z * T }, t2 = { x: p1.x + ub.x * T, z: p1.z + ub.z * T };
+      const sgn = Math.sign(ua.x * ub.z - ua.z * ub.x) || 1;
+      const cx = t1.x - sgn * R * ua.z, cz = t1.z + sgn * R * ua.x; // centre: t1 + R x the normal of ua that points into the turn
+      const a1 = Math.atan2(t1.z - cz, t1.x - cx), nArc = Math.max(2, Math.ceil(R * th / 0.25));
+      const arc = [t1];
+      for (let q = 1; q < nArc; q++) { const a = a1 + sgn * th * q / nArc; arc.push({ x: cx + R * Math.cos(a), z: cz + R * Math.sin(a) }); }
+      arc.push(t2);
+      // the arc cuts the inside of the corner, which the cost check of the chords did not see
+      const clear = arc.every((q) => { const k = this.idx(q.x, q.z); return k >= 0 && this.cost[k] < LETHAL * 0.5; });
+      if (!clear) { out.push(p1); L.unfilleted++; continue; }
+      for (const q of arc) out.push(q);
+      L.filleted++;
+    }
+    out.push(pts[pts.length - 1]);
     return out;
+  }
+  // smallest circumradius of the path, sampled every `step` m (for the loaded turning-radius check)
+  static pathMinRadius(pts, step = 3) {
+    let best = Infinity;
+    for (let i = 0; i + 2 * step < pts.length; i++) {
+      const a = pts[i], b = pts[i + step], c = pts[i + 2 * step];
+      const ab = Math.hypot(b.x - a.x, b.z - a.z), bc = Math.hypot(c.x - b.x, c.z - b.z), ca = Math.hypot(a.x - c.x, a.z - c.z);
+      const area2 = Math.abs((b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x));
+      if (area2 < 1e-9) continue;
+      best = Math.min(best, ab * bc * ca / (2 * area2));
+    }
+    return best;
   }
   resample(pts, step) {
     const out = [pts[0]];
@@ -276,20 +399,28 @@ export class LocalPlanner {
         x += Math.cos(yaw) * 0.5 * dir; z += -Math.sin(yaw) * 0.5 * dir;
         if ((s * 2) % 2 === 0) pts.push({ x, z });
         const c = Math.cos(yaw), sn = Math.sin(yaw);
-        let ground = 0, gk = 0, hit = false;
+        // wheel ground heights in the body frame: the tub rides on the plane through them (CHANGES.md §9)
+        let gk = 0, sx = 0, sz = 0, sh = 0, sxx = 0, szz = 0, sxz = 0, sxh = 0, szh = 0, hit = false;
         for (const [wx, wz] of WHEELS) {
           const px = x + wx * c + wz * sn, pz = z - wx * sn + wz * c;
           const wh = S.wheelHazard(px, pz, opts.relaxed);
-          if (!wh) { unknown++; if (knownDist === horizon && !underUs(px, pz)) knownDist = s - 0.5; continue; }
-          ground += wh.h; gk++;
+          // (a pinhole between LiDAR rings does not end the mapped distance: it made the rover creep at 0.3 m/s on mapped ground)
+          if (!wh) { unknown++; if (knownDist === horizon && !underUs(px, pz) && !S.pinhole(px, pz)) knownDist = s - 0.5; continue; }
+          gk++; sx += wx; sz += wz; sh += wh.h; sxx += wx * wx; szz += wz * wz; sxz += wx * wz; sxh += wx * wh.h; szh += wz * wh.h;
           if (wh.lethal && !underUs(px, pz)) { hit = true; hitPt = { x: px, z: pz }; break; }
           hz += wh.cost;
         }
         if (!hit && gk >= 3 && Math.abs(s - Math.round(s)) < 1e-6) {
-          ground /= gk;
+          // least-squares plane h = mh + gx (x - mx) + gz (z - mz); falls back to the mean height (the old
+          // reference) when the known wheels don't span both axes
+          const mx = sx / gk, mz = sz / gk, mh = sh / gk;
+          const cxx = sxx / gk - mx * mx, czz = szz / gk - mz * mz, cxz = sxz / gk - mx * mz;
+          const cxh = sxh / gk - mx * mh, czh = szh / gk - mz * mh, det = cxx * czz - cxz * cxz;
+          const plane = det > 0.5 ? { gx: (cxh * czz - czh * cxz) / det, gz: (czh * cxx - cxh * cxz) / det } : { gx: 0, gz: 0 };
           for (const [bx, bz] of BELLY) {
             const qx = x + bx * c + bz * sn, qz = z - bx * sn + bz * c;
             const h = S.heightAt(qx, qz);
+            const ground = mh + plane.gx * (bx - mx) + plane.gz * (bz - mz);
             if (h === h && h - ground > belly && !underUs(qx, qz)) { hit = true; hitPt = { x: qx, z: qz }; break; }
           }
         }

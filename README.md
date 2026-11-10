@@ -33,8 +33,8 @@ Full logs: `tests/out/<name>.log`.
 
 ```bash
 npm test               # everything (the long autonomy runs take 25+ min wall each)
-npm run test:quick     # skips m3, drift, faults, nav_bench, cycle
-npm run test:long      # only those five
+npm run test:quick     # skips m3, drift, faults, fdir, nav_bench, cycle
+npm run test:long      # only those six
 node tests/run-all.mjs dock_cyl40 rocks   # named entries
 TEST_JOBS=2 npm test   # limit parallel sims (each needs ~0.5-1 GB RAM)
 ```
@@ -52,9 +52,30 @@ TEST_JOBS=2 npm test   # limit parallel sims (each needs ~0.5-1 GB RAM)
 | m1 / m3 / cycle | autonomy.mjs | Missions 1, 2+3, 6 complete |
 | drift | drift.mjs | SLAM error vs distance on a 2 km drive |
 | faults | faults.mjs | 2 km drive with a blocked road and a failed wheel |
+| fdir | fdir.mjs | all 24 hardware failure modes detected and isolated from sensor data, automatic responses, field + dock repairs, random failures, 0 false alarms, lunar-night survival energy, keep-alive array |
 | nav_bench | nav_bench.mjs | 2 km there and back, zero warnings, route reuse on return |
 
 Requirement traceability: [REQUIREMENTS.md](REQUIREMENTS.md). Ad-hoc debug scripts: `tests/scratch/` (not in `npm test`).
+
+## What's new (v3): vehicle health, failures, survival
+
+Design write-up and NASA rover comparison: [docs/SURVIVABILITY.md](docs/SURVIVABILITY.md). Every failure mode,
+its sensors, detection rule, automatic response and repair steps: [docs/FAULT_PROCEDURES.md](docs/FAULT_PROCEDURES.md)
+(generated from the code by `npm run docs:faults`). [test: fdir]
+
+* **Random failures switch:** `failures on [realistic|100x|1000x|demo]` / `failures off`, or the
+  **RANDOM FAILURES** button in the M10 panel. Off by default, seeded, at most 3 at once.
+* **FDIR:** 24 failure modes on 20 replaceable units (motor controllers, wheel ends, resolvers, struts, battery
+  strings, PDU, flight computers, IMUs, sensors, windows, radios, heaters, louvers, clamp drives, load cells,
+  E-STOP loop, dock coupler, radiation upsets). Each is found from its sensor readings, isolated to the unit and
+  bay, and answered automatically (switch to the backup, declutch, isolate, derate, EDS clean, power-cycle, safe).
+* **Repairs:** `repair <id>|all`: timed procedure with steps, spares from the on-board kit or the dock stores;
+  heavy units only on the dock service pad.
+* **Serviceable layout:** all electronics in bays reachable from the ground with the rover knelt (1.0-1.6 m).
+* **Survival:** vault and battery thermal model with louvered side radiators and redundant heaters; survival
+  mode for the lunar night or a flat battery; 12 m² keep-alive solar blanket.
+* **HUD:** HEALTH pill → FDIR panel (alarms, procedure card, repair progress, redundancy, thermal, spares).
+  3D: radiators, bay doors with status lamps, antennas, beacon, hazcams, keep-alive mast, failed-part locator.
 
 ## What's new (v2)
 
@@ -120,7 +141,8 @@ Filled from `npm test` output; see [CHANGES.md](CHANGES.md) for the run date and
 Useful commands: `limit rpm 20`, `limit speed 0.8`, `speed 1.5`, `rpm 180`, `turbo on|off|auto`,
 `drive 0.5 0 0.2`, `stop`, `lift kneel|carry`, `clamp close`, `level off`, `ride 0.1`, `lidar channels 32`,
 `fault block`, `fault wheel 3` (wheels 1–6), `fault battery 15`, `clear faults`, `plan`,
-`priority B life-support`, `routes`, `map save`, `map clear`, `sun 205 12`, `timescale 10`.
+`priority B life-support`, `routes`, `map save`, `map clear`, `sun 205 12`, `timescale 10`, `ff` (50× fast forward), `newmap`,
+`failures on demo`, `fault list`, `fault seize 5`, `health`, `procedure bat`, `repair all`, `survival on`, `array deploy`.
 
 ---
 
@@ -136,7 +158,7 @@ Useful commands: `limit rpm 20`, `limit speed 0.8`, `speed 1.5`, `rpm 180`, `tur
 | **M6** Full logistics cycle | Logistics manager orders requests → acquire → deliver → return → next load. [test: cycle] |
 | **M7** 2 km autonomous route | 1.997 km pad–habitat separation [script]; SLAM mapping, hazard avoidance, geofences, route memory. [test: nav_bench, drift, faults] |
 | **M8** Different cargo systems | 40-ft cylinder and 20-ft ISO box in a ring-adapter sled, same ring clamps. [test: pickup_*_box20, dock_box20] |
-| **M10** Something goes wrong | Blocked road, LiDAR failure, camera failure, comms loss, low battery, wheel motor failure (5 of 6 wheels driven, speed −25 %), cargo shift, port unavailable. Only blocked road + wheel failure are tested [test: faults]; see REQUIREMENTS.md. |
+| **M10** Something goes wrong | Blocked road, LiDAR failure, camera failure, comms loss, low battery, wheel motor failure (5 of 6 wheels driven, speed −25 %), cargo shift, port unavailable [test: faults: blocked road + wheel]. Plus 24 hardware failure modes with sensor-based detection, automatic response and repair, and a random-failure switch [test: fdir]; see REQUIREMENTS.md and docs/FAULT_PROCEDURES.md. |
 | **M11** AI logistics manager | Scores requests by category priority, ETA, energy. `plan`, `priority B life-support`. UNVERIFIED by test beyond the cycle order. |
 | **M12** Our own capability | Teach-and-repeat route memory [test: nav_bench], model-based slip estimation [test: odo], active load leveling. (The SPAN-40 sun-tracking solar mast is not on AEGIS-V1: 0 panels [script].) |
 
@@ -154,13 +176,16 @@ the wheels do not steer. All values below are [script] unless marked.
 | Mass | 8,000 kg empty (6,200 sprung + 6 × 300 kg corners) — [ASSUMED] in config |
 | Payload | 40-ft module 14,940 kg (12.19 × 7.96 m Ø); 20-ft ISO box 8,500 kg |
 | Wheels | 6 × 2.12 m Ø × 1.22 m woven steel hoop tyres with chevron cleats (team `rover_bom.js`, scaled) |
-| Suspension | Rocker-bogie (track 7.67 m, wheelbase 7.02 m) with active struts: kneel −0.65 m / carry +0.82 m / max +0.98 m ride |
+| Suspension | Rocker-bogie (track 7.67 m, wheelbase 7.82 m) with active struts: kneel −0.65 m / carry +0.82 m / max +0.98 m ride |
 | Steering | Skid steer (fixed wheels): yaw from left/right speed difference; pivot in place |
 | Drive | 6 hub gearmotors, 5,600 N·m peak per wheel, PI speed loop, spring brakes, thermal model |
 | Speed | 4.95 m/s at the 180-rpm-equivalent cap (unloaded); 3.8 m/s loaded limit, further trimmed by the tip governor |
-| Power | 420 kWh, 400 V. No on-board solar; charged at the dock station |
-| Cargo handling | 2 ring clamps; lift by strut ride height (no hoist travel, no docking stage) |
-| Sensors | 16-channel LiDAR (90 m, 5 Hz, 10° nose-down), 70° camera, IMU, sun sensor, wheel encoders, strut load cells, cradle alignment suite, docking-ring camera |
+| Power | 420 kWh, 400 V in 4 strings with their own contactors; PDU converters A/B. Charged at the dock; 12 m² keep-alive solar blanket for emergencies (parked only) [ASSUMED] |
+| Thermal | avionics vault + battery: louvered vertical radiators under both deck edges (the module covers the deck), thermostatic heaters on controllers A/B [ASSUMED] |
+| Avionics | flight computers A/B (hot standby), IMU A/B + voter gyro, primary + UHF radios, 4 corner omni antennas, locator beacon, E-STOP hard-wired loop [ASSUMED] |
+| Serviceability | every electronics unit in a bay at 1.0-1.6 m working height with the rover knelt; field kit + dock spares (docs/SURVIVABILITY.md) |
+| Cargo handling | 2 ring clamps (dual-winding jaw motors); lift by strut ride height (no hoist travel, no docking stage) |
+| Sensors | 16-channel LiDAR (90 m, 5 Hz, 10° nose-down), 70° camera, IMU, sun sensor, wheel encoders, strut load cells, cradle alignment suite, docking-ring camera; health sensors on every unit (heartbeats, phase currents, resolvers, thermistors, string voltages, insulation monitor, louver encoders, vent gas) |
 | Climb limit | 0.90 m edge height [script; test: rocks] |
 
 **Static stability.** The force-angle tip margin is computed live from the wheel contact polygon and the
@@ -198,7 +223,11 @@ combined CG. Autonomy slows when it drops below 25°. Loaded margin: see Measure
 * **E-STOP** removes drive torque, sets spring brakes, locks actuators. Latching: RESET then START (4 s self-test).
 * **Operator override.** Any drive input pauses autonomy; `resume` continues.
 * **Interlocks.** Clamp refused outside tolerance; release inhibited unless cargo is supported; hatch opens only
-  after seal and leak check.
+  after seal and leak check. Bay doors open their solid-state breaker; RESET is refused while the E-STOP loop is
+  open; START is refused with both flight computers or both PDU converters failed.
+* **Safe / survival modes.** Loss of both units of a redundant pair safes the rover (drive off, beacon).
+  Survival mode (`survival on`, automatic below 6 % away from the dock) holds the vault and battery at their
+  survival set points on ~0.15 kW (a 354 h lunar night ≈ 12 % of the pack).
 
 ## Three.js versions (r128 vs 0.170.0)
 
@@ -210,7 +239,15 @@ combined CG. Autonomy slows when it drops below 25°. Loaded margin: see Measure
 
 ## Simplifications
 
-* Procedural (seeded) site, not LOLA data. 2.2 × 2.2 km terrain plus a decorative horizon.
+* Procedural (seeded) site, not LOLA data. 2.5 × 2.5 km terrain plus a decorative horizon; landing pad and
+  habitat exactly 2,000 m apart. The browser draws a new random seed on every load (crater / boulder layout
+  changes; `?seed=N` repeats a map, `newmap` rerolls); the headless tests use the fixed default seed.
+* Fast forward (⏩ 50×, key `X`): full physics cannot run faster than ~5× real time, so at 50× the long
+  autonomous cruise legs use **transit warp**: the rover is moved kinematically along its planned path
+  (body on the terrain plane under the wheels, drive power from the planning energy model, a coarse LiDAR
+  sweep every 6 m keeps the map ahead filled). The autonomy still plans on its own SLAM map and the warp
+  only runs while the next 30 m of path is mapped and clear; pickup, docking, charging, pivots and
+  recoveries always run on full physics. The clock shows the speed actually achieved. `warp off` disables it.
 * Rocker-bogie modelled as six struts with a pitch-sharing term, not separate link bodies. Wheels are
   shape-casts, not rigid bodies.
 * Camera detections are geometric, not image-based.
@@ -230,10 +267,13 @@ src/sim/sensors.js       LiDAR, camera, IMU, odometry, sun sensor, cradle sensor
 src/sim/slam.js          elevation-map SLAM, hazards, route memory, persistence
 src/sim/planner.js       costmap, A*, local arc planner
 src/sim/autonomy.js      mission executive, docking, faults, logistics manager
+src/sim/health.js        FDIR catalogue (units, bays, failure modes, sensors, procedures), random failures,
+                         thermal model, survival mode, keep-alive array, repairs
 src/sim/commands.js      operator console commands
 src/render/*             terrain LOD, AEGIS-V1 model (team CAD), props, effects, sky
 src/ui/hud.js            operator HUD
 public/team/js/*         team CAD scripts (r128-era, global THREE)
 scripts/readme_facts.mjs prints config-derived README numbers
+scripts/fault_procedures.mjs writes docs/FAULT_PROCEDURES.md from the FDIR catalogue
 tests/*.mjs              headless pass/fail tests; tests/run-all.mjs runner
 ```

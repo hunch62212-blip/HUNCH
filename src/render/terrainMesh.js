@@ -90,7 +90,7 @@ export class TerrainMesh {
     this.t = terrain;
     this.material = regolithMaterial();
     this.group = new THREE.Group(); scene.add(this.group);
-    this.n = WORLD.size / CH;
+    this.n = Math.ceil(WORLD.size / CH); // the last row/column of chunks is clipped at the map edge (see build)
     this.chunks = [];
     for (let j = 0; j < this.n; j++) for (let i = 0; i < this.n; i++) {
       const mesh = new THREE.Mesh(undefined, this.material);
@@ -136,8 +136,10 @@ export class TerrainMesh {
       return v++;
     };
     for (let b = 0; b < n; b++) for (let a = 0; a < n; a++) {
-      const x = ch.x0 + a * lod, z = ch.z0 + b * lod;
-      put(x, z, t.h[Math.round((z + t.half)) * t.S + Math.round((x + t.half))]);
+      // clamp to the heightfield edge: a chunk that overhangs it collapses onto the border (degenerate, invisible
+      // triangles) instead of indexing past the end of a row
+      const x = Math.min(ch.x0 + a * lod, t.half), z = Math.min(ch.z0 + b * lod, t.half);
+      put(x, z, t.h[Math.round((z + t.half) / t.res) * t.S + Math.round((x + t.half) / t.res)]);
     }
     for (let b = 0; b < n - 1; b++) for (let a = 0; a < n - 1; a++) {
       const i0 = b * n + a, i1 = i0 + 1, i2 = i0 + n, i3 = i2 + 1;

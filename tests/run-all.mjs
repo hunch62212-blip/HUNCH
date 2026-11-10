@@ -18,6 +18,8 @@ mkdirSync(outDir, { recursive: true });
 const TESTS = [
   ['physics', 'headless.mjs', [], false, 600],
   ['rocks', 'rock_climb.mjs', [], false, 600],
+  ['planner', 'planner.mjs', [], false, 600],
+  ['ai_copilot', 'ai_copilot.mjs', [], false, 300],
   ['creep', 'creep.mjs', [], false, 600],
   ['odo', 'odo.mjs', [], false, 600],
   ['pickup_gt_cyl40', 'pickup_gt.mjs', ['0'], false, 900],
@@ -31,6 +33,7 @@ const TESTS = [
   ['m3', 'autonomy.mjs', ['m3'], true, 2400],
   ['drift', 'drift.mjs', [], true, 2400],
   ['faults', 'faults.mjs', [], true, 3600],
+  ['fdir', 'fdir.mjs', [], true, 3600],
   ['nav_bench', 'nav_bench.mjs', ['hab,pad'], true, 5400],
   ['cycle', 'autonomy.mjs', ['cycle', '12000'], true, 7200],
 ];

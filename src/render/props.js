@@ -4,6 +4,7 @@ import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry.js'
 import { rockShapes, rockTransform } from '../sim/rockShapes.js';
 import { WORLD, DOCK, CARGO_TYPES } from '../sim/config.js';
 import { heightAt, mulberry32 } from '../sim/terrain.js';
+import { LANDER_SCALE } from '../sim/world.js';
 import { cargoModuleCAD } from './cadModels.js';
 
 export const MAT = {
@@ -129,9 +130,12 @@ function rockTexture() {
 
 // ---------------- lander -----------------------------------------------------
 export function buildLander(terrain) {
-  const g = new THREE.Group();
+  // Built in model units and scaled by LANDER_SCALE, the same factor the physics colliders and the camera's
+  // surveyed tags use (sim/world.js). Unscaled, the drawn lander was 2.6x smaller than its colliders.
+  const outer = new THREE.Group();
+  const g = new THREE.Group(); g.scale.setScalar(LANDER_SCALE); outer.add(g);
   const P = WORLD.pad, y0 = terrain.padH;
-  g.position.set(P.x, y0, P.z);
+  outer.position.set(P.x, y0, P.z);
   const deck = cyl(4.6, 4.6, 2.6, MAT.gold, 40); deck.position.y = 2.6; g.add(deck);        // descent stage
   for (let k = 0; k < 4; k++) { // surveyed navigation fiducials (same placement as the sensor model)
     const a = k * Math.PI / 2, t = tagMesh(200 + k, 1.2);
@@ -152,10 +156,10 @@ export function buildLander(terrain) {
   // offload crane boom
   const boom = box(0.4, 0.4, 9, MAT.offwhite); boom.position.set(0, 12.5, 4.2); boom.rotation.x = -0.35; g.add(boom);
   // landing-pad edge beacons (small, flush-mounted)
-  for (let k = 0; k < 16; k++) { const a = k / 16 * Math.PI * 2; const bcn = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.15, 0.12, 10), new THREE.MeshStandardMaterial({ color: 0x302000, emissive: k % 2 ? 0xffb020 : 0xffffff, emissiveIntensity: 2.5 })); bcn.position.set(Math.cos(a) * WORLD.pad.radius, 0.06, Math.sin(a) * WORLD.pad.radius); g.add(bcn); }
+  for (let k = 0; k < 16; k++) { const a = k / 16 * Math.PI * 2; const bcn = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.15, 0.12, 10), new THREE.MeshStandardMaterial({ color: 0x302000, emissive: k % 2 ? 0xffb020 : 0xffffff, emissiveIntensity: 2.5 })); bcn.position.set(Math.cos(a) * WORLD.pad.radius, 0.06, Math.sin(a) * WORLD.pad.radius); outer.add(bcn); }
   const lbl = new THREE.Mesh(new THREE.PlaneGeometry(4, 1), new THREE.MeshBasicMaterial({ map: labelTexture('CARGO LANDER CL-1', { color: '#202020' }), transparent: true }));
   lbl.position.set(0, 9, 3.42); g.add(lbl);
-  return g;
+  return outer;
 }
 
 // ---------------- supply building -------------------------------------------

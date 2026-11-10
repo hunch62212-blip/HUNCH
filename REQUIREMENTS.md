@@ -17,7 +17,7 @@ Result column: last `npm test` run, see CHANGES.md for date and code state.
 | M7 | 2 km autonomous route, no pre-mapped path | `nav_bench`, `drift`, `faults` | legs arrive, zero warnings, SLAM error ≤ 5 % of distance, ≤ 5 m at end | <!--m7--> |
 | M8 | Different cargo systems | `pickup_gt_box20`, `pickup_time_box20`, `dock_box20` | same checks as M3/M5 on the 20-ft box | <!--m8--> |
 | M9 | Cooperative robot (SCOUT-1) | `scout` | finite state, separation ≥ 7 m, maps cells, gets ≥ 10 m ahead | <!--m9--> |
-| M10 | Something goes wrong | `faults` (partial) | see fault table | <!--m10--> |
+| M10 | Something goes wrong | `faults` (partial), `fdir` | see the two fault tables below | <!--m10--> |
 | M11 | AI logistics manager (priority ordering) | **not verified** | `cycle` runs the manager but no check on order or `priority` re-ordering | not verified |
 | M12 | Own capability: teach & repeat | `nav_bench` | return leg logs a route-memory reuse | <!--m12a--> |
 | M12 | Own capability: slip-compensated odometry | `odo` | odometry/truth within 5 % at 1–4.9 m/s | <!--m12b--> |
@@ -39,8 +39,22 @@ Faults from `sim.injectFault` (`src/sim/sim.js`).
 | `shift` — cargo shift | detect and re-centre | **not verified** | not verified |
 | `port <n>` — port unavailable | hold and ask operator | **not verified** | not verified |
 
+## Hardware failure modes (vehicle health / FDIR)
+
+Catalogue in `src/sim/health.js` (`fault list` in the console); procedures in `docs/FAULT_PROCEDURES.md`.
+Verified by `fdir` (`tests/fdir.mjs`, `npm run test:fdir`):
+
+| Check | What is checked | Result |
+|---|---|---|
+| A. Nominal drive | 3 min goto: 0 alarms, 0 spurious, vault 5–35 C | pass (0 alarms, 19.7 C) |
+| B. Mode sweep | each of the 24 modes injected in turn (driving, parked BIT or on the pad as the mode needs): detected from sensor readings, right unit isolated, automatic response checked where it has one, 0 spurious alarms | pass (24/24, 0 spurious) |
+| C. Repairs | dock repair with a dock spare; strut repair refused away from the dock; field motor-controller swap uses the on-board kit | pass |
+| D. Random failures | switch on at a very high rate for 300 s: ≥ 2 failures happen, 0 spurious alarms, every immediately observable one is detected within 20 s (latent ones wait for motion or the BIT) | pass (5 failures, none missed) |
+| E. Lunar night | survival mode holds the set points; a 354 h night costs ≤ 25 % of the pack | pass (147 W, 12.4 %) |
+| F. Keep-alive array | deploys ≥ 3 kW parked, stows before driving | pass (4.8 kW) |
+
 ## Gaps
 
-* No test for M11, leveling, or 6 of the 8 faults.
+* No test for M11, leveling, or 6 of the 8 `faults` scenarios above (the hardware modes are covered by `fdir`).
 * M4 is only covered through the full cycle.
 * Browser-only features (HUD, graphics, export, persistence in IndexedDB) have no automated test.

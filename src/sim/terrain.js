@@ -140,17 +140,20 @@ export function generateTerrain(seed = WORLD.seed) {
   const craters = [];
   const crand = mulberry32(seed ^ 0x9e3779b9);
   const Dmin = 3, Dmax = 170, alpha = 1.8;
-  const nCraters = 2300;
+  const areaK = (WORLD.size / 2048) ** 2;            // populations were tuned on a 2048 m map: keep the same density
+  const nCraters = Math.round(2300 * areaK);
   const a0 = Math.pow(Dmin, -alpha), a1 = Math.pow(Dmax, -alpha);
   for (let k = 0; k < nCraters; k++) {
     const D = Math.pow(a0 - crand() * (a0 - a1), -1 / alpha);
     craters.push({ x: (crand() * 2 - 1) * (half - 10), z: (crand() * 2 - 1) * (half - 10), D, fresh: Math.pow(crand(), 2.4) });   // most craters are old and degraded (micrometeorite gardening)
   }
-  // Two deliberate obstacles across the straight-line route, forcing real planning
-  const mid = { x: (pad.x + WORLD.habitat.x) / 2, z: (pad.z + WORLD.habitat.z) / 2 };
-  craters.push({ x: mid.x + 20, z: mid.z - 10, D: 150, fresh: 0.85 });
-  craters.push({ x: pad.x + padL.dir.x * 520 + padL.perp.x * 30, z: pad.z + padL.dir.z * 520 + padL.perp.z * 30, D: 95, fresh: 0.95 });
-  craters.push({ x: pad.x + padL.dir.x * 1450 - padL.perp.x * 25, z: pad.z + padL.dir.z * 1450 - padL.perp.z * 25, D: 70, fresh: 0.7 });
+  // Three large fresh craters near the straight-line route (random spots along it, from the seed), so the planner
+  // always has to route around something
+  const along = (f, lat) => ({ x: pad.x + padL.dir.x * f + padL.perp.x * lat, z: pad.z + padL.dir.z * f + padL.perp.z * lat });
+  for (const [f0, f1, D, fresh] of [[300, 700, 95, 0.95], [800, 1200, 150, 0.85], [1300, 1700, 70, 0.7]]) {
+    const p = along(f0 + crand() * (f1 - f0), (crand() * 2 - 1) * 40);
+    craters.push({ ...p, D, fresh });
+  }
 
   const keepClear = (x, z, r) => {
     const dp = Math.hypot(x - pad.x, z - pad.z), dh = Math.hypot(x - WORLD.habitat.x, z - WORLD.habitat.z);
@@ -218,7 +221,7 @@ export function generateTerrain(seed = WORLD.seed) {
   };
   const dmin = 0.25, dmax = 3.4, beta = 2.5;
   const b0 = Math.pow(dmin, -beta), b1 = Math.pow(dmax, -beta);
-  for (let k = 0; k < 5200; k++) {
+  for (let k = 0, nRocks = Math.round(5200 * areaK); k < nRocks; k++) {
     const d = Math.pow(b0 - rrand() * (b0 - b1), -1 / beta);
     addRock((rrand() * 2 - 1) * half, (rrand() * 2 - 1) * half, d);
   }
@@ -232,8 +235,8 @@ export function generateTerrain(seed = WORLD.seed) {
       addRock(c.x + Math.cos(ang) * r, c.z + Math.sin(ang) * r, d);
     }
   }
-  // A deliberate boulder field across the route (~1/3 of the way), for Mission 4/7
-  const bf = { x: pad.x + padL.dir.x * 820 - padL.perp.x * 10, z: pad.z + padL.dir.z * 820 - padL.perp.z * 10 };
+  // A boulder field across the route (random spot in the middle half, from the seed), for Mission 4/7
+  const bf = along(500 + rrand() * 1000, (rrand() * 2 - 1) * 30);
   for (let k = 0; k < 220; k++) {
     const ang = rrand() * Math.PI * 2, r = Math.sqrt(rrand()) * 45;
     const d = 0.4 + Math.pow(rrand(), 2.2) * 2.4;

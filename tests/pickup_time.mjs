@@ -15,7 +15,7 @@ const back = T.length / 2 + ROVER.frame.halfLen + 22 - (T.carryX || 0);
 R.teleport(ct.x - Math.cos(c.yaw) * back, ct.z + Math.sin(c.yaw) * back, c.yaw);
 for (let i = 0; i < 480; i++) sim.stepOnce();
 R.brake = false;
-sim.slam.clear(); sim.slam.relocalize(R.pose());
+sim.slam.clear(); sim.slam.relocalize(R.pose()); A.cargoEst.clear(); // sightings during the settle used the pre-teleport pose
 sim.streamRocks([{ x: ct.x, z: ct.z }]);
 const t0 = sim.time;
 A.start('pickup timing', A.acquire(c));

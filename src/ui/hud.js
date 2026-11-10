@@ -1,9 +1,21 @@
 // Operator HUD: telemetry, SLAM map, camera feed overlay, missions, faults, console, E-STOP.
-import { ROVER, WORLD, MOON, K } from '../sim/config.js';
+import { ROVER, WORLD, MOON, K, FAILURES } from '../sim/config.js';
 import { CLS, RES, TILE } from '../sim/slam.js';
 import { runCommand } from '../sim/commands.js';
 import { PRIORITY } from '../sim/autonomy.js';
 import P1 from '../sim/lunar_logistics_manifest.json';
+import { MODE, BAYS, LRUS, bayOf, unitLabel } from '../sim/health.js';
+import { Copilot } from '../ai/copilot.js';
+
+const SUBSYS = { MOB: 'mobility', PWR: 'power', AVI: 'avionics', NAV: 'navigation sensors', COM: 'comms', THM: 'thermal', CRG: 'cargo', SAF: 'safety / dock' };
+const SUBSYS_OF = { mc: 'MOB', seize: 'MOB', cool: 'MOB', enc: 'MOB', strut: 'MOB', bat: 'PWR', runaway: 'PWR', pdu: 'PWR', imd: 'PWR', fc: 'AVI', seu: 'AVI', imu: 'NAV', sun: 'NAV', lidar: 'NAV', ldust: 'NAV', cam: 'NAV', cdust: 'NAV', com: 'COM', htr: 'THM', louver: 'THM', clamp: 'CRG', lcell: 'CRG', estop: 'SAF', coupler: 'SAF' };
+
+// first words the console understands (a line starting with anything else, 3+ words long, goes to the AI)
+const KNOWN = new Set(['help', '?', 'estop', 'e-stop', 'reset', 'start', 'status', 'mission', 'abort', 'resume', 'goto', 'speed',
+  'limit', 'rpm', 'turbo', 'drive', 'stop', 'brake', 'lift', 'clamp', 'level', 'ride', 'lights', 'timescale', 'ts', 'pause',
+  'ff', 'fastforward', 'warp', 'newmap', 'lidar', 'camera', 'fault', 'failures', 'random', 'health', 'fdir', 'procedure',
+  'proc', 'repair', 'survival', 'array', 'clear', 'reroute', 'map', 'routes', 'plan', 'priority', 'reserve', 'sun',
+  'charge', 'dock', 'day', 'night', 'lunar', 'view', 'restricted', 'scout', 'steer', 'grapple', 'newterrain', 'teleport']);
 
 const $ = (sel, el = document) => el.querySelector(sel);
 const fmt = (v, d = 1) => (v == null || !Number.isFinite(v) ? '—' : v.toFixed(d));
@@ -31,13 +43,28 @@ export class HUD {
     sim.on('log', (e) => this.addLog(e));
     for (const e of sim.logs) this.addLog(e);
     this._t = 0;
+    this.initAI();
+  }
+
+  // Local LLM copilot (src/ai/copilot.js). ?noai disables it; ?ai=<ollama url> points it elsewhere
+  // (that Ollama must then allow this page's origin via OLLAMA_ORIGINS).
+  initAI() {
+    const q = new URLSearchParams(location.search);
+    if (q.has('noai')) return;
+    this.ai = new Copilot(this.sim, {
+      ...(q.get('ai') ? { url: q.get('ai') } : {}), ...(q.get('aimodel') ? { model: q.get('aimodel') } : {}),
+      exec: (c) => runCommand(this.sim, this.ui, c),
+    });
+    this.ai.probe().then((r) => this.sim.log(r.ok
+      ? (this.ai.hasModel ? `AI copilot online (${this.ai.o.model}). Type "ai <question>" or plain English; FDIR advisor on.` : `AI copilot: Ollama reachable but ${this.ai.o.model} is not downloaded`)
+      : `AI copilot offline (${r.why}): the sim runs normally without it`, r.ok && this.ai.hasModel ? 'ai' : 'warn'));
   }
 
   template() {
     const cargoOpts = this.sim.cargo.map((c, i) => `<option value="${i === 0 ? 'A' : 'B'}">${c.id} · ${c.T.label}</option>`).join('');
     return `
     <div id="topbar" class="panel">
-      <div class="brand">AEGIS-V1 · LLASO-P2-XPORT-2026<small>Rocker-bogie skid-steer cargo carrier · lunar south-pole logistics</small></div>
+      <div class="brand">AEGIS-V1<span class="brandx"> · LLASO-P2-XPORT-2026</span><small>Rocker-bogie skid-steer cargo carrier · lunar south-pole logistics</small></div>
       <span class="pill mono" id="clock">MET 00:00:00</span>
       <span class="pill" id="pMode">MANUAL</span>
       <span class="pill" id="pDrive">ARMED</span>
@@ -45,17 +72,19 @@ export class HUD {
       <span class="pill" id="pLidar">LIDAR</span>
       <span class="pill" id="pCam">CAM</span>
       <span class="pill" id="pSteer">SKID STEER</span>
+      <button class="pill" id="pHealth" title="Vehicle health / FDIR panel">HEALTH</button>
+      <span class="pill" id="pAI" title="Local LLM copilot on the Mac mini (type: ai help)">AI</span>
       <div class="grow"></div>
       <div class="btnrow timebtns" id="timeBtns">
-        ${[0, 1, 2, 5, 10, 20].map((x) => `<button class="btn" data-ts="${x}">${x === 0 ? '❚❚' : x + '×'}</button>`).join('')}
+        ${[0, 1, 2, 5, 10, 20].map((x) => `<button class="btn" data-ts="${x}">${x === 0 ? '❚❚' : x + '×'}</button>`).join('')}<button class="btn ff" data-ts="50" title="Fast forward: 50x sim time (X). Long autonomous drives use transit warp; precision steps run full physics as fast as the CPU allows">⏩ 50×</button>
       </div>
       <div class="btnrow" id="viewBtns">
         ${['chase', 'orbit', 'top', 'cam', 'free'].map((v) => `<button class="btn" data-view="${v}">${v === 'cam' ? 'onboard' : v}</button>`).join('')}
       </div>
       <select class="btn" id="qualitySel" title="Graphics quality"><option value="auto">GFX auto</option><option value="low">GFX low</option><option value="medium">GFX medium</option><option value="high">GFX high</option><option value="ultra">GFX ultra</option></select>
       <button class="btn" id="helpBtn">? help</button>
-      <div id="restart"><button class="btn danger" id="resetBtn" title="Release the E-STOP latch">RESET</button><button class="btn" id="startBtn" title="Power-on self-test and arm drive">START</button></div>
-      <button id="estop" title="EMERGENCY STOP (Esc)">E-STOP</button>
+      <div id="safety"><div id="restart"><button class="btn danger" id="resetBtn" title="Release the E-STOP latch">RESET</button><button class="btn" id="startBtn" title="Power-on self-test and arm drive">START</button></div>
+      <button id="estop" title="EMERGENCY STOP (Esc)">E-STOP</button></div>
     </div>
     <div id="vehicle" class="panel"><h3>Vehicle state <span class="tog">▾</span></h3><div class="body">
       <div class="kv">
@@ -70,14 +99,14 @@ export class HUD {
       </div>
       <div class="bar"><i id="bSoc"></i></div>
       <div class="kv">
-        <span class="k">Dock charge / load</span><span class="v" id="vPow">0</span>
+        <span class="k" title="Dock charge power / vehicle electrical load">Charge / load</span><span class="v" id="vPow">0</span>
         <span class="k">Power dock</span><span class="v" id="vDock">-</span>
         <span class="k">Drive power</span><span class="v" id="vDrive">0</span>
         <span class="k">Odometer / energy</span><span class="v" id="vOdo">0</span>
         <span class="k">Payload</span><span class="v" id="vLoad">none</span>
-        <span class="k">Ride height (kneel -0.65 / carry +0.82)</span><span class="v" id="vLift">0</span>
+        <span class="k" title="Strut ride height: kneel -0.65 m / carry +0.82 m">Ride height</span><span class="v" id="vLift">0</span>
         <span class="k">Cradle</span><span class="v" id="vClamp">open</span>
-        <span class="k">Smart rpm · why</span><span class="v" id="vLim">0</span>
+        <span class="k" title="Smart rpm limit and the reason for it">Smart rpm</span><span class="v" id="vLim">0</span>
       </div>
       <table class="wheels"><thead><tr><th>whl</th><th>mtr rpm</th><th>T Nm</th><th>slip</th><th>sink mm</th><th>load kN</th><th>°C</th></tr></thead><tbody id="wheelRows"></tbody></table>
       <div class="sect"><div class="t">Live trends (last 5 min)</div><canvas id="trend" width="560" height="200" style="width:280px;height:100px;display:block"></canvas>
@@ -115,7 +144,7 @@ export class HUD {
         <button class="btn" data-m="5" title="Deliver & place (dock)">M5 Deliver</button>
         <button class="btn on" data-m="6" title="Full logistics cycle">M6 Full cycle</button>
       </div>
-      <div class="btnrow" style="margin-top:6px"><button class="btn" id="resumeBtn">resume</button><button class="btn danger" id="abortBtn">abort</button><button class="btn" data-c="goto hab">goto hab</button><button class="btn" data-c="goto pad">goto pad</button><button class="btn" data-c="charge">charge</button><button class="btn" data-c="lunar on">lunar cycle</button><button class="btn" data-c="night">night</button><button class="btn" data-c="day">day</button></div>
+      <div class="btnrow" style="margin-top:6px"><button class="btn" id="resumeBtn">resume</button><button class="btn danger" id="abortBtn">abort</button><button class="btn" data-c="goto hab">goto hab</button><button class="btn" data-c="goto pad">goto pad</button><button class="btn" data-c="charge">charge</button><button class="btn" data-c="lunar on">lunar cycle</button><button class="btn" data-c="night">night</button><button class="btn" data-c="day">day</button><button class="btn" data-c="newmap" title="Reload with a new random crater / boulder layout">new map</button></div>
       <div class="sect"><div class="t">M9 · SCOUT-1 (team tracked rover)</div>
         <div class="btnrow"><button class="btn" data-c="scout on">deploy</button><button class="btn" data-c="scout recall">recall</button><button class="btn" data-c="scout off">park</button></div>
         <div class="small mono" id="scoutBox" style="margin-top:4px">parked</div></div>
@@ -124,7 +153,14 @@ export class HUD {
           <button class="btn" data-c="fault block">block road</button><button class="btn" data-c="fault lidar">LiDAR fail</button><button class="btn" data-c="fault camera">camera fail</button>
           <button class="btn" data-c="fault comms">comms loss</button><button class="btn" data-c="fault battery 18">low battery</button><button class="btn" data-c="fault wheel 3">wheel 3 fail</button>
           <button class="btn" data-c="fault shift">cargo shift</button><button class="btn" data-c="fault port 1">port 1 down</button><button class="btn" data-c="clear faults">clear all</button>
-        </div></div>
+        </div>
+        <div class="btnrow" style="margin-top:4px">
+          <button class="btn" data-c="fault seize 5">wheel 5 seize</button><button class="btn" data-c="fault bat 2">battery string 2</button><button class="btn" data-c="fault fc A">flight computer A</button>
+          <button class="btn" data-c="fault imu A">IMU A</button><button class="btn" data-c="fault ldust">LiDAR dust</button><button class="btn" data-c="fault runaway 3">cell overheat</button>
+        </div>
+        <div class="btnrow" style="margin-top:6px"><button class="btn rndsw" id="rndBtn" title="Random hardware failures (seeded), each unit at rate x / MTBF">RANDOM FAILURES: OFF</button>
+          <select class="btn" id="rndRate" title="Failure rate multiplier"><option value="realistic">1x (realistic)</option><option value="100x">100x</option><option value="1000x">1000x</option><option value="demo" selected>demo (20000x)</option></select>
+          <button class="btn" id="fdirBtn">FDIR panel</button></div></div>
       <div class="sect"><div class="t">M11 · logistics manager plan</div><div id="planBox" class="small mono"></div></div>
       <div class="sect"><div class="t">Mission metrics</div><div class="metric" id="metrics"></div></div>
       <div class="sect"><div class="t">Overlays</div><div class="btnrow">
@@ -133,11 +169,22 @@ export class HUD {
     </div></div>
 
     <div id="autoPanel" class="panel"><span class="pill" id="autoMode">MANUAL</span><span class="phase" id="autoPhase">Idle</span><span class="detail" id="autoDetail"></span></div>
-    <div id="console" class="panel"><div id="log"></div><div id="cmdline"><span>&gt;</span><input id="cmd" autocomplete="off" spellcheck="false" placeholder='type a command, e.g. "limit rpm 20", "mission cycle", "help"' /></div></div>
+    <div id="console" class="panel"><div id="log"></div><div id="cmdline"><span>&gt;</span><input id="cmd" autocomplete="off" spellcheck="false" placeholder='type a command ("mission cycle", "help") or ask the AI in plain English' /></div></div>
     <div id="dockPanel" class="panel"><h3>Berthing sequence</h3><div class="body"><ol id="dockSteps"></ol><div class="kv small" style="margin-top:6px"><span class="k">Vestibule pressure</span><span class="v" id="dockP">0</span><span class="k">Leak rate</span><span class="v" id="dockL">—</span></div></div></div>
     <div id="manifestPanel" class="panel"><h3>CM-40A interior · LLASO-P1 manifest <span class="tog">▾</span></h3><div class="body">
       <div class="small" id="manSum"></div>
       <table class="wheels" id="manTable"><thead><tr><th style="text-align:left">item</th><th>day</th><th>bay</th><th>kg</th><th style="text-align:left">actor</th></tr></thead><tbody></tbody></table>
+    </div></div>
+    <div id="healthPanel" class="panel"><h3>Vehicle health · FDIR <span class="tog" id="healthClose">✕</span></h3><div class="body">
+      <div class="btnrow"><button class="btn rndsw" id="rndBtn2">RANDOM FAILURES: OFF</button><span class="small mono" id="hStats"></span></div>
+      <div class="subsys" id="hSubs"></div>
+      <div class="kv small" id="hRed"></div>
+      <div class="sect"><div class="t">Thermal · survival · keep-alive array</div><div class="kv small" id="hTherm"></div>
+        <div class="btnrow" style="margin-top:4px"><button class="btn" data-c="survival on">survival on</button><button class="btn" data-c="survival off">survival off</button><button class="btn" data-c="array deploy">deploy array</button><button class="btn" data-c="array stow">stow array</button></div></div>
+      <div class="sect"><div class="t">Alarms (click a row: procedure card + part highlighted on the rover)</div><table class="wheels alarms"><thead><tr><th>sev</th><th style="text-align:left">unit · failure</th><th style="text-align:left">bay</th><th>since</th><th></th></tr></thead><tbody id="hAlarms"></tbody></table></div>
+      <div class="sect" id="hJobBox"><div class="t">Repair in progress</div><div class="small mono" id="hJob"></div><div class="bar"><i id="hJobBar"></i></div><button class="btn danger" data-c="repair abort">abort repair</button></div>
+      <div class="sect"><div class="t">Procedure card</div><div class="small proc" id="hProc">Select an alarm.</div></div>
+      <div class="sect"><div class="t">Spares (on-board kit · dock stores)</div><div class="small mono" id="hSpares"></div></div>
     </div></div>
     <div id="overrideBanner" class="panel">OPERATOR OVERRIDE — autonomy paused · type "resume" or press the resume button</div>
     <div id="estopBanner" class="panel"><div class="big">E-STOP LATCHED</div><div style="margin-top:6px">Drive torque removed · spring brakes set · actuators locked</div><div class="small" style="margin-top:6px">Manual restart required: press <b>RESET</b>, then <b>START</b> (power-on self-test)</div></div>
@@ -145,14 +192,24 @@ export class HUD {
       <div><b>Driving (manual)</b><br><kbd>W</kbd>/<kbd>S</kbd> forward / reverse (hold)<br><kbd>A</kbd>/<kbd>D</kbd> steer (skid steer: curves while moving, slow point-turn when stopped and unloaded)<br><kbd>Space</kbd> brake · <kbd>Shift</kbd> slow / precise<br>Smart rpm picks 120 / 180 / 300 itself; hold full throttle straight on flat ground for TURBO<br>Gamepad: left stick drive/steer</div>
       <div><b>Cargo handling</b><br><kbd>G</kbd> close / open ring jaws<br><kbd>R</kbd>/<kbd>F</kbd> ride height up / down (kneel under a module, rise to lift it)</div>
       <div><b>Safety</b><br><kbd>Esc</kbd> E-STOP (latching). Restart = RESET then START.<br>Touching the drive keys during a mission pauses autonomy (operator override).</div>
-      <div><b>View</b><br><kbd>C</kbd> cycle camera · mouse drag orbit · wheel zoom<br><kbd>V</kbd> LiDAR overlay · <kbd>P</kbd> pause · <kbd>H</kbd> this help<br><kbd>Enter</kbd> focus console · <kbd>↑</kbd> history</div>
+      <div><b>View</b><br><kbd>C</kbd> cycle camera · mouse drag orbit · wheel zoom<br><kbd>V</kbd> LiDAR overlay · <kbd>P</kbd> pause · <kbd>X</kbd> fast forward 50× · <kbd>H</kbd> this help<br><kbd>Enter</kbd> focus console · <kbd>↑</kbd> history</div>
       <div><b>Useful commands</b><br>mission cycle · mission 3 B · goto hab<br>limit rpm 120 · rpm 180 · turbo on/off/auto<br>drive 0.5 0 0.2 · stop<br>lift kneel/carry · clamp close<br>fault block · fault wheel 2 · clear faults<br>map save · routes · plan · timescale 10</div>
     </div></div>`;
   }
 
   bind() {
     const sim = this.sim, ui = this.ui;
-    this.root.querySelectorAll('.panel h3').forEach((h) => h.addEventListener('click', (e) => { if (e.target.id === 'helpClose') return; h.parentElement.classList.toggle('collapsed'); }));
+    // phones / short landscape screens: the three side panels start as a strip of headers and open one at a
+    // time (same query as the compact layout in style.css)
+    const phone = matchMedia('(max-width: 760px), (max-height: 520px)');
+    const side = ['#vehicle', '#mapPanel', '#missions'].map((s) => $(s));
+    const fitPhone = () => { if (phone.matches) side.forEach((p) => p.classList.add('collapsed')); };
+    fitPhone(); phone.addEventListener?.('change', fitPhone);
+    this.root.querySelectorAll('.panel h3').forEach((h) => h.addEventListener('click', (e) => {
+      if (e.target.id === 'helpClose' || e.target.id === 'healthClose') return;
+      const p = h.parentElement; p.classList.toggle('collapsed');
+      if (phone.matches && !p.classList.contains('collapsed') && side.includes(p)) side.forEach((q) => { if (q !== p) q.classList.add('collapsed'); });
+    }));
     $('#estop').addEventListener('click', () => sim.emergencyStop('HUD button'));
     $('#resetBtn').addEventListener('click', () => sim.resetEstop());
     $('#startBtn').addEventListener('click', () => sim.startUp());
@@ -160,6 +217,19 @@ export class HUD {
     $('#qualitySel').addEventListener('change', (e) => { ui.setQuality?.(e.target.value); e.target.blur(); });
     setTimeout(() => { if (ui.quality) $('#qualitySel').value = ui.quality; }, 500);
     $('#helpClose').addEventListener('click', () => this.toggleHelp(false));
+    // health / FDIR panel and the random-failure switch
+    const toggleHealth = (v) => { const p = $('#healthPanel'); const show = v ?? p.style.display !== 'block'; p.style.display = show ? 'block' : 'none'; this._hT = 0; };
+    this.toggleHealth = toggleHealth;
+    $('#pHealth').addEventListener('click', () => toggleHealth());
+    $('#fdirBtn').addEventListener('click', () => toggleHealth(true));
+    $('#healthClose').addEventListener('click', () => toggleHealth(false));
+    const rnd = () => this.exec(sim.health.random.on ? 'failures off' : `failures on ${$('#rndRate').value}`);
+    $('#rndBtn').addEventListener('click', rnd); $('#rndBtn2').addEventListener('click', rnd);
+    $('#rndRate').addEventListener('change', (e) => { if (sim.health.random.on) this.exec(`failures on ${e.target.value}`); e.target.blur(); });
+    $('#hAlarms').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-rep]'); if (b) { this.exec(`repair ${b.dataset.rep}`); return; }
+      const tr = e.target.closest('tr[data-k]'); if (tr) { sim.health.selected = tr.dataset.k; this._hT = 0; }
+    });
     this.root.querySelectorAll('[data-ts]').forEach((b) => b.addEventListener('click', () => { const v = +b.dataset.ts; if (v === 0) sim.paused = !sim.paused; else { sim.paused = false; sim.timeScale = v; } }));
     this.root.querySelectorAll('[data-view]').forEach((b) => b.addEventListener('click', () => ui.setView(b.dataset.view)));
     this.root.querySelectorAll('[data-m]').forEach((b) => b.addEventListener('click', () => this.exec(`mission ${b.dataset.m} ${$('#cargoSel').value}`)));
@@ -179,7 +249,8 @@ export class HUD {
       const rep = { generated: new Date().toISOString(), sim_time_s: sim.time, vehicle: 'AEGIS-V1', missions: A.history, current: A.summary(), docking_accuracy: A.metrics.accuracy,
         routes: sim.slam.routes.map((r) => ({ id: r.id, from: r.from, to: r.to, length_m: r.length, time_s: r.time, energy_Wh: r.energyWh, uses: r.uses })),
         odometer_m: R.odo.dist, energy_used_Wh: R.power.energyUsedWh, energy_generated_Wh: R.power.energyGenWh, min_tip_margin_deg: R.stats.minMargin,
-        manifest: A.manifest.map((m) => ({ id: m.id, category: m.category, port: m.port, status: m.status })), scout: { odometer_m: sim.scout.odo, mapped_cells: sim.scout.cellsMapped } };
+        manifest: A.manifest.map((m) => ({ id: m.id, category: m.category, port: m.port, status: m.status })), scout: { odometer_m: sim.scout.odo, mapped_cells: sim.scout.cellsMapped },
+        health: { random_failures: sim.health.random, stats: sim.health.stats, events: sim.health.history, open_alarms: sim.health.summary(), redundancy: sim.health.redund, spares: sim.health.spares, vault_C: sim.health.th.Tv, battery_C: sim.health.th.Tb } };
       download(`aegis-v1_mission_report_${Math.round(sim.time)}s.json`, JSON.stringify(rep, null, 2), 'application/json');
       sim.log('Mission report exported', 'ok');
     });
@@ -211,6 +282,10 @@ export class HUD {
 
   exec(line) {
     this.addLog({ t: this.sim.time, msg: '> ' + line, level: 'cmd' });
+    const w = line.trim().split(/\s+/);
+    if (this.ai && w[0].toLowerCase() === 'ai') { this.ai.command(w.slice(1)); return; }
+    // plain English (3+ words, not a known command) goes to the copilot instead of "Unknown command"
+    if (this.ai && this.ai.online && w.length >= 3 && !KNOWN.has(w[0].toLowerCase())) { this.ai.ask(line); return; }
     runCommand(this.sim, this.ui, line);
   }
   toggleHelp(v) { const p = $('#helpPanel'); const show = v ?? p.style.display !== 'block'; p.style.display = show ? 'block' : 'none'; }
@@ -226,16 +301,67 @@ export class HUD {
     log.scrollTop = log.scrollHeight;
   }
 
+  // ---- vehicle health / FDIR panel (2 Hz) ----
+  updateHealth() {
+    const H = this.sim.health, R = this.sim.rover;
+    const nCrit = [...H.alarms.values()].filter((a) => MODE[a.id].sev === 'critical').length;
+    const hp = $('#pHealth');
+    hp.textContent = H.survival.on ? 'SURVIVAL MODE' : H.job ? 'REPAIRING' : H.alarms.size ? `${H.alarms.size} ALARM${H.alarms.size > 1 ? 'S' : ''}` : 'HEALTH OK';
+    hp.className = 'pill ' + (nCrit || H.survival.on ? 'err' : H.alarms.size || H.job ? 'warn' : 'ok');
+    for (const id of ['#rndBtn', '#rndBtn2']) { const b = $(id); b.textContent = `RANDOM FAILURES: ${H.random.on ? 'ON · ' + H.random.preset : 'OFF'}`; b.classList.toggle('on', H.random.on); }
+    if ($('#healthPanel').style.display !== 'block') return;
+    this._hT = (this._hT || 0) - 0.1; if (this._hT > 0) return; this._hT = 0.5;
+    const st = H.stats;
+    $('#hStats').textContent = `failures ${st.injected} (${st.random} random) · detected ${st.detected}${st.detected ? ` (mean ${(st.latSum / st.detected).toFixed(1)} s)` : ''} · spurious ${st.spurious} · repaired ${st.repaired}`;
+    const worst = (sub) => { let s = 0; for (const a of H.alarms.values()) if (SUBSYS_OF[a.id] === sub) s = Math.max(s, { caution: 1, warning: 2, critical: 3 }[MODE[a.id].sev]); return s; };
+    $('#hSubs').innerHTML = Object.entries(SUBSYS).map(([k, n]) => { const s = worst(k); return `<span class="pill ${['ok', 'warn', 'warn', 'err'][s]}" title="${n}">${k}</span>`; }).join('');
+    $('#hRed').innerHTML = [
+      ['Flight computer', `FC-${H.redund.fc} in command${H.isFailed('fc', 'A') || H.isFailed('fc', 'B') ? ' (no backup)' : ' · backup ready'}`],
+      ['IMU · radio · heaters', `IMU-${H.redund.imu} · radio-${H.redund.com} · zone ctrl ${H.redund.htr}`],
+      ['Battery strings', `${4 - H.outStrings.size}/4 on line (${fmt(R.power.wh / 1000, 0)} kWh, cap ${fmt(ROVER.battery.capacityWh / 1000 * (R.power.capK ?? 1), 0)} kWh)`],
+      ['Speed derate (FDIR)', `${fmt(H.fx.speedK * 100, 0)} %`],
+    ].map(([k, v]) => `<span class="k">${k}</span><span class="v">${v}</span>`).join('');
+    const th = H.th, a = H.array;
+    $('#hTherm').innerHTML = [
+      ['Avionics vault', `${fmt(th.Tv, 1)} C · louvers L ${fmt(th.louver.L * 100, 0)}% R ${fmt(th.louver.R * 100, 0)}%${Object.keys(th.stuck).length ? ' (STUCK ' + Object.keys(th.stuck).join(',') + ')' : ''}`],
+      ['Battery pack', `${fmt(th.Tb, 1)} C · louver ${fmt(th.louverB * 100, 0)}%`],
+      ['Heaters', `${fmt(H.heaterW, 0)} W (vault ${fmt(th.vaultW, 0)} · battery ${fmt(th.battW, 0)}) · radiators reject ${fmt(th.rejW, 0)} W`],
+      ['Survival mode', H.survival.on ? `ON since ${fmtT(H.survival.t0)} (${H.survival.why})` : `off (auto ${H.survival.auto ? `below ${(FAILURES.survivalEnterSoc * 100).toFixed(0)} % away from the dock` : 'disabled'})`],
+      ['Keep-alive array', `${a.state}${a.state === 'deploying' || a.state === 'stowing' ? ' ' + fmt(a.k * 100, 0) + '%' : ''} · ${fmt(a.W / 1000, 2)} kW`],
+    ].map(([k, v]) => `<span class="k">${k}</span><span class="v">${v}</span>`).join('');
+    const rows = [...H.alarms.values()].sort((x, y) => ({ critical: 0, warning: 1, caution: 2 }[MODE[x.id].sev] - { critical: 0, warning: 1, caution: 2 }[MODE[y.id].sev]));
+    $('#hAlarms').innerHTML = rows.length ? rows.map((al) => {
+      const m = MODE[al.id], b = BAYS[bayOf(m, al.n)], L = LRUS[m.lru];
+      const rep = L && !m.transient ? `<button class="btn" data-rep="${al.key}" title="${L.where} repair, ${L.min} min">repair</button>` : '';
+      return `<tr data-k="${al.key}" class="${H.selected === al.key ? 'sel' : ''}"><td class="sev ${m.sev}">${m.sev}</td><td style="text-align:left">${unitLabel(m, al.n)} · ${m.name}${al.spurious ? ' <i>(spurious)</i>' : ''}</td><td style="text-align:left">${b.name.replace(/ - .*/, '')}</td><td>${fmtT(al.tDet)}</td><td>${rep}</td></tr>`;
+    }).join('') : '<tr><td colspan="5" style="text-align:left;color:var(--ok)">No alarms. All units passing BIT.</td></tr>';
+    if (H.selected && !H.alarms.has(H.selected)) H.selected = rows[0]?.key || null;
+    const sel = H.selected && H.alarms.get(H.selected);
+    if (sel) {
+      const p = H.procedure(sel.id), b = BAYS[bayOf(p.m, sel.n)];
+      $('#hProc').innerHTML = `<b>${unitLabel(p.m, sel.n)} · ${p.m.name}</b><br><span class="dim">Location:</span> ${b.name} - ${b.where}. Access: ${b.door}.<br><span class="dim">Detected by:</span> ${sel.reading}<br>` +
+        p.lines.slice(1).map((l) => l.replace(/^(\w[\w ]*?):/, '<span class="dim">$1:</span>')).join('<br>');
+    } else $('#hProc').textContent = 'Select an alarm.';
+    const j = H.job;
+    $('#hJobBox').style.display = j ? 'block' : 'none';
+    if (j) { const f = Math.min(1, (this.sim.time - j.t0) / j.dur); $('#hJob').textContent = `${j.k} by ${j.who} · step ${j.i + 1}/${j.steps.length}: ${j.steps[j.i]} · ${fmt((1 - f) * j.dur / 60, 1)} min left`; $('#hJobBar').style.width = f * 100 + '%'; }
+    $('#hSpares').textContent = Object.keys(LRUS).filter((k) => LRUS[k].qty > 0).map((k) => `${k} ${H.spares.kit[k] || 0}·${H.spares.dock[k] || 0}`).join('  ');
+  }
+
   camRect() { const r = $('#camFrame').getBoundingClientRect(); return $('#camPanel').classList.contains('collapsed') || getComputedStyle($('#camPanel')).display === 'none' ? null : r; }
 
   update(dt) {
     this._t -= dt; if (this._t > 0) return; this._t = 0.1;
     const sim = this.sim, R = sim.rover, A = sim.autonomy, S = sim.sensors, tl = R.telemetry();
     $('#camPanel').style.top = ($('#mapPanel').getBoundingClientRect().bottom + 8) + 'px';
-    $('#clock').textContent = `MET ${fmtT(sim.time)}${sim.paused ? ' ❚❚' : ''} ${sim.timeScale !== 1 ? '· ' + sim.timeScale + '×' : ''}${sim.lagging ? ' (CPU-limited)' : ''}${S.decimated ? ' · sensors decimated' : ''}`;
+    // show the speed actually achieved: above ~5x the physics is CPU-bound, and 50x relies on transit warp
+    const act = sim.actualRate, warpOn = sim.warp.active && sim.timeScale >= sim.warp.minScale;
+    $('#clock').textContent = `MET ${fmtT(sim.time)}${sim.paused ? ' ❚❚' : ''} ${sim.timeScale !== 1 ? '· ' + sim.timeScale + '×' : ''}${sim.timeScale > 1 && !sim.paused ? ` (actual ${act >= 10 ? act.toFixed(0) : act.toFixed(1)}×${warpOn ? ', transit warp' : sim.lagging ? ', CPU-limited' : ''})` : ''}${S.decimated ? ' · sensors decimated' : ''}`;
     const pill = (id, txt, cls) => { const e = $(id); e.textContent = txt; e.className = 'pill ' + cls; };
     pill('#pMode', A.mode === 'AUTO' ? 'AUTO' : A.paused && A.gen ? 'OVERRIDE' : 'MANUAL', A.mode === 'AUTO' ? 'info' : A.paused && A.gen ? 'warn' : '');
     pill('#pDrive', R.estop ? 'E-STOP' : sim.startup ? 'SELF-TEST' : R.powered ? 'DRIVE ARMED' : 'DISARMED', R.estop ? 'err' : R.powered ? 'ok' : 'warn');
+    if (this.ai) pill('#pAI', this.ai.busy ? 'AI THINKING' : this.ai.online ? 'AI ONLINE' : this.ai.online === false ? 'AI OFFLINE' : 'AI', this.ai.busy ? 'info' : this.ai.online ? 'ok' : this.ai.online === false ? 'warn' : '');
+    else $('#pAI').style.display = 'none';
     pill('#pComms', A.faults.comms ? 'COMMS LOS' : 'COMMS OK', A.faults.comms ? 'err' : 'ok');
     pill('#pLidar', S.faults.lidar ? 'LIDAR FAIL' : S.lidarOn ? 'LIDAR' : 'LIDAR OFF', S.faults.lidar ? 'err' : S.lidarOn ? 'ok' : 'warn');
     pill('#pCam', S.faults.camera ? 'CAM FAIL' : S.cameraOn ? 'CAM' : 'CAM OFF', S.faults.camera ? 'err' : S.cameraOn ? 'ok' : 'warn');
@@ -246,6 +372,7 @@ export class HUD {
     $('#overrideBanner').style.display = A.paused && A.gen && !R.estop ? 'block' : 'none';
     this.root.querySelectorAll('[data-ts]').forEach((b) => b.classList.toggle('on', (+b.dataset.ts === 0 && sim.paused) || (!sim.paused && +b.dataset.ts === sim.timeScale)));
     this.root.querySelectorAll('[data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === this.ui.view));
+    this.updateHealth(dt);
 
     const e = sim.slam.est, p = tl.pose;
     const hdg = (y) => ((90 - y * 180 / Math.PI) % 360 + 360) % 360;
@@ -270,11 +397,11 @@ export class HUD {
     const contact = R.wheels.filter((w) => w.contact);
     const avgSink = contact.reduce((a, w) => a + w.sink, 0) / Math.max(1, contact.length), avgSlip = contact.reduce((a, w) => a + Math.abs(w.slip), 0) / Math.max(1, contact.length);
     const rr = contact.reduce((a, w) => a + w.Rc, 0), load = contact.reduce((a, w) => a + w.load, 0);
-    $('#soilRow').textContent = `Bekker sinkage ${(avgSink * 1000).toFixed(0)} mm · |slip| ${(avgSlip * 100).toFixed(1)} % · rolling resistance coeff ${(rr / Math.max(1, load)).toFixed(3)} · contacts ${contact.length}/8`;
+    $('#soilRow').textContent = `Bekker sinkage ${(avgSink * 1000).toFixed(0)} mm · |slip| ${(avgSlip * 100).toFixed(1)} % · rolling resistance coeff ${(rr / Math.max(1, load)).toFixed(3)} · contacts ${contact.length}/${R.wheels.length}`;
 
     // SLAM stats
     const err = Math.hypot(e.x - p.x, e.z - p.z);
-    $('#sErr').textContent = `${fmt(err, 2)} m · ${fmt((((e.yaw - p.yaw) * 180 / Math.PI + 540) % 360) - 180, 2)}°`;
+    $('#sErr').textContent = `${fmt(err, 2)} m · ${fmt(((((e.yaw - p.yaw) * 180 / Math.PI + 180) % 360 + 360) % 360) - 180, 2)}°`;
     const lm = sim.slam.lastMatch, dg = sim.slam.degenerate;
     const lc = sim.slam.lastLoop;
     $('#sMatch').textContent = (lm.t ? `${lm.ok ? 'locked' : 'odometry'} · ${lm.used || 0} pts${dg && (dg.x || dg.z) ? ' · degenerate' : ''}` : 'waiting for map') + (lc ? ` · loop closed ${lc.shift.toFixed(1)} m (${((sim.time - lc.t) / 60).toFixed(0)} min ago)` : '');
@@ -384,8 +511,9 @@ export class HUD {
       const [px, py] = toPx(x, zz);
       ctx.save(); ctx.translate(px, py); ctx.rotate(-yaw);
       ctx.fillStyle = fill; ctx.strokeStyle = stroke; ctx.lineWidth = 2;
-      ctx.fillRect(-7.5 * z, -3.1 * z, 15 * z, 6.2 * z); ctx.strokeRect(-7.5 * z, -3.1 * z, 15 * z, 6.2 * z);
-      ctx.beginPath(); ctx.moveTo(7.5 * z + 8, 0); ctx.lineTo(7.5 * z, -6); ctx.lineTo(7.5 * z, 6); ctx.closePath(); ctx.fillStyle = stroke; ctx.fill();
+      const hl = ROVER.frame.halfLen, hw = ROVER.frame.halfWid;
+      ctx.fillRect(-hl * z, -hw * z, 2 * hl * z, 2 * hw * z); ctx.strokeRect(-hl * z, -hw * z, 2 * hl * z, 2 * hw * z);
+      ctx.beginPath(); ctx.moveTo(hl * z + 8, 0); ctx.lineTo(hl * z, -6); ctx.lineTo(hl * z, 6); ctx.closePath(); ctx.fillStyle = stroke; ctx.fill();
       ctx.restore();
     };
     drawRover(p.x, p.z, p.yaw, 'rgba(255,255,255,0.08)', 'rgba(255,255,255,0.4)');

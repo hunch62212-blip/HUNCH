@@ -114,7 +114,7 @@
    * AEGIS-V1 rover v6 — rocker-bogie, skid-steer cargo rover inside a 24 in (0.6096 m) cube (cradle rails extend
    *   the length). v6 replaces the v4 swerve modules below with js/rocker_bogie.js; the rest of this note is v4/v5.
    * Root frame: +X forward, +Y up, ±Z sides, ground at y = 0 (wheel radius 0.065 = axle height).
-   *   6 swerve modules at x = +0.215 / 0 / -0.215, z = ±0.225. Each: 130 mm wheel with an in-hub 37 mm
+   *   6 swerve modules at x = +0.24 / 0 / -0.24, z = ±0.235. Each: 130 mm wheel with an in-hub 37 mm
    *   gearmotor (drive), a continuous-rotation steering servo + AS5600 absolute encoder + 6-wire slip ring
    *   (unlimited 360 deg swivel), and a coil-over strut. 12 motors in all. A module sweeps r = 0.077 m when it
    *   turns, so modules never touch and the swept outline stays inside 0.292 x 0.302 m half-size.
@@ -123,7 +123,7 @@
    *   (front starboard), two cargo canisters crosswise in V-saddle cradles (aft).
    * ============================================================================================= */
   var GEOM = {
-    wheelR: 0.065, wheelW: 0.075, axleY: 0.065, deckY: 0.225, modX: 0.215, modZ: 0.235,   // modX / modZ = wheel x / z (rocker_bogie GEO)
+    wheelR: 0.065, wheelW: 0.075, axleY: 0.065, deckY: 0.225, modX: 0.24, modZ: 0.235,   // modX / modZ = wheel x / z (rocker_bogie GEO)
     halfLen: 0.30, halfWid: 0.302, height: 0.58, collR: 0.33,
     pad: { x: 0.19, y: 0.286, z: 0 },          // dock coupler reference: 11 mm under the copper face (y 0.297) so the pogos compress 4 mm
     battery: { L: 0.155, W: 0.100, H: 0.100 }      // 12.8 V 10 Ah envelope (Green Cell CUBE listing; geometry TBC)

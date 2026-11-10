@@ -21,6 +21,8 @@ export class Slam {
     this.matching = true; this.mapping = true; this.useSunSensor = true;
     this.matchMaxR = 50; this.matchMinInc = 0.05; this.matchMinN = 3; this.matchMaxVar = Infinity;
     this.trajectory = [];
+    this.kf = [];              // keyframe graph (CHANGES.md §17): {t, d, x, z, yaw}, a node every 10 m or 15 deg
+    this.kfSpacing = 10; this.kfTurn = 15 * Math.PI / 180;
     this.routes = [];
     this.recording = null;
     this.version = 0;          // bumps when the map changes (for renderers / planner)
@@ -49,6 +51,14 @@ export class Slam {
     return t.n[i] ? t.h[i] : NaN;
   }
   heightAt(x, z) { return this.heightCell(Math.floor(x / RES), Math.floor(z / RES)); }
+  // An unmapped cell inside mapped ground: a pinhole between LiDAR rings (16 channels leave 1-5 m between rings
+  // 10-25 m out), not unexplored terrain. True when >= 5 of the 8 cells 0.5 m / 1.0 m away along the axes are mapped.
+  // Any real negative obstacle (crater rim, hole) is metres wide and fails this.
+  pinhole(x, z) {
+    let k = 0;
+    for (const d of [-1, -0.5, 0.5, 1]) { if (this.heightAt(x + d, z) === this.heightAt(x + d, z)) k++; if (this.heightAt(x, z + d) === this.heightAt(x, z + d)) k++; }
+    return k >= 5;
+  }
   // bilinear height between cell centres; NaN unless all 4 cells have >= minN samples
   heightInterp(x, z, minN = 1) {
     const fx = x / RES - 0.5, fz = z / RES - 0.5;
@@ -119,16 +129,28 @@ export class Slam {
       const c = (z + B) * W + (x + B);
       const hc = hp[c];
       // least-squares plane over 5x5 window (2.5 m) -> slope; residual max -> step/rock height
-      let sx = 0, sz = 0, sxx = 0, szz = 0, sxh = 0, szh = 0, sh = 0, k = 0;
+      let sx = 0, sz = 0, sxx = 0, szz = 0, sxz = 0, sxh = 0, szh = 0, sh = 0, k = 0;
       for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) {
         const v = hp[c + dz * W + dx]; if (v !== v) continue;
-        sx += dx; sz += dz; sxx += dx * dx; szz += dz * dz; sxh += dx * v; szh += dz * v; sh += v; k++;
+        sx += dx; sz += dz; sxx += dx * dx; szz += dz * dz; sxz += dx * dz; sxh += dx * v; szh += dz * v; sh += v; k++;
       }
       if (k < 7) { t.haz[i] = 40; t.cls[i] = CLS.ROUGH; continue; }
       const mx = sx / k, mz = sz / k, mh = sh / k;
-      const vx = sxx / k - mx * mx, vz = szz / k - mz * mz;
-      const gx = vx > 1e-6 ? (sxh / k - mx * mh) / vx / RES : 0;
-      const gz = vz > 1e-6 ? (szh / k - mz * mh) / vz / RES : 0;
+      // Least-squares plane through the window. The x and z slopes are solved jointly (2x2 normal equations): solving
+      // each axis on its own ignores their correlation and was wrong whenever the samples are not a full grid (a
+      // diagonal LiDAR ring). When the samples are nearly collinear (one ring far from the rover) the slope across the
+      // ring is undetermined: use the minimum-norm fit (slope along the ring only). Before this, ring noise read as
+      // 10-20 deg of slope and the whole edge of the mapped area turned lethal under the loaded limits.
+      const cxx = sxx / k - mx * mx, czz = szz / k - mz * mz, cxz = sxz / k - mx * mz;
+      const cxh = sxh / k - mx * mh, czh = szh / k - mz * mh, det = cxx * czz - cxz * cxz, tr = cxx + czz;
+      let gx, gz, thin = false;
+      if (det > 0.08 * tr * tr) { gx = (cxh * czz - czh * cxz) / det / RES; gz = (czh * cxx - cxh * cxz) / det / RES; }
+      else {
+        thin = true;
+        const th = 0.5 * Math.atan2(2 * cxz, cxx - czz), uc = Math.cos(th), us = Math.sin(th);
+        const vu = cxx * uc * uc + 2 * cxz * uc * us + czz * us * us, gu = vu > 1e-6 ? (cxh * uc + czh * us) / vu / RES : 0;
+        gx = gu * uc; gz = gu * us;
+      }
       const grad = Math.hypot(gx, gz);
       let step = 0, below = 0;
       for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) {
@@ -148,7 +170,7 @@ export class Slam {
       if (step > L.stepCaution) cls = CLS.ROCK;
       if (depress > 0.35 && grad > tanCaution * 0.8) cls = CLS.CRATER;
       if (grad > tanLethal || step > L.stepLethal) { cost = 255; cls = depress > 0.2 ? CLS.CRATER : (step > L.stepLethal ? CLS.LETHAL : CLS.SLOPE); }
-      else if (cls === CLS.FREE && step > 0.1) cls = CLS.ROUGH;
+      else if (cls === CLS.FREE && (step > 0.1 || thin)) cls = CLS.ROUGH; // a single ring: slope only half known
       t.haz[i] = cost >= 255 ? 255 : Math.min(254, Math.round(cost * 20));
       t.cls[i] = cost >= 255 ? (cls === CLS.CRATER ? CLS.CRATER : CLS.LETHAL) : cls;
     }
@@ -161,7 +183,9 @@ export class Slam {
   setPayload(loaded) {
     if (!!this._payload === !!loaded) return;
     this._payload = !!loaded;
-    this.limits.slopeLethal = loaded ? 8.5 : 20; this.limits.slopeCaution = loaded ? 4.5 : 9;
+    // loaded static tip angle ~29 deg (half-track 3.83 m / CoM 6.8 m); 10.5 deg keeps >= 18 deg of margin and stops
+    // the map's slope over-read (5-6 deg true reads ~9, CHANGES.md §9) from walling the loaded rover in (was 8.5 / 4.5)
+    this.limits.slopeLethal = loaded ? 10.5 : 20; this.limits.slopeCaution = loaded ? 6 : 9;
     this.limits.stepLethal = loaded ? 0.6 : 0.85; this.limits.stepCaution = loaded ? 0.3 : 0.4;
     for (const t of this.tiles.values()) t.dirty = true;
   }
@@ -169,15 +193,29 @@ export class Slam {
   wheelHazard(x, z, relaxed = false) {
     const h0 = this.heightAt(x, z);
     if (h0 !== h0) return null;
-    let mx = h0, mn = h0, k = 1;
-    const hx1 = this.heightAt(x + 0.5, z), hx0 = this.heightAt(x - 0.5, z), hz1 = this.heightAt(x, z + 0.5), hz0 = this.heightAt(x, z - 0.5);
-    for (const v of [hx1, hx0, hz1, hz0]) if (v === v) { mx = Math.max(mx, v); mn = Math.min(mn, v); k++; }
-    const gx = hx1 === hx1 && hx0 === hx0 ? (hx1 - hx0) : 0, gz = hz1 === hz1 && hz0 === hz0 ? (hz1 - hz0) : 0;
+    // Slope: least-squares plane through a 9-point cross (+-0.5 m and +-1.0 m on each axis, 2 m baseline).
+    // The old 2-point difference over 1 m read 3-5 cm of map noise as 4-7 deg of slope and walled the loaded
+    // rover in on flat ground; this fit's worst case for +-6 cm noise is ~4 deg (sum|d| * 0.06 / sum d^2).
+    // per-axis sums include the centre point (d = 0); each axis is centred on the points it has, so a
+    // half-mapped stencil at the map frontier does not bias the slope
+    let sx = 0, sxh = 0, sxx = 0, shx = h0, nx = 1, sz = 0, szh = 0, szz = 0, shz = h0, nz = 1;
+    const ring = [];
+    for (const d of [-1, -0.5, 0.5, 1]) {
+      const hx = this.heightAt(x + d, z), hz = this.heightAt(x, z + d);
+      if (hx === hx) { sx += d; sxh += d * hx; sxx += d * d; shx += hx; nx++; if (Math.abs(d) === 0.5) ring.push([d, 0, hx]); }
+      if (hz === hz) { sz += d; szh += d * hz; szz += d * d; shz += hz; nz++; if (Math.abs(d) === 0.5) ring.push([0, d, hz]); }
+    }
+    const vx = sxx - sx * sx / nx, vz = szz - sz * sz / nz;
+    const gx = vx > 0.4 ? (sxh - sx * shx / nx) / vx : 0, gz = vz > 0.4 ? (szh - sz * shz / nz) / vz : 0;
+    const mh = h0; // plane anchored at the wheel point itself
     const slope = Math.hypot(gx, gz);
-    const step = mx - mn - slope * 0.5;
+    // step: spread of the inner 5 points about that plane (a rock / edge under the tyre, not the slope)
+    let rMax = h0 - mh, rMin = h0 - mh;
+    for (const [dx, dz, h] of ring) { const r = h - (mh + gx * dx + gz * dz); if (r > rMax) rMax = r; if (r < rMin) rMin = r; }
+    const step = rMax - rMin;
     const lim = relaxed ? { stepLethal: 0.85, slopeLethal: 20 } : this.limits; // relaxed: backing out along the track we came in on
     const lethal = step > lim.stepLethal || slope > Math.tan(lim.slopeLethal * Math.PI / 180) * 1.05;
-    return { h: h0, lethal, cost: 1 + 6 * Math.min(1, step / this.limits.stepLethal) ** 2 + 4 * Math.min(1, slope / 0.4) ** 2 };
+    return { h: h0, lethal, slope, step, cost: 1 + 6 * Math.min(1, step / this.limits.stepLethal) ** 2 + 4 * Math.min(1, slope / 0.4) ** 2 };
   }
 
   // object-level map update: forget the footprint of an object the robot just picked up
@@ -213,12 +251,13 @@ export class Slam {
       let d = yawMeas - e.yaw; d = Math.atan2(Math.sin(d), Math.cos(d));
       e.yaw += d * 0.05;
     }
+    this._keyframe(e);
     // breadcrumbs for route memory
     const last = this.trajectory[this.trajectory.length - 1];
     if (!last || Math.hypot(last.x - e.x, last.z - e.z) > 2) {
-      this.trajectory.push({ x: e.x, z: e.z, t: this.sim.time });
+      this.trajectory.push({ x: e.x, z: e.z, t: this.sim.time, d: this.sensors.odom.dist });
       if (this.trajectory.length > 20000) this.trajectory.shift();
-      if (this.recording) this.recording.pts.push({ x: e.x, z: e.z });
+      if (this.recording) this.recording.pts.push({ x: e.x, z: e.z, t: this.sim.time });
     }
   }
 
@@ -428,10 +467,187 @@ export class Slam {
   }
 
   // operator-supplied relocalisation (e.g. after a manual teleport / kidnapped robot)
-  relocalize(p) { this.est.x = p.x; this.est.y = p.y; this.est.z = p.z; this.est.yaw = p.yaw; }
+  // The jump is a fresh start for drift, so a later fiducial fix must not bend data recorded before it.
+  relocalize(p) {
+    this.est.x = p.x; this.est.y = p.y; this.est.z = p.z; this.est.yaw = p.yaw;
+    this._fixAnchor = { t: this.sim.time, d: this.sensors.odom.dist };
+    this.kf = []; this._keyframe(this.est, true);
+  }
+
+  // ---------- keyframe pose graph (CHANGES.md §17) ----------
+  // A sparse chain of poses (a node every kfSpacing m of odometer or kfTurn of heading change) with the relative-pose
+  // constraints that the dead-reckoned estimate made between consecutive nodes. A surveyed fiducial pins the node at the
+  // sighting; relaxing the graph spreads the translation AND heading error back along the nodes, and every map cell,
+  // breadcrumb and route point then moves rigidly with its two neighbouring nodes. The old scheme translated each cell by
+  // (offset x odometer fraction): no rotation, so a heading drift was never undone and local elevation tiles were sheared.
+  _keyframe(e, force = false) {
+    const d = this.sensors.odom.dist, K = this.kf, last = K[K.length - 1];
+    let dyaw = 0; if (last) { dyaw = e.yaw - last.yaw; dyaw = Math.atan2(Math.sin(dyaw), Math.cos(dyaw)); }
+    if (force || !last || d - last.d >= this.kfSpacing || Math.abs(dyaw) >= this.kfTurn) {
+      if (last && last.t === this.sim.time) { last.x = e.x; last.z = e.z; last.yaw = e.yaw; last.d = d; return; }
+      K.push({ t: this.sim.time, d, x: e.x, z: e.z, yaw: e.yaw });
+      if (K.length > 3000) K.shift();
+    }
+  }
+
+  // Gauss-Seidel (with successive over-relaxation) on the SE(2) pose graph: nodes[0] is held, nodes[n-1] is pinned to its
+  // corrected pose, the free nodes in between settle so that each relative pose matches the odometry edge as closely as the
+  // edge weights allow. Edge i -> i+1 measures (f, r, dpsi) in node i's frame; variance grows with the edge length
+  // (sigma_t^2 = (0.02 m)^2 L, sigma_psi^2 = (0.003 rad)^2 L). Returns corrected {x, z, yaw} per node and the iterations used.
+  static relaxChain(nodes, goal) {
+    const n = nodes.length, wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+    const P = nodes.map((q) => ({ x: q.x, z: q.z, yaw: q.yaw }));
+    const toLocal = (yaw, vx, vz) => { const c = Math.cos(yaw), s = Math.sin(yaw); return [vx * c - vz * s, vx * s + vz * c]; };
+    const toWorld = (yaw, f, r) => { const c = Math.cos(yaw), s = Math.sin(yaw); return [f * c + r * s, -f * s + r * c]; };
+    const E = [];
+    for (let i = 0; i < n - 1; i++) {
+      const [f, r] = toLocal(nodes[i].yaw, nodes[i + 1].x - nodes[i].x, nodes[i + 1].z - nodes[i].z);
+      const L = Math.max(1, nodes[i + 1].d - nodes[i].d);
+      E.push({ f, r, dpsi: wrap(nodes[i + 1].yaw - nodes[i].yaw), wt: 1 / (0.0004 * L), wr: 1 / (9e-6 * L) });
+    }
+    // start from the odometer-fraction (old scheme) solution: LM then only has the heading coupling left to resolve
+    const span = Math.max(1, nodes[n - 1].d - nodes[0].d);
+    for (let i = 1; i < n; i++) {
+      const f = i === n - 1 ? 1 : (nodes[i].d - nodes[0].d) / span;
+      P[i].x += f * goal.dx; P[i].z += f * goal.dz; P[i].yaw = wrap(P[i].yaw + f * goal.dyaw);
+    }
+    if (n < 3) return { P, iters: 0 };
+    // Levenberg-Marquardt on the chain (nodes 0 and n-1 pinned). Each step linearises the edge residuals
+    // (local displacement, heading increment) and solves the block-tridiagonal normal equations exactly (block
+    // Thomas), so it converges in a handful of steps however long the chain is. The plain Gauss-Seidel sweep this
+    // replaced did not converge on a 260-node, 2 km chain (nodes ended 150 m / 90 deg off; CHANGES.md §17).
+    const cost = (Q) => {
+      let c = 0;
+      for (let i = 0; i < n - 1; i++) {
+        const e = E[i], q = Q[i], nx = Q[i + 1];
+        const [fl, rl] = toLocal(q.yaw, nx.x - q.x, nx.z - q.z);
+        const w = wrap(nx.yaw - q.yaw - e.dpsi);
+        c += e.wt * ((fl - e.f) ** 2 + (rl - e.r) ** 2) + e.wr * w * w;
+      }
+      return c;
+    };
+    const m = n - 2, D = new Array(m), U = new Array(m), G = new Array(m); // diagonal, upper blocks, gradient
+    const inv3 = (M) => {
+      const [a, b, c, d, e, f, g, h, k] = M, A = e * k - f * h, B = f * g - d * k, C = d * h - e * g, det = a * A + b * B + c * C;
+      return [A, c * h - b * k, b * f - c * e, B, a * k - c * g, c * d - a * f, C, b * g - a * h, a * e - b * d].map((v) => v / det);
+    };
+    const mul = (X, Y) => { const Z = new Array(9); for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) Z[r * 3 + c] = X[r * 3] * Y[c] + X[r * 3 + 1] * Y[3 + c] + X[r * 3 + 2] * Y[6 + c]; return Z; };
+    let lambda = 1e-3, c0 = cost(P), it = 0;
+    for (; it < 25; it++) {
+      for (let i = 0; i < m; i++) { D[i] = [0, 0, 0, 0, 0, 0, 0, 0, 0]; U[i] = [0, 0, 0, 0, 0, 0, 0, 0, 0]; G[i] = [0, 0, 0]; }
+      for (let i = 0; i < n - 1; i++) {
+        const e = E[i], q = P[i], nx = P[i + 1], c = Math.cos(q.yaw), s = Math.sin(q.yaw);
+        const [fl, rl] = toLocal(q.yaw, nx.x - q.x, nx.z - q.z);
+        const rf = fl - e.f, rr = rl - e.r, rp = wrap(nx.yaw - q.yaw - e.dpsi);
+        // rows: f, r, psi; columns: (x, z, yaw) of node i (Ja) and node i+1 (Jb)
+        const Ja = [-c, s, -rl, -s, -c, fl, 0, 0, -1], Jb = [c, -s, 0, s, c, 0, 0, 0, 1], w = [e.wt, e.wt, e.wr], r3 = [rf, rr, rp];
+        const add = (blk, J1, J2) => { for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) { let v = 0; for (let k = 0; k < 3; k++) v += w[k] * J1[k * 3 + a] * J2[k * 3 + b]; blk[a * 3 + b] += v; } };
+        const grad = (g, J) => { for (let a = 0; a < 3; a++) { let v = 0; for (let k = 0; k < 3; k++) v += w[k] * J[k * 3 + a] * r3[k]; g[a] += v; } };
+        const ia = i - 1, ib = i; // free-variable slots of nodes i and i+1 (node k -> slot k-1)
+        if (ia >= 0) { add(D[ia], Ja, Ja); grad(G[ia], Ja); }
+        if (ib < m) { add(D[ib], Jb, Jb); grad(G[ib], Jb); }
+        if (ia >= 0 && ib < m) add(U[ia], Ja, Jb);   // block (slot ia, slot ib); the lower block is its transpose
+      }
+      let ok = false;
+      for (let tries = 0; tries < 12 && !ok; tries++) {
+        // solve (H + lambda diag(H)) d = -g by block Thomas elimination (forward)
+        const Dd = D.map((B) => { const X = B.slice(); for (let k = 0; k < 3; k++) X[k * 4] = B[k * 4] * (1 + lambda) + 1e-12; return X; });
+        const rhs = G.map((g) => [-g[0], -g[1], -g[2]]), Dinv = new Array(m), Ds = new Array(m);
+        for (let i = 0; i < m; i++) {
+          if (i > 0) { // eliminate with the previous block: Ds[i] = Dd[i] - L Dinv[i-1] U[i-1], L = U[i-1]^T
+            const Up = U[i - 1], L = [Up[0], Up[3], Up[6], Up[1], Up[4], Up[7], Up[2], Up[5], Up[8]], LD = mul(L, Dinv[i - 1]);
+            const LDU = mul(LD, Up); Ds[i] = Dd[i].map((v, k) => v - LDU[k]);
+            const r0 = rhs[i - 1]; for (let a = 0; a < 3; a++) rhs[i][a] -= LD[a * 3] * r0[0] + LD[a * 3 + 1] * r0[1] + LD[a * 3 + 2] * r0[2];
+          } else Ds[i] = Dd[i];
+          Dinv[i] = inv3(Ds[i]);
+        }
+        const dl = new Array(m);
+        for (let i = m - 1; i >= 0; i--) {
+          const r = rhs[i].slice();
+          if (i < m - 1) for (let a = 0; a < 3; a++) r[a] -= U[i][a * 3] * dl[i + 1][0] + U[i][a * 3 + 1] * dl[i + 1][1] + U[i][a * 3 + 2] * dl[i + 1][2];
+          dl[i] = [0, 1, 2].map((a) => Dinv[i][a * 3] * r[0] + Dinv[i][a * 3 + 1] * r[1] + Dinv[i][a * 3 + 2] * r[2]);
+        }
+        const T = P.map((q) => ({ x: q.x, z: q.z, yaw: q.yaw }));
+        for (let i = 0; i < m; i++) { T[i + 1].x += dl[i][0]; T[i + 1].z += dl[i][1]; T[i + 1].yaw = wrap(T[i + 1].yaw + dl[i][2]); }
+        const c1 = cost(T);
+        if (Number.isFinite(c1) && c1 <= c0) { for (let i = 0; i < n; i++) P[i] = T[i]; ok = c0 - c1 > 1e-9 * (1 + c0) || true; const gain = c0 - c1; c0 = c1; lambda = Math.max(1e-9, lambda / 5); if (gain < 1e-7 * (1 + c0)) it = 999; }
+        else lambda *= 8;
+      }
+      if (!ok || it >= 999) break;
+    }
+    return { P, iters: Math.min(it, 25) };
+  }
+
+  // Absolute fix (surveyed fiducial) on a built map: (dx, dz, dyaw) is the pose error at the sighting node (the current
+  // pose). The graph since the last fix is relaxed with that node pinned (see relaxChain), then each map cell first seen
+  // since the last fix, each breadcrumb and each route point since then is moved rigidly with the blend of its two
+  // neighbouring nodes' corrections. Data older than the previous fix stays put.
+  shiftFrame(dx, dz, dyaw = 0) {
+    const now = this.sim.time, dNow = this.sensors.odom.dist, e = this.est;
+    const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+    const A = this._fixAnchor || { t: 0, d: 0 };
+    this._keyframe(e, true);                               // the sighting node
+    const K = this.kf;
+    let i0 = 0; while (i0 + 1 < K.length && K[i0 + 1].t <= A.t) i0++;   // newest node at or before the previous fix
+    const chain = K.slice(i0);
+    const rel = Slam.relaxChain(chain, { dx, dz, dyaw });
+    const corr = chain.map((q, i) => ({ cx: q.x, cz: q.z, dx: rel.P[i].x - q.x, dz: rel.P[i].z - q.z, dyaw: wrap(rel.P[i].yaw - q.yaw) }));
+    const rot = (vx, vz, a) => { const c = Math.cos(a), s = Math.sin(a); return [vx * c + vz * s, -vx * s + vz * c]; };
+    const warpBy = (c, x, z) => { const [rx, rz] = rot(x - c.cx, z - c.cz, c.dyaw); return [c.cx + c.dx + rx, c.cz + c.dz + rz]; };
+    const tAt = chain.map((q) => q.t), tFirst = chain[0].t;
+    const seg = (t) => { // chain segment holding time t (binary search)
+      let lo = 0, hi = chain.length - 1;
+      while (lo < hi - 1) { const mid = (lo + hi) >> 1; if (tAt[mid] <= t) lo = mid; else hi = mid; }
+      return lo;
+    };
+    const warp = (x, z, t) => {
+      if (!(t > tFirst)) return [x, z];
+      if (t >= tAt[tAt.length - 1]) return warpBy(corr[corr.length - 1], x, z);
+      const j = seg(t), a = (t - tAt[j]) / Math.max(1e-6, tAt[j + 1] - tAt[j]);
+      const [x0, z0] = warpBy(corr[j], x, z), [x1, z1] = warpBy(corr[j + 1], x, z);
+      return [x0 + (x1 - x0) * a, z0 + (z1 - z0) * a];
+    };
+    // map: lift every cell first seen since the anchor, then drop it at its warped position
+    const moved = [];
+    for (const t of this.tiles.values()) {
+      for (let i = 0; i < t.n.length; i++) {
+        if (!t.n[i] || !(t.t0[i] > A.t)) continue;
+        const ix = t.tx * TILE + (i % TILE), iz = t.tz * TILE + Math.floor(i / TILE);
+        const [wx, wz] = warp((ix + 0.5) * RES, (iz + 0.5) * RES, t.t0[i]);
+        const nx = Math.floor(wx / RES), nz = Math.floor(wz / RES);
+        if (nx === ix && nz === iz) continue;
+        moved.push(nx, nz, t.h[i], t.h0[i], t.t0[i], t.v[i], t.n[i]);
+        t.n[i] = 0; this.cellsKnown--;
+      }
+    }
+    for (let k = 0; k < moved.length; k += 7) {
+      const ix = moved[k], iz = moved[k + 1], tx = Math.floor(ix / TILE), tz = Math.floor(iz / TILE);
+      const t = this.getTile(tx, tz, true), i = (iz - tz * TILE) * TILE + (ix - tx * TILE);
+      if (t.n[i] && !(t.t0[i] > A.t)) continue; // a trusted older cell already holds this spot
+      if (!t.n[i]) this.cellsKnown++;
+      t.h[i] = moved[k + 2]; t.h0[i] = moved[k + 3]; t.t0[i] = moved[k + 4]; t.v[i] = moved[k + 5]; t.n[i] = moved[k + 6];
+    }
+    for (const t of this.tiles.values()) t.dirty = true;
+    // breadcrumbs and route points recorded since the anchor
+    const shiftPts = (pts) => { for (const p of pts) if (p.t > A.t) { const [wx, wz] = warp(p.x, p.z, p.t); p.x = wx; p.z = wz; } };
+    shiftPts(this.trajectory);
+    for (const r of this.routes) shiftPts(r.pts);
+    if (this.recording) shiftPts(this.recording.pts);
+    // keyframes themselves take their relaxed poses (the sighting node ends on the surveyed pose)
+    for (let i = 0; i < chain.length; i++) { chain[i].x = rel.P[i].x; chain[i].z = rel.P[i].z; chain[i].yaw = rel.P[i].yaw; }
+    const c0 = corr[corr.length - 1], pre = { x: c0.cx, z: c0.cz };
+    e.x = rel.P[chain.length - 1].x; e.z = rel.P[chain.length - 1].z; e.yaw = wrap(e.yaw + c0.dyaw);
+    this._fixAnchor = { t: this.kf[this.kf.length - 1].t, d: dNow };
+    // the same rigid correction for state that lives at the current pose (planned path, port estimates)
+    const apply = (p) => { const [wx, wz] = warpBy(c0, p.x, p.z); p.x = wx; p.z = wz; };
+    this.lastFix = { t: now, dx, dz, dyaw, cells: moved.length / 7, nodes: chain.length, iters: rel.iters, apply, dyawEnd: c0.dyaw, pre };
+    this.version++;
+    this.sim.emit('routes');
+    return this.lastFix;
+  }
 
   clear() {
-    this.tiles.clear(); this.cellsKnown = 0; this.routes = []; this.trajectory = []; this.version++;
+    this.tiles.clear(); this.cellsKnown = 0; this.routes = []; this.trajectory = []; this.kf = []; this.version++;
     this.sim.emit('routes');
   }
 
@@ -449,7 +665,8 @@ export class Slam {
       t.h.set(s.h); t.n.set(s.n); if (s.v) t.v.set(s.v); t.h0.set(s.h0 || s.h); t.t0.fill(-1e9); t.born = -1e9; t.dirty = true; // loaded tiles count as old
       for (let i = 0; i < t.n.length; i++) if (t.n[i]) this.cellsKnown++;
     }
-    this.routes = d.routes || [];
+    // stored routes are in the saved map's frame: drop point times so a fix in this session never moves them
+    this.routes = (d.routes || []).map((r) => ({ ...r, pts: r.pts.map((p) => ({ x: p.x, z: p.z })) }));
     this.version++;
     this.sim.emit('routes');
     return true;

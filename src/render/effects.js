@@ -14,6 +14,8 @@ export class Dust {
   constructor(scene, terrain) {
     this.t = terrain; this.N = 4000;
     this.p = new Float32Array(this.N * 3); this.v = new Float32Array(this.N * 3); this.life = new Float32Array(this.N); this.i = 0;
+    this._emitQ = new THREE.Quaternion();
+    this._emitDir = new THREE.Vector3();
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(this.p, 3));
     this.alpha = new Float32Array(this.N); g.setAttribute('alpha', new THREE.BufferAttribute(this.alpha, 1));
@@ -36,8 +38,9 @@ export class Dust {
       let n = Math.floor(rate) + (Math.random() < rate % 1 ? 1 : 0);
       // spray leaves the rear of the contact patch, opposite to wheel surface motion
       const b = rover.bogies[w.id];
-      const q = rover.body.rotation(); const Q = new THREE.Quaternion(q.x, q.y, q.z, q.w);
-      const dir = new THREE.Vector3(Math.cos(b.steer), 0, -Math.sin(b.steer)).applyQuaternion(Q).multiplyScalar(-Math.sign(w.omega));
+      const q = rover.body.rotation(); this._emitQ.set(q.x, q.y, q.z, q.w);
+      this._emitDir.set(Math.cos(b.steer), 0, -Math.sin(b.steer)).applyQuaternion(this._emitQ).multiplyScalar(-Math.sign(w.omega));
+      const dir = this._emitDir;
       while (n-- > 0) {
         const k = this.i; this.i = (this.i + 1) % this.N;
         this.p[k * 3] = w.cp.x + (Math.random() - 0.5) * 0.4; this.p[k * 3 + 1] = w.cp.y + 0.03; this.p[k * 3 + 2] = w.cp.z + (Math.random() - 0.5) * 0.4;
@@ -52,10 +55,11 @@ export class Dust {
     const g = MOON.g;
     for (let k = 0; k < this.N; k++) {
       if (this.life[k] <= 0) { this.alpha[k] = 0; continue; }
+      this.life[k] -= dt * 0.18; // ~5.5 s lifetime
       this.v[k * 3 + 1] -= g * dt;
       this.p[k * 3] += this.v[k * 3] * dt; this.p[k * 3 + 1] += this.v[k * 3 + 1] * dt; this.p[k * 3 + 2] += this.v[k * 3 + 2] * dt;
-      if (this.v[k * 3 + 1] < 0 && this.p[k * 3 + 1] < heightAt(this.t, this.p[k * 3], this.p[k * 3 + 2])) this.life[k] = 0; // no air: lands where the arc ends
-      this.alpha[k] = this.life[k] > 0 ? 0.9 : 0;
+      if (this.v[k * 3 + 1] < 0 && this.life[k] > 0 && this.p[k * 3 + 1] < heightAt(this.t, this.p[k * 3], this.p[k * 3 + 2])) this.life[k] = 0; // no air: lands where the arc ends
+      this.alpha[k] = this.life[k] > 0 ? Math.min(0.9, this.life[k] * 2.5) : 0;
     }
     this.points.geometry.attributes.position.needsUpdate = true;
     this.points.geometry.attributes.alpha.needsUpdate = true;
@@ -71,6 +75,12 @@ export class Tracks {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(this.pos, 3));
     g.setAttribute('uv', new THREE.BufferAttribute(this.uv, 2));
+    // lit material needs normals: without them the shader normalises (0,0,0) -> NaN pixels, which bloom
+    // smears into a screen-sized black blob
+    this.nrm = new Float32Array(this.MAX * 4 * 3);
+    for (let i = 1; i < this.nrm.length; i += 3) this.nrm[i] = 1;
+    g.setAttribute('normal', new THREE.BufferAttribute(this.nrm, 3));
+    this._e1 = new THREE.Vector3(); this._e2 = new THREE.Vector3();
     g.setIndex(new THREE.BufferAttribute(idx, 1));
     g.setDrawRange(0, 0);
     const c = document.createElement('canvas'); c.width = 64; c.height = 64; const x = c.getContext('2d');
@@ -81,9 +91,11 @@ export class Tracks {
     this.mesh = new THREE.Mesh(g, m); this.mesh.frustumCulled = false; this.mesh.receiveShadow = true;
     scene.add(this.mesh);
     this.count = 0; this.head = 0; this.last = new Map();
+    this._Q = new THREE.Quaternion();
+    this._axle = new THREE.Vector3();
   }
   update(rover) {
-    const q = rover.body.rotation(); const Q = new THREE.Quaternion(q.x, q.y, q.z, q.w);
+    const q = rover.body.rotation(); this._Q.set(q.x, q.y, q.z, q.w); const Q = this._Q;
     for (const w of rover.wheels) {
       if (!w.contact) { this.last.delete(w.id); continue; }
       const prev = this.last.get(w.id);
@@ -93,14 +105,22 @@ export class Tracks {
       if (d < 0.35) continue;
       if (d > 3) { this.last.set(w.id, { p: cp, v: 0 }); continue; }
       const b = rover.bogies[w.id];
-      const axle = new THREE.Vector3(Math.sin(b.steer), 0, Math.cos(b.steer)).applyQuaternion(Q).multiplyScalar(ROVER.wheel.width / 2);
+      this._axle.set(Math.sin(b.steer), 0, Math.cos(b.steer)).applyQuaternion(Q).multiplyScalar(ROVER.wheel.width / 2);
+      const axle = this._axle;
       const k = this.head; this.head = (this.head + 1) % this.MAX; this.count = Math.min(this.MAX, this.count + 1);
       const put = (i, v) => { this.pos[(k * 4 + i) * 3] = v.x; this.pos[(k * 4 + i) * 3 + 1] = v.y + 0.015; this.pos[(k * 4 + i) * 3 + 2] = v.z; };
       put(0, prev.p.clone().sub(axle)); put(1, prev.p.clone().add(axle)); put(2, cp.clone().sub(axle)); put(3, cp.clone().add(axle));
+      // face normal of the quad (follows slopes); always pointing up, (0,1,0) if degenerate
+      const P = this.pos, o = k * 12;
+      const n = this._e1.set(P[o + 3] - P[o], P[o + 4] - P[o + 1], P[o + 5] - P[o + 2])
+        .cross(this._e2.set(P[o + 6] - P[o], P[o + 7] - P[o + 1], P[o + 8] - P[o + 2]));
+      if (n.y < 0) n.negate();
+      if (!(n.lengthSq() > 1e-12)) n.set(0, 1, 0); else n.normalize();
+      for (let i = 0; i < 4; i++) { this.nrm[o + i * 3] = n.x; this.nrm[o + i * 3 + 1] = n.y; this.nrm[o + i * 3 + 2] = n.z; }
       const v0 = prev.v, v1 = prev.v + d / 0.9;
       this.uv.set([0, v0, 1, v0, 0, v1, 1, v1], k * 8);
       this.last.set(w.id, { p: cp, v: v1 % 100 });
-      this.mesh.geometry.attributes.position.needsUpdate = true; this.mesh.geometry.attributes.uv.needsUpdate = true;
+      this.mesh.geometry.attributes.position.needsUpdate = true; this.mesh.geometry.attributes.uv.needsUpdate = true; this.mesh.geometry.attributes.normal.needsUpdate = true;
       this.mesh.geometry.setDrawRange(0, this.count * 6);
     }
   }

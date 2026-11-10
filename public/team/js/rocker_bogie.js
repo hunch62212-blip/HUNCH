@@ -5,9 +5,9 @@
  *
  * Layout (rover frame: +x forward, +y up from the ground, +z port), per side s = +1 (port, L) / -1 (starboard, R):
  *   rocker: one bent link pivoting on the chassis at P = (0, 0.194). Its front arm carries the front wheel;
- *           its rear arm carries the bogie pivot B = (-0.1075, 0.125).
- *   bogie:  a short link on B carrying the middle wheel (x 0) and the rear wheel (x -0.215).
- *   wheels: x = +0.215 / 0 / -0.215, z = +-0.235, axle y 0.065 (130 mm wheels), one 300 RPM gearmotor each.
+ *           its rear arm carries the bogie pivot B = (-0.12, 0.125).
+ *   bogie:  a short link on B carrying the middle wheel (x 0) and the rear wheel (x -0.24).
+ *   wheels: x = +0.24 / 0 / -0.24, z = +-0.235, axle y 0.065 (130 mm wheels), one 300 RPM gearmotor each.
  *   differential: a bevel-gear differential on the transverse pivot shaft (in the tub, above the battery) makes
  *           the two rockers turn equal and opposite in the body frame, so the body pitch is the mean of the sides.
  * With the rocker pivot directly above the middle wheel and the bogie pivot midway between the middle and rear
@@ -19,9 +19,10 @@
   'use strict';
   var GEO = {
     wheelR: 0.065, wheelW: 0.075, axleY: 0.065,
-    xF: 0.215, xM: 0, xR: -0.215, zW: 0.235,        // v11: track 0.47 m (was 0.45) for the roll margin; overall width 0.60 m, inside the 24 in cube
+    xF: 0.24, xM: 0, xR: -0.24, zW: 0.235,          // v11: track 0.47 m (was 0.45) for the roll margin; overall width 0.60 m, inside the 24 in cube.
+                                            // Wheelbase 0.48 m (was 0.43): the loaded fore-aft tip margin needs >= 25 deg (sim decision, 2026-11-07)
     P: { x: 0, y: 0.194 },                  // rocker pivot (chassis), on the differential shaft
-    B: { x: -0.1075, y: 0.125 },            // bogie pivot on the rocker's rear arm
+    B: { x: -0.12, y: 0.125 },               // bogie pivot on the rocker's rear arm, midway between the middle and rear wheels
     zRocker: 0.175, zBogie: 0.157,          // link mid-planes (outboard of the tub wall z 0.146, inboard of the motors z 0.188)
     linkT: 0.012, linkH: 0.018,             // printed link section (PETG), m
     rhoMax: 0.21, betaMax: 0.29             // travel stops (v11, was 0.18 / 0.26): rocker +-0.21 rad from the body, bogie +-0.29 rad from the rocker.
