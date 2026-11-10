@@ -440,3 +440,18 @@ utilisation, stopping distance, drawbar pull, traction / resistance coefficients
 Wh/km, cost of transport, Froude number), `src/render/engOverlay.js` (wheel load / traction arrows, CoM + plumb
 line, support polygon with critical edge, predicted path, braking bar), `src/ui/instruments.js` (attitude
 indicator with the rover's own rollover limits, LMI-style stability plan view, readouts with formula tooltips).
+
+## 22. Runaway after false "wheel seized" isolations; wheel force arrows removed (2026-11-10)
+
+* **Runaway from PORT-1 (the `dock_cyl40` failure, and one way M6 "heads somewhere random").** Pushing the loaded rover
+  against the building stalls every wheel at once: full phase current, resolver ~0. The `seize` signature matched that on
+  four wheels within 6 s. FDIR declutched all four, the rover was left with two driven wheels that could not make the
+  commanded turns, and it drove straight away (goal distance 9 m → 1,364 m). The signature now also requires at least
+  three of the other wheels to be turning (`health.js` MODE `seize`). A common-mode stall is a blocked vehicle, not six
+  failed hubs. `tests/fdir.mjs` still detects an injected seizure (wheel 5, 1.7 s) and declutches it: 65/65.
+* **Wheel load / traction arrows removed** from the engineering overlay (`src/render/engOverlay.js`) at the operator's
+  request. CoM, support polygon, predicted path and braking bar stay.
+
+Still open (being worked on for the next version): the navigation watchdog counts newly mapped ground as progress, so a
+rover heading away from its goal is not stopped. A* prices unmapped ground (1.5 /m) below typical mapped ground, so the
+route flips as the map fills in. Point turns at > 50° heading error; smart rpm is 3 fixed tiers capped at 180.

@@ -1,7 +1,5 @@
 // Engineering overlay: the physics the vehicle model computes, drawn into the 3D scene the way engineering
 // debug views and games show it (docs/GRAPHICS_PHYSICS_RESEARCH.md):
-//  * wheel contact forces: normal load arrows (length = load / static share, colour = slip) and tractive force
-//    arrows along the ground (Bekker-Wong thrust minus resistance)
 //  * centre of mass with a plumb line to the ground, and the support polygon coloured by the force-angle tip
 //    margin; the edge the vehicle would tip about is drawn red
 //  * predicted path (constant speed and yaw rate, 8 s) and a braking-distance bar across it (AR-HUD style)
@@ -12,7 +10,6 @@ import { vehicleDynamics, predictPath } from '../sim/dynamics.js';
 import { ROVER } from '../sim/config.js';
 
 const GREEN = new THREE.Color(0x3ddc84), AMBER = new THREE.Color(0xffb020), RED = new THREE.Color(0xff4d3a);
-const CYAN = new THREE.Color(0x35d0ff);
 const ramp = (x, a, b) => Math.max(0, Math.min(1, (x - a) / (b - a)));
 // green -> amber -> red as t goes 0 -> 1
 const traffic = (t, out) => (t < 0.5 ? out.copy(GREEN).lerp(AMBER, t * 2) : out.copy(AMBER).lerp(RED, (t - 0.5) * 2));
@@ -27,14 +24,8 @@ export class EngineeringOverlay {
     scene.add(this.group);
     const add = (o) => { o.renderOrder = 999; o.frustumCulled = false; this.group.add(o); return o; };
 
-    // wheel arrows: load (vertical-ish, along the contact normal) and traction (along the ground)
-    this.loadArrows = []; this.tractArrows = [];
-    for (let i = 0; i < 6; i++) {
-      const a = new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), new THREE.Vector3(), 1, 0x3ddc84, 0.6, 0.35);
-      const b = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 1, 0x35d0ff, 0.5, 0.3);
-      for (const h of [a, b]) { h.traverse((o) => { if (o.material) xray(o.material); o.renderOrder = 999; }); add(h); }
-      this.loadArrows.push(a); this.tractArrows.push(b);
-    }
+    // (v1.3.0: the per-wheel load / traction arrows were removed at the operator's request; wheel loads and slip are
+    // still in the vehicle-state table and the dynamics instruments)
     // centre of mass: checkered-style marker (sphere), plumb line, ground cross
     this.com = add(new THREE.Mesh(new THREE.SphereGeometry(0.32, 16, 12), xray(new THREE.MeshBasicMaterial({ color: 0xffd23d }))));
     this.plumbGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(6), 3));
@@ -87,26 +78,8 @@ export class EngineeringOverlay {
     this.group.visible = show;
     if (!show) return;
     const d = this.dyn = vehicleDynamics(R);
-    const share = Math.max(1, d.m * d.g / 6);
-    const c = this._c, tmp = new THREE.Vector3(), dir = new THREE.Vector3();
+    const c = this._c;
     const p = R.pose();
-    // ---- wheel forces
-    for (let i = 0; i < 6; i++) {
-      const w = R.wheels[i], la = this.loadArrows[i], ta = this.tractArrows[i];
-      if (!w || !w.contact || !w.cp) { la.visible = ta.visible = false; continue; }
-      la.visible = true;
-      const len = Math.max(0.3, Math.min(7, 3 * (w.load || 0) / share));
-      la.position.copy(w.cp); la.setDirection(dir.copy(w.cn || tmp.set(0, 1, 0)).normalize());
-      la.setLength(len, Math.min(0.7, len * 0.3), Math.min(0.4, len * 0.18));
-      la.setColor(traffic(ramp(Math.abs(w.slip || 0), 0.05, 0.45), c));
-      const Fx = w.Fx || 0;
-      if (Math.abs(Fx) < 20) { ta.visible = false; continue; }
-      ta.visible = true;
-      dir.copy(p.fwd); const n = w.cn || tmp.set(0, 1, 0); dir.addScaledVector(n, -dir.dot(n)).normalize().multiplyScalar(Math.sign(Fx));
-      const tl = Math.max(0.3, Math.min(6, 6 * Math.abs(Fx) / share));
-      ta.position.copy(w.cp).addScaledVector(n, 0.15); ta.setDirection(dir); ta.setLength(tl, Math.min(0.5, tl * 0.3), Math.min(0.3, tl * 0.2));
-      ta.setColor(Fx > 0 ? CYAN : AMBER);
-    }
     // ---- centre of mass + plumb line
     const cw = R.comWorld;
     if (cw) {

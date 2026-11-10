@@ -102,7 +102,11 @@ export const MODES = [
     apply: (h, n) => { W(h, n).fault = 'seized'; },
     clear: (h, n) => { W(h, n).fault = null; W(h, n).declutched = false; },
     truth: (h, n) => W(h, n).fault === 'seized' || (W(h, n).fault === 'motor' && W(h, n).declutched),
-    sig: (h, n) => { const w = W(h, n); return h.ch.phaseI(n) > 0.95 && Math.abs(h.ch.encW(n)) < 0.05 && Math.abs(w.target) > 0.3 ? `phase I ${h.ch.phaseI(n).toFixed(2)} pu, resolver ${h.ch.encW(n).toFixed(2)} rad/s, cmd ${w.target.toFixed(2)} rad/s` : null; },
+    // a seized wheel stops while the others keep turning; when every wheel is at the current limit and none turns,
+    // the vehicle is stalled against something (common mode), not six wheels seizing at once (v1.3.0: four false
+    // "seized" isolations against the building wall left 2 driven wheels and the rover ran away from the port)
+    sig: (h, n) => { const w = W(h, n); let turning = 0; for (let m = 1; m <= 6; m++) if (m !== n && Math.abs(h.ch.encW(m)) > 0.15) turning++;
+      return turning >= 3 && h.ch.phaseI(n) > 0.95 && Math.abs(h.ch.encW(n)) < 0.05 && Math.abs(w.target) > 0.3 ? `phase I ${h.ch.phaseI(n).toFixed(2)} pu, resolver ${h.ch.encW(n).toFixed(2)} rad/s, cmd ${w.target.toFixed(2)} rad/s` : null; },
     respond: (h, n) => { h.hold(3, `declutching wheel ${n}`); h.after(3, () => { const w = W(h, n); if (w.fault === 'seized') { w.fault = 'motor'; w.declutched = true; h.sim.log(`FDIR: wheel ${n} (${WN[n - 1]}) declutched: free-rolling, 5 driven wheels`, 'warn'); } }); },
   },
   {
