@@ -218,7 +218,7 @@ export class Sim {
       case 'lidar': this.sensors.faults.lidar = true; this.log('FAULT: LiDAR returns lost (sensor failure)', 'err'); break;
       case 'camera': this.sensors.faults.camera = true; this.log('FAULT: camera / fiducial pipeline failed', 'err'); break;
       case 'comms': A.faults.comms = true; this.log('FAULT: comms loss with base. Rover continues autonomously; operator commands queued (E-STOP link independent).', 'err'); break;
-      case 'battery': { const s = Math.max(0.01, Math.min(1, (arg ?? 15) / 100)); R.power.wh = s * ROVER.battery.capacityWh; R.power.soc = s; this.log(`FAULT: battery state of charge forced to ${(s * 100).toFixed(0)}%`, 'err'); break; }
+      case 'battery': { const s = Math.max(0.01, Math.min(1, (arg ?? 15) / 100)); R.power.wh = s * ROVER.battery.capacityWh * (R.power.capK ?? 1); R.power.soc = s; /* s is the SoC of the strings on line */ this.log(`FAULT: battery state of charge forced to ${(s * 100).toFixed(0)}%`, 'err'); break; }
       case 'wheel': { const N = R.wheels.length, a = Math.round(Number(arg ?? 3)), n = Math.max(1, Math.min(N, Number.isFinite(a) ? a : 3)); R.wheels[n - 1].fault = 'motor'; this.log(`FAULT: wheel ${n} motor controller failed (wheel free-rolls). Torque redistributed to ${N - 1} wheels, speed derated 25% (autonomy.js).`, 'err'); break; }
       case 'shift': {
         if (!R.loaded) { this.log('No cargo to shift', 'warn'); return; }

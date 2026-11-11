@@ -33,8 +33,8 @@ Full logs: `tests/out/<name>.log`.
 
 ```bash
 npm test               # everything (the long autonomy runs take 25+ min wall each)
-npm run test:quick     # skips m3, drift, faults, fdir, nav_bench, cycle
-npm run test:long      # only those six
+npm run test:quick     # skips m3, drift, faults, fdir, power_dock, nav_bench, cycle
+npm run test:long      # only those seven
 node tests/run-all.mjs dock_cyl40 rocks   # named entries
 TEST_JOBS=2 npm test   # limit parallel sims (each needs ~0.5-1 GB RAM)
 ```
@@ -45,8 +45,10 @@ TEST_JOBS=2 npm test   # limit parallel sims (each needs ~0.5-1 GB RAM)
 | rocks | rock_climb.mjs | 0.57 m boulder climbed, 1.40 m boulder blocks, stays upright |
 | lander | lander.mjs | driving into the cargo lander: no climb / roll-over, ends upright; lander tags seen; dynamics readouts sane |
 | thermal | thermal.mjs | regolith temperature vs sun; hot slope + glint: instruments stay in range with the thermal brain (overheat without); cold start: rev up; drive heat: rev down; all 9 scenarios; brain idle on a normal day |
+| planner | planner.mjs | unmapped ground beside a mapped slope / crater costs more; loaded paths keep a turning radius ≥ 18 m |
+| ai_copilot | ai_copilot.mjs | copilot allowlist, one motion command per answer, reply parsing, advisor waits for `ai ok` (scripted model, no network) |
 | creep | creep.mjs | 0.01–0.3 m/s speed tracking within 10 % |
-| odo | odo.mjs | odometry within 5 % of truth at 1–4.9 m/s |
+| odo | odo.mjs | odometry within 5 % of truth at 0.5–2.9 m/s |
 | pickup_gt_cyl40 / _box20 | pickup_gt.mjs | scripted pickup: grapple check, clamps lock, loaded tip margin, wheel contact |
 | pickup_time_cyl40 / _box20 | pickup_time.mjs | autonomous pickup completes |
 | dock_cyl40 / _box20 | dock.mjs | Mission 5 delivery, soft-capture accuracy |
@@ -54,6 +56,7 @@ TEST_JOBS=2 npm test   # limit parallel sims (each needs ~0.5-1 GB RAM)
 | m1 / m3 / cycle | autonomy.mjs | Missions 1, 2+3, 6 complete |
 | drift | drift.mjs | SLAM error vs distance on a 2 km drive |
 | faults | faults.mjs | 2 km drive with a blocked road and a failed wheel |
+| power_dock | power_dock.mjs | autonomous charge 30 → 90 % at the 60 kW charger, pack temperature, coupler release, bank lasts a lunar night |
 | fdir | fdir.mjs | all 24 hardware failure modes detected and isolated from sensor data, automatic responses, field + dock repairs, random failures, 0 false alarms, lunar-night survival energy, keep-alive array |
 | nav_bench | nav_bench.mjs | 2 km there and back, zero warnings, route reuse on return |
 
@@ -82,7 +85,7 @@ unreachable the sim runs exactly as before. Design report: [docs/AI_COPILOT.md](
   `?aimodel=qwen3.5:4b` picks another model.
 * Live check against the real model: `node scripts/ai_probe.mjs`. Offline unit checks: [test: ai_copilot].
 
-## What's new (v3): vehicle health, failures, survival
+## Vehicle health, failures, survival (since v1.1.0)
 
 Design write-up and NASA rover comparison: [docs/SURVIVABILITY.md](docs/SURVIVABILITY.md). Every failure mode,
 its sensors, detection rule, automatic response and repair steps: [docs/FAULT_PROCEDURES.md](docs/FAULT_PROCEDURES.md)
@@ -102,9 +105,9 @@ its sensors, detection rule, automatic response and repair steps: [docs/FAULT_PR
 * **HUD:** HEALTH pill → FDIR panel (alarms, procedure card, repair progress, redundancy, thermal, spares).
   3D: radiators, bay doors with status lamps, antennas, beacon, hazcams, keep-alive mast, failed-part locator.
 
-## What's new (v2)
+## Features carried over from the SPAN-40 simulator
 
-Numbers here were written for SPAN-40. Each is now tagged.
+These were written for SPAN-40 (the earlier straddle-carrier concept). Each number is now tagged for AEGIS-V1.
 
 * **Team CAD in the sim:**
   * `llaso_lunar_cargo_container.obj` is the 40-ft module (visual). The physics module is the team's
@@ -121,8 +124,8 @@ Numbers here were written for SPAN-40. Each is now tagged.
   * Planner fallbacks: drop temporary blocks, then reduce the obstacle margin.
   * Collision-checked reverse recovery; a progress watchdog asks the operator for help.
   * Route memory reuses any part of a proven route, in either direction [test: nav_bench, return leg].
-  * Plan hysteresis: keep the path unless blocked or a new plan is > 15 % cheaper (code constant,
-    `src/sim/autonomy.js:316`; behaviour **UNVERIFIED** by test).
+  * Plan hysteresis: keep the path unless blocked or a new plan is > 15 % cheaper (code constant in
+    `Autonomy.replan`, `src/sim/autonomy.js`; behaviour **UNVERIFIED** by test).
   * SLAM loop closure on revisits, wide search "±12 m, ±3°": **UNVERIFIED** (no test isolates it; nav_bench counts closures).
   * Surveyed beacons only initialise the map frame.
   * Tip-over margin uses the full wheel contact polygon.
@@ -134,7 +137,7 @@ Numbers here were written for SPAN-40. Each is now tagged.
   quality selector. Not tested headless.
 * **Features:** SCOUT-1 cooperative mapping (`scout on`) [test: scout], live trend charts, telemetry CSV and
   mission report JSON export, double-click to drive, `?fresh` / `map forget`.
-* **Bug fixes** (from v2; regression-tested where tagged):
+* **Bug fixes** (from the SPAN-40 version; regression-tested where tagged):
   * Wheel spin limit cycle in loaded pivots (fully implicit solve) [test: physics, pivot].
   * Parked rover crept under docking loads (static-friction brake model) [test: physics, park drift].
   * Wheels could step onto large boulders: climb limit is now **0.90 m** edge height (0.85 × wheel radius
@@ -163,8 +166,8 @@ Filled from `npm test` output; see [CHANGES.md](CHANGES.md) for the run date and
 | Mission 9 scout | **deploy** under M9 (or `scout on`), then start any drive |
 | Export data | **export telemetry CSV** / **mission report** in the Vehicle panel |
 
-Useful commands: `limit rpm 20`, `limit speed 0.8`, `speed 1.5`, `rpm 180`, `turbo on|off|auto`,
-`drive 0.5 0 0.2`, `stop`, `lift kneel|carry`, `clamp close`, `level off`, `ride 0.1`, `lidar channels 32`,
+Useful commands: `limit rpm 20`, `limit speed 0.8`, `speed 1.5`, `rpm 240`, `memory`, `turbo on|off|auto`,
+`drive 0.5 0.05`, `stop`, `lift kneel|carry`, `clamp close`, `level off`, `ride 0.1`, `lidar channels 32`,
 `fault block`, `fault wheel 3` (wheels 1–6), `fault battery 15`, `clear faults`, `plan`,
 `priority B life-support`, `routes`, `map save`, `map clear`, `sun 205 12`, `timescale 10`, `ff` (50× fast forward), `newmap`,
 `failures on demo`, `fault list`, `fault seize 5`, `health`, `procedure bat`, `repair all`, `survival on`, `array deploy`.
@@ -181,7 +184,7 @@ Useful commands: `limit rpm 20`, `limit speed 0.8`, `speed 1.5`, `rpm 180`, `tur
 | **M4** Transport | 2 km over craters, boulder fields, slopes and loose regolith carrying the module. [test: cycle] |
 | **M5** Deliver & place | Port fiducial and docking-ring camera; the rover drives the module to soft capture under contact-force limits (AEGIS-V1 has no separate docking stage), then hard capture → seal → purge → leak check → equalise → hatch open; rover releases and backs out. [test: dock] |
 | **M6** Full logistics cycle | Logistics manager orders requests → acquire → deliver → return → next load. [test: cycle] |
-| **M7** 2 km autonomous route | 1.997 km pad–habitat separation [script]; SLAM mapping, hazard avoidance, geofences, route memory. [test: nav_bench, drift, faults] |
+| **M7** 2 km autonomous route | 2.000 km pad–habitat separation [script]; SLAM mapping, hazard avoidance, geofences, route memory. [test: nav_bench, drift, faults] |
 | **M8** Different cargo systems | 40-ft cylinder and 20-ft ISO box in a ring-adapter sled, same ring clamps. [test: pickup_*_box20, dock_box20] |
 | **M10** Something goes wrong | Blocked road, LiDAR failure, camera failure, comms loss, low battery, wheel motor failure (5 of 6 wheels driven, speed −25 %), cargo shift, port unavailable [test: faults: blocked road + wheel]. Plus 24 hardware failure modes with sensor-based detection, automatic response and repair, and a random-failure switch [test: fdir]; see REQUIREMENTS.md and docs/FAULT_PROCEDURES.md. |
 | **M11** AI logistics manager | Scores requests by category priority, ETA, energy. `plan`, `priority B life-support`. UNVERIFIED by test beyond the cycle order. |
@@ -201,10 +204,10 @@ the wheels do not steer. All values below are [script] unless marked.
 | Mass | 8,000 kg empty (6,200 sprung + 6 × 300 kg corners) — [ASSUMED] in config |
 | Payload | 40-ft module 14,940 kg (12.19 × 7.96 m Ø); 20-ft ISO box 8,500 kg |
 | Wheels | 6 × 2.12 m Ø × 1.22 m woven steel hoop tyres with chevron cleats (team `rover_bom.js`, scaled) |
-| Suspension | Rocker-bogie (track 7.67 m, wheelbase 7.82 m) with active struts: kneel −0.65 m / carry +0.82 m / max +0.98 m ride |
+| Suspension | Rocker-bogie (track 7.67 m, wheelbase 7.83 m) with active struts: kneel −0.65 m / carry +0.82 m / max +0.98 m ride |
 | Steering | Skid steer (fixed wheels): yaw from left/right speed difference; pivot in place |
 | Drive | 6 hub gearmotors, 5,600 N·m peak per wheel, PI speed loop, spring brakes, thermal model |
-| Speed | Operating limits 3.0 m/s empty, 1.5 m/s loaded, further trimmed by the tip governor [ASSUMED]. The Froude-scaled motor cap is 4.95 m/s; it shows dynamic similarity with the prototype and is not used as an operating speed. Acceleration and braking commands stay under the soil traction limit (~1.1 m/s² on the Moon) |
+| Speed | Operating limits 5.0 m/s empty, 2.5 m/s loaded (operator choice, v1.5.0), further trimmed by smart rpm, the curve limit (0.3 m/s² lateral empty, 0.15 loaded), the stopping-distance governor and the tip governor [ASSUMED]. Motor rpm: continuous smart rpm between crawl 120 and the 280 cap (turbo 300 = no-load on clear straights); 5.0 m/s is ~182 prototype rpm, so the cap mainly gives the outer wheels headroom in turns. Acceleration and braking commands stay under the soil traction limit (~1.1 m/s² on the Moon) |
 | Power | 420 kWh, 400 V in 4 strings with their own contactors; PDU converters A/B. Charged at the dock; 12 m² keep-alive solar blanket for emergencies (parked only) [ASSUMED] |
 | Thermal | avionics vault + battery: louvered vertical radiators under both deck edges (the module covers the deck), thermostatic heaters on controllers A/B [ASSUMED] |
 | Avionics | flight computers A/B (hot standby), IMU A/B + voter gyro, primary + UHF radios, 4 corner omni antennas, locator beacon, E-STOP hard-wired loop [ASSUMED] |
@@ -230,17 +233,22 @@ combined CG. Autonomy slows when it drops below 25°. Loaded margin: see Measure
 * **Power.** Motor electrical power (efficiency, copper loss, regen), hotel loads, actuator power. Solar input
   term exists but AEGIS-V1 has 0 panels.
 * Rocks larger than 25 cm are convex-hull colliders, rendered with the same hull. Colliders are streamed within
-  140 m of the rover (`src/sim/world.js:60`).
+  140 m of the rover (`streamRocks`, `src/sim/world.js`).
 
 ## Autonomy stack (nothing uses ground truth)
 
 1. **Perception.** Spinning LiDAR, motion de-skewed; camera fiducial pose (noise ∝ range²), line of sight, rock detector.
 2. **Localisation (SLAM).** Slip-compensated wheel odometry, gyro with bias walk, sun-sensor heading, surveyed
-   fiducial beacons, correlative scan-to-map matching on a 2.5D elevation map, loop closure.
+   fiducial beacons, correlative scan-to-map matching on a 2.5D elevation map (degeneracy tested along/across track),
+   loop closure, and map-relative fixes against an orbital elevation model every ~40 m (`src/sim/orbitalMap.js`).
 3. **Mapping & traversability.** 0.5 m elevation tiles; slope, step, crater classes.
-4. **Global planning.** Weighted A* on a 2 m costmap; geofences lethal; remembered-route cells cheaper.
-5. **Teach & repeat** (after Furgale & Barfoot). Proven legs stored and re-validated; persisted in IndexedDB.
-6. **Local planning.** 25 constant-curvature arcs, wheel-footprint checks; speed from free distance, tip margin, faults.
+4. **Global planning.** Weighted A* on a 2 m costmap; geofences lethal; remembered-route cells cheaper; unmapped ground priced
+   at the median cost of mapped ground; a new plan must be clearly cheaper (and is held 20 s) before the rover switches to it.
+5. **Teach & repeat** (after Furgale & Barfoot). Proven legs stored and re-validated; persisted on disk in the rover memory
+   store (`~/.hunch22-data/memory`, one file per site + 10 snapshots; `memory` command, `?site=last`), IndexedDB as fallback.
+6. **Local planning.** 25 constant-curvature arcs (gentle set: inner side >= 50-65 % of the outer; full set only in tight spots),
+   wheel-footprint checks; speed from free distance, tip margin, curve and heading change, faults. Bends up to 115° are
+   driven as moving arcs; pivots only for a target behind the rover.
 7. **Terminal guidance.** Fiducials → cradle alignment sensors → docking-ring camera.
 
 ## Safety
@@ -276,7 +284,8 @@ combined CG. Autonomy slows when it drops below 25°. Loaded margin: see Measure
 * Rocker-bogie modelled as six struts with a pitch-sharing term, not separate link bodies. Wheels are
   shape-casts, not rigid bodies.
 * Camera detections are geometric, not image-based.
-* Uniform regolith; no electrostatic dust model.
+* Regolith stiffness, cohesion (±30 %) and friction angle (±3°) vary over ~45 m patches from the seed; the on-board slip
+  estimator assumes the nominal soil. Dust is modelled only as window / radiator fouling failure modes, not electrostatically.
 * Mission 9 is cooperative mapping only. SCOUT-1 uses a kinematic track model.
 * Pebbles under 12 cm are visual only.
 

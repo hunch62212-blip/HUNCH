@@ -16,7 +16,7 @@ const SUBSYS_OF = { mc: 'MOB', seize: 'MOB', cool: 'MOB', enc: 'MOB', strut: 'MO
 const KNOWN = new Set(['help', '?', 'estop', 'e-stop', 'reset', 'start', 'status', 'mission', 'abort', 'resume', 'goto', 'speed',
   'limit', 'rpm', 'turbo', 'drive', 'stop', 'brake', 'lift', 'clamp', 'level', 'ride', 'lights', 'timescale', 'ts', 'pause',
   'ff', 'fastforward', 'warp', 'newmap', 'lidar', 'camera', 'fault', 'failures', 'random', 'health', 'fdir', 'procedure',
-  'proc', 'repair', 'survival', 'thermal', 'brain', 'scenarios', 'scenario', 'array', 'clear', 'reroute', 'map', 'routes', 'plan', 'priority', 'reserve', 'sun',
+  'proc', 'repair', 'survival', 'thermal', 'brain', 'scenarios', 'scenario', 'array', 'clear', 'reroute', 'map', 'memory', 'routes', 'plan', 'priority', 'reserve', 'sun',
   'charge', 'dock', 'day', 'night', 'lunar', 'view', 'restricted', 'scout', 'steer', 'grapple', 'newterrain', 'teleport']);
 
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -33,6 +33,9 @@ export class HUD {
     this.sim = sim; this.ui = ui;
     this.root = $('#hud');
     this.root.innerHTML = this.template();
+    // the top bar wraps onto a second row on narrower screens: publish its height so the panels start below it (style.css --tb)
+    { const tb = $('#topbar'), setTb = () => document.documentElement.style.setProperty('--tb', tb.offsetHeight + 'px');
+      setTb(); if (typeof ResizeObserver !== 'undefined') new ResizeObserver(setTb).observe(tb); else window.addEventListener('resize', setTb); }
     this.inst = new Instruments(this.root);
     this.therm = new ThermalPanel(this.root, sim);
     this.mapZoom = 1.6; // px per metre
@@ -200,7 +203,7 @@ export class HUD {
       <div><b>Cargo handling</b><br><kbd>G</kbd> close / open ring jaws<br><kbd>R</kbd>/<kbd>F</kbd> ride height up / down (kneel under a module, rise to lift it)</div>
       <div><b>Safety</b><br><kbd>Esc</kbd> E-STOP (latching). Restart = RESET then START.<br>Touching the drive keys during a mission pauses autonomy (operator override).</div>
       <div><b>View</b><br><kbd>C</kbd> cycle camera · mouse drag orbit · wheel zoom<br><kbd>V</kbd> LiDAR overlay · <kbd>I</kbd> physics overlay + instruments · <kbd>T</kbd> thermal brain panel · <kbd>P</kbd> pause · <kbd>X</kbd> fast forward 50× · <kbd>H</kbd> this help<br><kbd>Enter</kbd> focus console · <kbd>↑</kbd> history</div>
-      <div><b>Useful commands</b><br>mission cycle · mission 3 B · goto hab<br>limit rpm 120 · rpm 180 · turbo on/off/auto<br>drive 0.5 0 0.2 · stop<br>lift kneel/carry · clamp close<br>fault block · fault wheel 2 · clear faults<br>map save · routes · plan · timescale 10</div>
+      <div><b>Useful commands</b><br>mission cycle · mission 3 B · goto hab<br>limit rpm 120 · rpm 240 · rpm auto · turbo on/off/auto<br>drive 0.5 0.05 · stop<br>lift kneel/carry · clamp close<br>fault block · fault wheel 2 · clear faults<br>map save · routes · plan · timescale 10</div>
     </div></div>`;
   }
 
@@ -228,7 +231,10 @@ export class HUD {
     const toggleHealth = (v) => { const p = $('#healthPanel'); const show = v ?? p.style.display !== 'block'; p.style.display = show ? 'block' : 'none'; this._hT = 0; };
     this.toggleHealth = toggleHealth;
     $('#pHealth').addEventListener('click', () => toggleHealth());
-    $('#pTherm').addEventListener('click', () => { const p = $('#thermPanel'); p.style.display = p.style.display === 'none' ? '' : 'none'; });
+    // The thermal panel starts as a header strip (open, it and the instruments covered the rover on a 1600 px screen).
+    // T / the THERMAL pill: closed or hidden -> open; open -> back to the header strip.
+    this.toggleThermal = () => { const p = $('#thermPanel'), open = p.style.display !== 'none' && !p.classList.contains('collapsed'); p.style.display = ''; p.classList.toggle('collapsed', open); this.therm._t = 0; };
+    $('#pTherm').addEventListener('click', () => this.toggleThermal());
     $('#fdirBtn').addEventListener('click', () => toggleHealth(true));
     $('#healthClose').addEventListener('click', () => toggleHealth(false));
     const rnd = () => this.exec(sim.health.random.on ? 'failures off' : `failures on ${$('#rndRate').value}`);
@@ -451,7 +457,7 @@ export class HUD {
     const g = cv.getContext('2d'), W = cv.width, H = cv.height, T = this.sim.telemetry;
     g.clearRect(0, 0, W, H);
     g.fillStyle = 'rgba(255,255,255,0.03)'; g.fillRect(0, 0, W, H);
-    const lines = [[8, 'speed m/s', '#35d0ff', 0, 2.5], [11, 'tip margin°', '#3ddc84', 0, 50], [14, 'load kW', '#ffb020', 0, 20000], [12, 'SoC %', '#c58cff', 0, 100]];
+    const lines = [[8, 'speed m/s', '#35d0ff', 0, 3.5], [11, 'tip margin°', '#3ddc84', 0, 50], [14, 'load kW', '#ffb020', 0, 20000], [12, 'SoC %', '#c58cff', 0, 100]];
     g.font = '18px sans-serif';
     lines.forEach(([i, label, col, lo, hi], k) => {
       const s = T.series(i, 300);

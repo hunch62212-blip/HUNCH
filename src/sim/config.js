@@ -71,7 +71,7 @@ export const ROVER = {
   comLocal: { x: 0.0, y: 2.25, z: 0.0 },
   inertia: { x: 54000, y: 99000, z: 54000 },
   rideHeight: 0,
-  // six corners (rocker-bogie wheel stations, rocker_bogie.js GEO: x +0.24 / 0 / -0.24, z +-0.235; wheelbase 7.82 m, was 7.02 m, widened for the loaded tip margin)
+  // six corners (rocker-bogie wheel stations, rocker_bogie.js GEO: x +0.24 / 0 / -0.24, z +-0.235; wheelbase 7.83 m, was 7.02 m, widened for the loaded tip margin)
   corners: [[k(0.24), -k(0.235), 'FL'], [k(0.24), k(0.235), 'FR'], [0, -k(0.235), 'ML'], [0, k(0.235), 'MR'], [-k(0.24), -k(0.235), 'RL'], [-k(0.24), k(0.235), 'RR']],
   frame: { halfLen: k(0.30), halfWid: k(0.302), deckY: k(0.225), tubY0: k(0.065), tubZ: k(0.146) },
   bogie: {
@@ -103,11 +103,13 @@ export const ROVER = {
   ride: { kneel: -k(0.040), carry: k(0.050), max: k(0.060), contact: k(0.310 - 0.318) }, // max = carry + docking trim
   seatY: k(0.318),         // module bottom when seated (rover frame, ride 0)
   ringX: k(0.085),         // two ring clamps at +-x
-  // Team drive: 300 rpm gearmotors capped at 180 rpm on 130 mm wheels (1.22 m/s on the bench). Froude scaling
-  // (same gravity-to-inertia ratio) maps the 1:16.3 prototype to full size: speed x sqrt(K), rpm / sqrt(K).
+  // Team drive: 300 rpm gearmotors on 130 mm wheels. The normal cap was 180 rpm (1.22 m/s on the bench); v1.5.0 raises
+  // it to 280 (operator request, v1.5.0). The torque-speed curve keeps ~27 % of peak torque at 280 (rover.js tAvail), so the
+  // top of the range only opens on flat, firm, straight ground (rover.js _smartRpm). Froude scaling (same
+  // gravity-to-inertia ratio) maps the 1:16.3 prototype to full size: speed x sqrt(K), rpm / sqrt(K).
   motor: {
-    protoNoLoadRpm: 300, protoCapRpm: 180, turboRpmWheel: +(300 / Math.sqrt(K)).toFixed(2), crawlRpmWheel: +(120 / Math.sqrt(K)).toFixed(2),
-    noLoadSpeed: 300 / Math.sqrt(K) * 2 * Math.PI / 60, capRpmWheel: +(180 / Math.sqrt(K)).toFixed(2),
+    protoNoLoadRpm: 300, protoCapRpm: 280, protoCrawlRpm: 120, turboRpmWheel: +(300 / Math.sqrt(K)).toFixed(2), crawlRpmWheel: +(120 / Math.sqrt(K)).toFixed(2),
+    noLoadSpeed: 300 / Math.sqrt(K) * 2 * Math.PI / 60, capRpmWheel: +(280 / Math.sqrt(K)).toFixed(2),
     peakTorque: 5600, efficiency: 0.86,
     kp: 9000, ki: 5000, brakeTorque: 9000, thermalR: 0.05, thermalC: 30000,
   },
@@ -121,10 +123,12 @@ export const ROVER = {
   // Operating speed limits [ASSUMED]. The Froude-scaled motor caps (4.95 m/s cruise, 8.2 m/s no-load) only show that the
   // prototype is dynamically similar; they are not safe operating speeds. In 1.62 m/s^2 gravity the soil can brake the
   // vehicle at ~1.1 m/s^2 at most (tan 35 deg x g), obstacles launch a fast vehicle, and the crewed Apollo LRV peaked
-  // near 5 m/s. Empty 3.0 m/s (stops in ~6 m at 0.9 m/s^2); loaded 1.5 m/s (15 t module, CoM 6.8 m up: stops in ~6 m
-  // at the 0.2 m/s^2 nose-over limit). Smart-rpm and the tip governor trim these further.
-  speedLimitEmpty: 3.0,
-  speedLimitLoaded: 1.5,
+  // near 5 m/s. Operator decision (v1.5.0, between the 280 rpm request and this realism pass): empty 5.0 m/s (LRV class;
+  // stops in ~14 m at 0.9 m/s^2, so the autonomy's stopping-distance governor needs a clear, mapped 17 m+ ahead to
+  // use it); loaded 2.5 m/s (stops in ~16 m at the 0.2 m/s^2 nose-over limit, same governor). Smart-rpm, the curve
+  // speed limit and the tip governor trim these further.
+  speedLimitEmpty: 5.0,
+  speedLimitLoaded: 2.5,
   // tip-safe acceleration limits (m/s^2, rad/s^2). Loaded static tip threshold is ~0.45 g_moon fore-aft, but the
   // passive (rocker-bogie) pitch lets the body nose over at ~0.4 m/s^2 of braking (less downhill): lonLoaded 0.2 (CHANGES.md §14)
   // Traction bound: regolith gives at most c A + W tan(phi) ~ 0.70 W of shear, so no command may ask for more than

@@ -23,11 +23,13 @@ html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: non
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
 /* top bar */
-#topbar { top: 10px; left: 10px; right: 10px; height: 44px; display: flex; align-items: center; gap: 8px; padding: 0 0 0 10px; flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
-#topbar::-webkit-scrollbar { display: none; }
+/* The bar wraps onto a second row when its controls do not fit. (It used to be one row that scrolled sideways with a
+   hidden scrollbar: on a 1600 px screen the view buttons, the graphics selector and the help button were off screen
+   with nothing to show they existed.) hud.js publishes the bar's height as --tb and the panels below follow it. */
+#topbar { top: 10px; left: 10px; right: 10px; min-height: 44px; display: flex; align-items: center; gap: 6px 8px; padding: 5px 196px 5px 10px; flex-wrap: wrap; }
 #topbar > * { flex-shrink: 0; }
-/* RESET / START / E-STOP stay pinned on screen however narrow the window: the rest of the bar scrolls under them */
-#safety { position: sticky; right: 0; display: flex; align-items: center; gap: 6px; height: 100%; padding: 0 8px 0 14px; background: linear-gradient(90deg, rgba(10, 13, 18, 0), rgba(10, 13, 18, 0.96) 12px); }
+/* RESET / START / E-STOP stay pinned at the right end of the bar */
+#safety { position: absolute; right: 0; top: 0; bottom: 0; display: flex; align-items: center; gap: 6px; padding: 0 8px 0 14px; }
 #topbar .btnrow { flex-wrap: nowrap; }
 #topbar .brand { font-weight: 700; letter-spacing: 0.06em; font-size: 13px; white-space: nowrap; }
 #topbar .brand small { display: block; font-weight: 400; color: var(--dim); font-size: 10px; letter-spacing: 0.04em; }
@@ -55,7 +57,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: non
 #restart { display: flex; gap: 4px; }
 
 /* left: vehicle */
-#vehicle { top: 64px; left: 10px; width: 320px; max-height: calc(56vh - 72px); overflow: auto; }
+#vehicle { top: calc(var(--tb, 44px) + 20px); left: 10px; width: 320px; max-height: calc(56vh - 28px - var(--tb, 44px)); overflow: auto; }
 /* labels never wrap; long values wrap inside their own column (the old 1fr/auto split let a long value squeeze
    "Dock charge / load" into three lines) */
 .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 10px; align-items: baseline; }
@@ -71,7 +73,7 @@ table.wheels td.f { color: var(--err); }
 .sect .t { color: var(--dim); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 4px; }
 
 /* right column */
-#mapPanel { top: 64px; right: 10px; width: 340px; max-height: calc(100vh - 80px); overflow: auto; }
+#mapPanel { top: calc(var(--tb, 44px) + 20px); right: 10px; width: 340px; max-height: calc(100vh - 36px - var(--tb, 44px)); overflow: auto; }
 #map { width: 318px; height: 318px; display: block; border-radius: 4px; background: #05070a; cursor: crosshair; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; color: var(--dim); font-size: 10px; }
 .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 3px; vertical-align: -1px; }
@@ -106,7 +108,7 @@ table.wheels td.f { color: var(--err); }
 @media (max-width: 1100px) { #instPanel .instKv { display: none; } #instPanel { left: 300px; bottom: 232px; width: auto; min-width: 0; } }
 @media (max-width: 760px), (max-height: 520px) { #instPanel { display: none !important; } }
 /* thermal brain panel (src/ui/thermalPanel.js): top of the 3D view, left side */
-#thermPanel { top: 64px; left: 340px; width: 390px; max-height: calc(100vh - 560px); min-height: 0; overflow: auto; }
+#thermPanel { top: calc(var(--tb, 44px) + 20px); left: 340px; width: 390px; max-height: calc(100vh - 516px - var(--tb, 44px)); min-height: 0; overflow: auto; }
 #thermPanel .thScn { margin: 4px 0; padding: 3px 6px; border-radius: 4px; font-size: 11px; }
 #thermPanel .thScn.on { background: rgba(255, 176, 32, 0.15); border: 1px solid rgba(255, 176, 32, 0.45); color: #ffd28a; }
 #thermPanel .dim { color: var(--dim); }
@@ -131,7 +133,7 @@ table.wheels td.f { color: var(--err); }
 /* vehicle health / FDIR */
 button.pill { cursor: pointer; font-family: var(--sans); color: var(--text); }
 .btn.rndsw.on { background: rgba(255, 77, 58, 0.22); border-color: var(--err); color: #fff; }
-#healthPanel { left: 50%; top: 64px; transform: translateX(-50%); width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 140px); overflow: auto; display: none; z-index: 5; }
+#healthPanel { left: 50%; top: calc(var(--tb, 44px) + 20px); transform: translateX(-50%); width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 96px - var(--tb, 44px)); overflow: auto; display: none; z-index: 5; }
 #healthPanel .subsys { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
 #healthPanel .kv { margin-top: 4px; }
 #healthPanel table.alarms td { vertical-align: middle; font-family: var(--sans); }
@@ -155,14 +157,14 @@ select.btn { padding: 3px 4px; }
 .load-bar { height: 4px; background: rgba(255, 255, 255, 0.1); border-radius: 2px; overflow: hidden; }
 #load-fill { height: 100%; width: 0; background: var(--accent); transition: width 0.3s; }
 #load-msg { margin-top: 10px; color: var(--dim); font-family: var(--mono); font-size: 11px; }
-#toast { position: fixed; left: 50%; top: 64px; transform: translateX(-50%); pointer-events: none; }
-#overrideBanner { position: absolute; left: 50%; top: 64px; transform: translateX(-50%); padding: 6px 14px; display: none; color: var(--warn); font-weight: 600; }
+#toast { position: fixed; left: 50%; top: calc(var(--tb, 44px) + 20px); transform: translateX(-50%); pointer-events: none; }
+#overrideBanner { position: absolute; left: 50%; top: calc(var(--tb, 44px) + 20px); transform: translateX(-50%); padding: 6px 14px; display: none; color: var(--warn); font-weight: 600; }
 #estopBanner { position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%); padding: 14px 22px; display: none; text-align: center; border-color: rgba(255,77,58,0.6) !important; }
 #estopBanner .big { color: var(--err); font-size: 22px; font-weight: 800; letter-spacing: 0.12em; }
 /* the camera panel needs the right column below the map; under 1,300 px wide the log keeps its own centre column (it ran under the map panel when widened) */
 @media (max-width: 1300px) { #camPanel { display: none; } }
 
-#manifestPanel { left: 320px; top: 64px; width: 520px; max-height: 46vh; overflow: auto; display: none; }
+#manifestPanel { left: 320px; top: calc(var(--tb, 44px) + 20px); width: 520px; max-height: 46vh; overflow: auto; display: none; }
 #manifestPanel td { font-size: 10px; }
 
 #vehicle::-webkit-scrollbar, #missions::-webkit-scrollbar, #log::-webkit-scrollbar, #manifestPanel::-webkit-scrollbar { width: 6px; }
@@ -201,10 +203,12 @@ select.btn { padding: 3px 4px; }
    full width (one at a time, hud.js). Log + command line run along the bottom. */
 @media (max-width: 760px), (max-height: 520px) {
   html, body { font-size: 11px; }
-  #topbar { top: 6px; left: 6px; right: 6px; height: 40px; gap: 6px; padding-left: 8px; }
+  #topbar { top: 6px; left: 6px; right: 6px; height: 40px; min-height: 0; gap: 6px; padding: 0 0 0 8px; flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+  #topbar::-webkit-scrollbar { display: none; }
+  #safety { position: sticky; top: auto; bottom: auto; height: 100%; background: linear-gradient(90deg, rgba(10, 13, 18, 0), rgba(10, 13, 18, 0.96) 12px); }
   #topbar .brand { font-size: 12px; }
   #estop { width: 38px; height: 38px; font-size: 7.5px; border-width: 2px; }
-  #vehicle, #mapPanel, #missions { top: 52px; bottom: auto; width: calc((100% - 24px) / 3); max-height: calc(76% - 104px); }
+  #vehicle, #mapPanel, #missions { top: calc(var(--tb, 40px) + 12px); bottom: auto; width: calc((100% - 24px) / 3); max-height: calc(76% - 104px); }
   #vehicle { left: 6px; }
   #mapPanel { left: calc(12px + (100% - 24px) / 3); right: auto; }
   #missions { left: auto; right: 6px; }
@@ -215,7 +219,7 @@ select.btn { padding: 3px 4px; }
   #log { font-size: 10.5px; padding: 4px 8px; }
   #autoPanel { left: 6px; right: 6px; bottom: calc(24% + 12px); padding: 4px 8px; min-height: 0; }
   #dockPanel { left: 6px; right: 6px; width: auto; bottom: calc(24% + 52px); }
-  #manifestPanel { left: 6px; right: 6px; top: 52px; max-height: 60%; }
+  #manifestPanel { left: 6px; right: 6px; top: calc(var(--tb, 40px) + 12px); max-height: 60%; }
   #helpPanel { width: calc(100% - 12px); }
   #helpPanel .body { columns: 1; }
   #estopBanner { width: calc(100% - 24px); }

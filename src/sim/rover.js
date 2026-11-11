@@ -79,12 +79,12 @@ export class Rover {
     this.brake = true;           // parking brake engaged at power-up
     this.estop = false;
     this.powered = true;
-    // Drive limits. rpm values are PROTOTYPE motor rpm (300 no-load, 180 normal cap); wheel rpm = proto / sqrt(K).
-    // rpmMode 'auto' picks crawl 120 / cruise 180 / turbo 300 from the terrain (see _smartRpm).
+    // Drive limits. rpm values are PROTOTYPE motor rpm (300 no-load, 280 normal cap); wheel rpm = proto / sqrt(K).
+    // rpmMode 'auto' sets the rpm continuously between crawl 120 and the 280 cap (turbo 300) from the terrain (_smartRpm).
     this.limits = { rpmCeil: ROVER.motor.protoNoLoadRpm, speed: 99, torquePct: 100 };
-    this.rpm = { mode: 'auto', fixed: 180, tier: 'cruise', proto: 180, wheel: ROVER.motor.capRpmWheel, rough: 0, why: 'cruise' };
+    this.rpm = { mode: 'auto', fixed: ROVER.motor.protoCapRpm, tier: 'crawl', proto: ROVER.motor.protoCrawlRpm, wheel: ROVER.motor.crawlRpmWheel, rough: 0, why: 'starting', want: ROVER.motor.protoCrawlRpm };
     this.turboOk = true; // set by the autonomy / driver when the way ahead is clear and straight
-    this._smart = { rough: 0, turboT: 0 };
+    this._smart = { rough: 0, turboT: 0, slope: 0, slip: 0, curv: 0 };
     this.leveling = true;
     this.rideOffset = 0;
     this.lights = true;
@@ -119,44 +119,67 @@ export class Rover {
     return Math.min(v, this.limits.speed, this.loaded ? ROVER.speedLimitLoaded : ROVER.speedLimitEmpty);
   }
 
-  // Smart rpm: the motors are 300 rpm units capped at 180 for normal work. Turbo (up to 300) is released
-  // only on smooth, flat, grippy ground with nothing loaded and a stable chassis; crawl (120) on slopes,
-  // slip, rough ground or a marginal tip angle, where torque control matters more than speed.
+  // Smart rpm v2 (v1.5.0). Each condition sets its own rpm ceiling on a smooth ramp between crawl (120) and the 280
+  // cap, and the drive runs at the lowest of them: no tier jumps, and the HUD names the condition that is holding it
+  // back. Turbo (300, the no-load speed) still needs flat, smooth, grippy, straight and clear ground, empty.
+  // Inputs are low-pass filtered (slip and slope 0.6 s, roughness 0.8 s, curvature 0.4 s) so the rpm does not hunt
+  // over single bumps; it then rises gently (40 rpm/s) and falls faster (160 rpm/s; loaded: the nose-over-safe rate).
+  //   ceilings (prototype rpm, cap C = 280, crawl c = 120):
+  //   slope      C at <= 4 deg (loaded 2)  ->  c at 12 deg (loaded 7)
+  //   slip       C at <= 6 %               ->  c at 22 %
+  //   roughness  C at <= 0.25              ->  c at 0.7
+  //   tip margin c at <= 14 deg            ->  C at 30 deg
+  //   turn       the outer side runs at (1 + |k| b) x the centre speed (b = 3.84 m half track): the centre rpm is cut
+  //              so the outer wheels stay under the cap and the commanded curvature is kept exactly (see _allocate)
+  //   motor temperature C below 95 C -> 150 at 120 C;  battery < 15 % -> 160;  thermal brain (thermalRpm)
   _smartRpm(dt) {
     const M = ROVER.motor, k = 1 / Math.sqrt(K), S = this._smart, R = this.rpm;
+    const C = M.protoCapRpm, c0 = M.protoCrawlRpm;
     const av = this.body.angvel();
     const rate = Math.hypot(av.x, av.z);
     let strut = 0, slip = 0, n = 0, hot = 0;
-    for (const w of this.wheels) { slip += Math.abs(w.slip); hot = Math.max(hot, w.temp); n++; }
+    for (const w of this.wheels) { if (w.declutched) continue; slip += Math.abs(w.slip); hot = Math.max(hot, w.temp); n++; }
     for (const b of this.bogies) strut += Math.abs(b.Ldot);
-    strut /= this.bogies.length; slip /= n;
+    strut /= this.bogies.length; slip /= Math.max(1, n);
     const speed = this.body.linvel(); const v = Math.hypot(speed.x, speed.z);
     // roughness = chassis rocking + strut travel rate, normalised by speed
     const raw = (rate * 6 + strut) / Math.max(1, v);
     S.rough += (raw - S.rough) * Math.min(1, dt / 0.8);
-    const slope = Math.max(Math.abs(this.tilt.pitch), Math.abs(this.tilt.roll)) * 180 / Math.PI;
+    const slopeNow = Math.max(Math.abs(this.tilt.pitch), Math.abs(this.tilt.roll)) * 180 / Math.PI;
+    S.slope += (slopeNow - S.slope) * Math.min(1, dt / 0.6);
+    S.slip += (slip - S.slip) * Math.min(1, dt / 0.6);
+    const kNow = Math.abs(this.cmd.vx) > 0.05 ? Math.abs(this.cmd.wz / this.cmd.vx) : 0;
+    S.curv += (kNow - S.curv) * Math.min(1, dt / 0.4);
     const mg = this.tilt.marginF ?? this.tilt.margin;
     const loaded = this.loaded;
-    let tier = 'cruise', why = 'normal ground';
-    if (slope > 12 || (loaded && slope > 7)) { tier = 'crawl'; why = `slope ${slope.toFixed(0)} deg`; }
-    else if (slip > 0.22) { tier = 'crawl'; why = `wheel slip ${(slip * 100).toFixed(0)}%`; }
-    else if (S.rough > 0.7) { tier = 'crawl'; why = 'rough ground'; }
-    else if (mg < 14) { tier = 'crawl'; why = 'low tip margin'; }
-    else if (!loaded && slope < 7 && S.rough < 0.5 && slip < 0.14 && mg > 26 && hot < 95 && this.power.soc > 0.15 && this.turboOk) {
-      S.turboT += dt; why = 'flat, smooth, clear';
-      if (S.turboT > 0.6) tier = 'turbo'; else why = 'turbo arming';
-    }
-    if (tier !== 'turbo') S.turboT = 0;
-    let want = tier === 'turbo' ? M.protoNoLoadRpm : tier === 'crawl' ? 120 : M.protoCapRpm;
-    if (R.mode === 'fixed') { want = R.fixed; tier = 'manual'; why = `locked at ${R.fixed} rpm`; }
-    want = Math.min(want, this.limits.rpmCeil, this.thermalRpm ?? Infinity); // thermalRpm: thermal brain REV DOWN (thermal.js)
-    // up slowly, down immediately -- except loaded: an instant rpm cut clamps the wheel targets past the
-    // _allocate acceleration limiter and brakes the 6.8 m-CoM vehicle onto its front wheels; the pitch that
-    // causes then reads as slope (> 7 deg -> crawl) and cuts the rpm again (CHANGES.md §14)
-    const down = loaded ? ROVER.accel.lonLoaded * 60 / (2 * Math.PI * ROVER.wheel.radius * k) * dt : Infinity;
-    R.proto = want < R.proto ? Math.max(want, R.proto - down) : Math.min(want, R.proto + 150 * dt);
+    const lerp = (x, x0, x1, y0, y1) => y0 + (y1 - y0) * Math.max(0, Math.min(1, (x - x0) / (x1 - x0)));
+    const half = Math.abs(ROVER.corners[0][1]);
+    const lims = [
+      [loaded ? lerp(S.slope, 2, 7, C, c0) : lerp(S.slope, 4, 12, C, c0), () => `slope ${S.slope.toFixed(0)} deg`],
+      [lerp(S.slip, 0.06, 0.22, C, c0), () => `wheel slip ${(S.slip * 100).toFixed(0)}%`],
+      [lerp(S.rough, 0.25, 0.7, C, c0), () => 'rough ground'],
+      [lerp(mg, 14, 30, c0, C), () => `tip margin ${mg.toFixed(0)} deg`],
+      [Math.max(c0, C / (1 + S.curv * half)), () => `turning (R ${S.curv > 1e-3 ? (1 / S.curv).toFixed(0) : '-'} m)`],
+      [lerp(hot, 95, 120, C, 150), () => `motor ${hot.toFixed(0)} C`],
+      [this.power.soc < 0.15 ? 160 : C, () => 'battery low'],
+      [this.thermalRpm ?? C, () => 'thermal rev-down'], // thermal brain (thermal.js)
+    ];
+    let want = C, why = 'clear ground';
+    for (const [r, label] of lims) if (r < want - 0.5) { want = r; why = label(); }
+    // turbo: everything clean and the autonomy / driver reports a straight, clear, mapped stretch
+    if (!loaded && want >= C - 0.5 && S.slope < 4 && S.rough < 0.25 && S.slip < 0.06 && mg > 30 && S.curv < 0.012 && hot < 95 && this.power.soc > 0.15 && this.turboOk) {
+      S.turboT += dt;
+      if (S.turboT > 1.0) { want = M.protoNoLoadRpm; why = 'flat, smooth, straight, clear'; } else why = 'turbo arming';
+    } else S.turboT = 0;
+    if (R.mode === 'fixed') { want = Math.min(R.fixed, this.thermalRpm ?? Infinity); why = `locked at ${R.fixed} rpm`; }
+    want = Math.min(want, this.limits.rpmCeil);
+    const tier = R.mode === 'fixed' ? 'manual' : want > C + 1 ? 'turbo' : want >= 230 ? 'fast' : want > 150 ? 'cruise' : 'crawl';
+    // ramp: up gently, down faster. Loaded: an instant rpm cut clamps the wheel targets past the _allocate
+    // acceleration limiter and brakes the 6.8 m-CoM vehicle onto its front wheels (CHANGES.md §14)
+    const down = loaded ? ROVER.accel.lonLoaded * 60 / (2 * Math.PI * ROVER.wheel.radius * k) * dt : 160 * dt;
+    R.proto = want < R.proto ? Math.max(want, R.proto - down) : Math.min(want, R.proto + 40 * dt);
     R.wheel = R.proto * k;
-    R.tier = tier; R.why = why; R.rough = S.rough;
+    R.want = want; R.tier = tier; R.why = why; R.rough = S.rough;
   }
 
   _allocate(dt, stopping = false) {
@@ -177,10 +200,16 @@ export class Rover {
     f.wz += Math.max(-A.yaw * dt, Math.min(A.yaw * dt, wz - f.wz));
     vx = f.vx; wz = f.wz;
     const rpmOmega = this.rpm.wheel * 2 * Math.PI / 60;
+    // keep the commanded curvature when the outer side hits the rpm limit: scale v and w together. (Was: each wheel
+    // clipped on its own, so the outer side saturated while the inner side did not, the side-to-side speed split
+    // changed, and the rover skidded into a tighter or looser turn than asked.)
+    let peak = 0;
+    for (const b of this.bogies) peak = Math.max(peak, Math.abs(vx + wz * b.z) / r);
+    const sc = peak > rpmOmega && peak > 1e-9 ? rpmOmega / peak : 1;
     for (const b of this.bogies) {
       b.steerTarget = 0; b.steer = 0;
-      const speed = vx + wz * b.z;
-      for (const w of b.wheels) w.target = Math.max(-rpmOmega, Math.min(rpmOmega, speed / r));
+      const speed = (vx + wz * b.z) * sc;
+      for (const w of b.wheels) w.target = speed / r;
     }
   }
 

@@ -354,9 +354,17 @@ export class Slam {
       // degeneracy check: only correct along directions where the match is sharply peaked
       const raw = evalPose(best.x, best.z, best.yaw).score;
       const sharp = (ox, oz, oy) => { const a = evalPose(best.x + ox, best.z + oz, best.yaw + oy).score, b = evalPose(best.x - ox, best.z - oz, best.yaw - oy).score; return (raw - (a + b) / 2) / Math.max(1, raw); };
-      const sx = sharp(0.35, 0, 0), sz = sharp(0, 0.35, 0), sy = sharp(0, 0, 0.012);
-      if (sx < 0.04) dx = 0; if (sz < 0.04) dz = 0; if (sy < 0.03) dyaw = 0;
-      this.degenerate = { x: sx < 0.04, z: sz < 0.04, yaw: sy < 0.03 };
+      // v1.5.0: test the peak along the rover's own forward and lateral axes, not world x / z. On open plains the
+      // match is flat ALONG the track (every scan looks the same a few decimetres further on) and sharp across it;
+      // along a diagonal heading the old world-axis test passed on both axes, so along-track noise was fed back as
+      // corrections and the estimate drifted ~0.5 % of distance on the 2 km traverse. Only the sharp components of the
+      // shift are applied now.
+      const fx = Math.cos(best.yaw), fz = -Math.sin(best.yaw), rx = -fz, rz = fx; // forward and right, world frame
+      const sf = sharp(0.35 * fx, 0.35 * fz, 0), sr = sharp(0.35 * rx, 0.35 * rz, 0), sy = sharp(0, 0, 0.012);
+      let df = dx * fx + dz * fz, dr = dx * rx + dz * rz;
+      if (sf < 0.04) df = 0; if (sr < 0.04) dr = 0; if (sy < 0.03) dyaw = 0;
+      dx = df * fx + dr * rx; dz = df * fz + dr * rz;
+      this.degenerate = { x: sf < 0.04, z: sr < 0.04, fwd: sf < 0.04, lat: sr < 0.04, yaw: sy < 0.03 };
       e.x += dx * gain; e.z += dz * gain; e.yaw += dyaw * gain;
       this.lastMatch = { ok: true, score: best.score / best.used, dx, dz, dyaw, used: best.used, t: this.sim.time };
     } else this.lastMatch = { ...this.lastMatch, ok: false, t: this.sim.time };

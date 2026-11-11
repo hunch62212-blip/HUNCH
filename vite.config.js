@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite';
+import { memoryPlugin } from './scripts/memory-plugin.mjs';
 
 // AI copilot (src/ai/copilot.js): the page calls /ollama/..., proxied to Ollama on the team Mac mini over Tailscale
 // (`tailscale serve --bg --tcp 11434 tcp://127.0.0.1:11434` on the Mac mini). Override with OLLAMA_URL, e.g.
@@ -13,6 +14,8 @@ const proxy = {
 };
 
 export default defineConfig({
+  // rover memory store: SLAM map + route memory on disk (~/.hunch22-data/memory), shared by every launched version
+  plugins: [memoryPlugin()],
   build: { chunkSizeWarningLimit: 4000, target: 'es2022' },
   optimizeDeps: { exclude: ['@dimforge/rapier3d-compat'] },
   server: { host: '127.0.0.1', port: 5173, proxy },

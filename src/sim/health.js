@@ -13,7 +13,7 @@
 // Effect fidelity per mode: 'physics' = the failure changes the vehicle model (wheel free-rolls, capacity lost,
 // sensor blind, heater off...); 'annunciation' = the failure only changes its sensor channel and the alarm
 // (the physical consequence is not modelled). Listed in the catalogue so nothing is overstated.
-import { ROVER, THERMAL, KEEPALIVE, FAILURES, RADIATOR } from './config.js';
+import { ROVER, THERMAL, KEEPALIVE, FAILURES, RADIATOR, MOON } from './config.js';
 
 const WN = ROVER.corners.map((c) => c[2]); // FL FR ML MR RL RR (wheel n = index n-1; odd n = port side)
 const KNEEL = ROVER.ride.kneel;
@@ -347,7 +347,7 @@ export const MODES = [
     detect: 'loaded: one cell reads < 40 % of the others for 2 s; unloaded: zero-offset BIT', persist: 2,
     response: 'cargo-shift detection and tip margin use the strut-pressure load estimate instead',
     operator: ['Swap the load cell with the cradle unloaded (field 20 min)'],
-    sig: (h, n) => { if (!h.active.has(`lcell:${n}`)) return null; return h.sim.rover.loaded ? `cell ${n} 0.0 kN vs others ${(h.sim.rover.lift.cargo.T.mass * 1.62 / 4000).toFixed(1)} kN` : h.bitNow ? `BIT: cell ${n} zero offset out of range` : null; },
+    sig: (h, n) => { if (!h.active.has(`lcell:${n}`)) return null; return h.sim.rover.loaded ? `cell ${n} 0.0 kN vs others ${(h.sim.rover.lift.cargo.T.mass * MOON.g / 4000).toFixed(1)} kN` : h.bitNow ? `BIT: cell ${n} zero offset out of range` : null; },
   },
   // ---- safety / dock ----
   {
@@ -542,7 +542,7 @@ export class Health {
     }
     this.random.on = on;
     const lam = MODES.reduce((s, m) => s + m.inst.length / m.mtbfH, 0) * this.random.rateX;
-    this.log(`Random failures ${on ? 'ON' : 'OFF'} (rate ${this.random.preset}: expect one every ~${(1 / lam).toFixed(1)} h sim${lam * 3600 > 1 ? '' : ''}${1 / lam < 1 ? ` = ${(60 / lam).toFixed(1)} min` : ''}; at most ${this.random.max} at once)`, on ? 'warn' : 'ok');
+    this.log(`Random failures ${on ? 'ON' : 'OFF'} (rate ${this.random.preset}: expect one every ~${(1 / lam).toFixed(1)} h sim${1 / lam < 1 ? ` = ${(60 / lam).toFixed(1)} min` : ''}; at most ${this.random.max} at once)`, on ? 'warn' : 'ok');
     this.sim.emit('fault', 'random');
   }
   _random(dt) {
@@ -726,7 +726,7 @@ export class Health {
     if (a.state === 'deploying') { a.k = Math.min(1, a.k + dt / K.deployS); if (a.k >= 1) { a.state = 'deployed'; this.log('Keep-alive array deployed, tracking the sun', 'ok'); } }
     if (a.state === 'stowing') { a.k = Math.max(0, a.k - dt / K.deployS); if (a.k <= 0) { a.state = 'stowed'; this.log('Keep-alive array stowed', 'info'); } }
     a.yaw = Math.atan2(-sun.z, sun.x);
-    a.W = a.state === 'deployed' ? K.area * K.efficiency * 1361 * Math.sqrt(Math.max(0, 1 - sun.y * sun.y)) * R.power.sunlit * (sun.y > -0.01 ? 1 : 0) : 0;
+    a.W = a.state === 'deployed' ? K.area * K.efficiency * MOON.solarConstant * Math.sqrt(Math.max(0, 1 - sun.y * sun.y)) * R.power.sunlit * (sun.y > -0.01 ? 1 : 0) : 0;
     R.power.auxSolarW = a.W;
   }
 

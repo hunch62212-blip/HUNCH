@@ -94,8 +94,11 @@ export function baseStructures(hab) {
     const c = { x: back.x + t.x * off * 15 - n.x * 2, z: back.z + t.z * off * 15 - n.z * 2 };
     items.push({ kind: 'module', x: c.x, z: c.z, r: 2.3, len: 9, yaw: Math.atan2(-t.z, t.x) });
   }
-  // apron light masts
-  for (const [u, v] of [[-20, 22], [20, 22], [-20, 46], [20, 46]]) items.push({ kind: 'light', x: hab.face.x + t.x * u + n.x * v, z: hab.face.z + t.z * u + n.z * v, r: 0.2, h: 9 });
+  // Apron light masts, 18.5 m outside each port's approach axis (ports at u = +-11.5). They stood at u = +-20, only
+  // 8.5 m from the axis: 3.6 m from the side of a 9.9 m wide rover, inside the swing of a carried 40-ft module, and
+  // inside the planner's soft keep-out, which bent the loaded approach path around each mast into an S-turn tighter
+  // than the loaded turning circle (the rover orbited the PORT-1 lead-in point: test dock_cyl40).
+  for (const [u, v] of [[-30, 22], [30, 22], [-30, 46], [30, 46]]) items.push({ kind: 'light', x: hab.face.x + t.x * u + n.x * v, z: hab.face.z + t.z * u + n.z * v, r: 0.2, h: 9 });
   return items;
 }
 

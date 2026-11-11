@@ -12,7 +12,7 @@ Result column: last `npm test` run, see CHANGES.md for date and code state.
 | M2 | Find & approach cargo, no manual repositioning | `m3`, `pickup_time_cyl40`, `pickup_time_box20` | approach phase completes as part of acquire | <!--m2--> |
 | M3 | Pick up & secure | `pickup_gt_cyl40`, `pickup_gt_box20`, `pickup_time_*`, `m3` | grapple check, clamps lock, cargo held, loaded tip margin ≥ 25°, all wheels in contact | <!--m3--> |
 | M4 | Transport 2 km with cargo | `cycle` | only end-to-end (deliveries = cargo count); no dedicated loaded-traverse test | <!--m4--> |
-| M5 | Deliver & place (dock) | `dock_cyl40`, `dock_box20` | mission OK, cargo delivered, port occupied, soft capture ≤ 10 mm lat/vert, ≤ 1° yaw | <!--m5--> |
+| M5 | Deliver & place (dock) | `dock_cyl40`, `dock_box20` | mission OK, cargo delivered, port occupied, soft capture ≤ 5 mm lat/vert, ≤ 1° yaw, on the first attempt, peak contact force ≤ 3 kN (cyl40) | <!--m5--> |
 | M6 | Full logistics cycle | `cycle` | finishes in 12,000 s sim, OK, delivers every cargo | <!--m6--> |
 | M7 | 2 km autonomous route, no pre-mapped path | `nav_bench`, `drift`, `faults` | legs arrive, zero warnings, SLAM error ≤ 5 % of distance, ≤ 5 m at end | <!--m7--> |
 | M8 | Different cargo systems | `pickup_gt_box20`, `pickup_time_box20`, `dock_box20` | same checks as M3/M5 on the 20-ft box | <!--m8--> |
@@ -20,7 +20,7 @@ Result column: last `npm test` run, see CHANGES.md for date and code state.
 | M10 | Something goes wrong | `faults` (partial), `fdir` | see the two fault tables below | <!--m10--> |
 | M11 | AI logistics manager (priority ordering) | **not verified** | `cycle` runs the manager but no check on order or `priority` re-ordering | not verified |
 | M12 | Own capability: teach & repeat | `nav_bench` | return leg logs a route-memory reuse | <!--m12a--> |
-| M12 | Own capability: slip-compensated odometry | `odo` | odometry/truth within 5 % at 1–4.9 m/s | <!--m12b--> |
+| M12 | Own capability: slip-compensated odometry | `odo` | odometry/truth within 5 % at 0.5–2.9 m/s | <!--m12b--> |
 | M12 | Own capability: active load leveling | **not verified** | — | not verified |
 | — | Vehicle dynamics baseline | `physics`, `creep`, `rocks` | speed tracking, turn, pivot, stop, park, top speed, ride range, creep, climb/block | <!--base--> |
 

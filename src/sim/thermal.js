@@ -18,7 +18,7 @@
 // winning option is applied with a short commitment time so it does not chatter:
 //   drive:       nominal | REV DOWN 1 (150 rpm, 85 % torque) | REV DOWN 2 (120 rpm, 70 %) | COOL-DOWN STOP |
 //                REV UP (stator heating 120 W per motor, rpm cap released) | REV UP MAX (350 W per motor)
-//   radiators:   thermostat | pre-cool (louvers forced open ahead of a heat spike) | conserve (closed, heaters +5 K) |
+//   radiators:   thermostat | pre-cool (louvers forced open ahead of a heat spike) | conserve (closed; heater set points +3 K while driving) |
 //                shed load (avionics low-power, -25 % vault heat)
 //   instruments: per LiDAR / camera: nominal | heat | TEC cool | TEC cool + sunshade | protect (power off)
 // All [ASSUMED] numbers are sized so the brain can hold every instrument inside its operating range through the

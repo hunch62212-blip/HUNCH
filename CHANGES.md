@@ -526,3 +526,44 @@ slope with sun glint (op limit 50 °C); without it, 58 °C and protected off.
 Tests after this change: quick set 15/16 (`lander`, `thermal` 24/24 and everything else pass; `dock_cyl40` 1/5 as on
 v1.3.0, see §23), `fdir` 65/65 (survival night 17.5 % of the pack: the brain's heater set-point bias is off in survival).
 `tests/power_dock.mjs` is truncated (syntax error at line 19, from §23) and is not in `npm test`.
+
+## 25. Navigation brain, gentle turning, smart rpm v2, orbital-map SLAM fixes, rover memory store (2026-11-10)
+
+Operator report: M6 "started heading toward a random place"; the route line keeps changing its mind; the rover stops and
+spins instead of turning while it drives; turns are too aggressive; smart rpm should allow more (cap 280); SLAM and
+mapping need work; the map needs a durable home; the per-wheel arrows should go (done in §22).
+
+Measured first, on M6 at 50x (`WARP=1 node tests/autonomy.mjs cycle 1500`, default seed): in 25 sim-min the rover
+drove 2,229 m to get 674 m closer to PORT-1, with pivots of 143°, 155° and 123° and a stretch driving away from the
+goal; the SLAM error reached 5-9 m.
+
+| Area | Before | After |
+|---|---|---|
+| Unmapped-ground price (planner.js) | fixed 1.5 /m, while mapped ground costs a median 6-8 /m (most ground is in some rock's soft inflation skirt), so every scan made the route ahead dearer than unmapped alternatives and the plan swung sideways or back | median cost of the mapped cells (smoothed across builds, clamped 1.5..6); A* heuristic weight scaled with it (1.07 x) so search time is unchanged |
+| Plan commitment (autonomy.js replan) | periodic replan adopts any plan > 15 % cheaper | held 20 s after a switch unless blocked; then > 15 % AND > 12 m of typical ground cheaper; > 60° swing needs 30 % (> 100°: 40 %, as before) |
+| Progress watchdog (navTo) | newly mapped ground counted as progress for up to 1 h, unbounded | only while within max(60 m, 10 %) of the best distance; > max(150 m, 25 %) further than the best = stop, ask for help |
+| Steering authority (navTo) | none | moving, commanded to turn, gyro < 25 % of the command for 15 s = stop, ask for help (the §22 runaway shape) |
+| Turning (navTo) | stop and pivot at > 50° heading error (> 100° within 6 m of the last pivot) | moving arcs up to 115° (> 150° within 6 m); speed eased by the heading change (x 0.35..1) and by curvature (lateral 0.3 m/s² empty, 0.15 loaded) |
+| Arc set (planner.js LocalPlanner) | kmax 0.16 slow / 0.11 (inner side down to 39 % of the outer) | \|k\| x 3.84 m <= 0.5 below 1 m/s, 0.35 above 3 m/s (inner >= 50-65 %); the full set (0.2) only as a fallback at <= 0.5 m/s before a block is declared. Horizon up to 30 m (was 18: capped speed at ~4.2 m/s) |
+| Wheel allocation (rover.js _allocate) | each wheel clipped at the rpm limit separately: in a fast turn the outer side saturated and the curvature changed | v and w scaled together, so the commanded curvature is kept |
+| Smart rpm (rover.js) | 3 tiers 120 / 180 / 300 by thresholds, rpm up 150 rpm/s, down instantly | continuous: ceilings from slope, slip, roughness, tip margin, turn (outer side under the cap), motor temperature, battery and the thermal brain; lowest wins and is named on the HUD; filtered inputs; up 40 rpm/s, down 160 rpm/s; cap 280 (turbo 300 on clear straights) |
+| Speed limits (config.js) | 3.0 / 1.5 m/s (§23) | 5.0 m/s empty, 2.5 m/s loaded (operator: "middle ground"); accel limits from §23 kept. 5.0 m/s is ~182 prototype rpm |
+| Transit-warp cruise cap | 3.4 m/s empty | 5.0 m/s (still under speedCap and the governors) |
+| Scan-matcher degeneracy (slam.js) | sharpness tested on world x / z | tested along / across the rover's track; only sharp components applied |
+| Map-relative localization | none: fiducials only at pad / habitat / dock | `src/sim/orbitalMap.js`: every 40 m the local SLAM heights (plane removed) are correlated with an orbital DEM [ASSUMED: 4 m posting, 0.3 m noise, ±0.3 m warp]; the 3 newest agreeing matches are averaged and applied through the pose graph (`Autonomy.applyFrameShift`) |
+| Map storage | IndexedDB in one browser; maps keyed to a seed that is random each load | rover memory store on disk (`scripts/memory-plugin.mjs` on the Vite server, `src/sim/memoryStore.js`): `~/.hunch22-data/memory/site-<seed>.bin` (gzip), 10 history snapshots per site, shared by every launched version; `?site=last` reopens the newest site; `memory` command; IndexedDB kept as fallback |
+| FDIR seize false alarm | (§22) | kept |
+
+Results, same M6 run (25 sim-min, 50x): 400 m to go (was 1,335 m), SLAM error <= 3.3 m with 4 orbital-map fixes
+(was up to 9.3 m). Quick suite 15/16: physics 14/14 (top speed 4.95 m/s), odo 10/10 (exact at 4.5 m/s), planner,
+rocks, lander, thermal, ai_copilot, creep, both pickup_gt, both pickup_time, dock_box20 (8/8), scout, m1 all pass.
+
+Still failing, not caused by this change: `dock_cyl40`. With v1.4.0 it circled the PORT-1 lead-in until the time cap;
+now it reaches the port, closes the ring-camera approach to 1.4 cm at 3.4 m, and then the loaded rover's heading
+drifts 0 -> 1.8 deg over the last 2 m although the curvature law keeps commanding the correction, so it arrives
+12 cm off the axis (cone 6 cm). The full M6 cycle therefore picks up CM-40A and then fails at that port (the
+progress watchdog now stops it after 4 min instead of letting it wander). An uncommitted rework of rover.js
+(geometric wheel contact point instead of the cast witness point, combined CoM, energy booking; with
+tests/scratch/dbg_drive_under.mjs and dbg_park_*.mjs) fixes that final alignment in testing, but it also breaks the
+20-ft container pickup (3 failed drive-unders) and leaves a 5.9 kN port contact force. It is from another session
+and unfinished, so it is NOT in v1.5.0 and stays uncommitted in the working folder for its owner.

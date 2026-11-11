@@ -12,8 +12,8 @@ export const HELP = [
   ['goto <x> <z> | goto <pad|hab|staging|port1|port2|A|B>', 'autonomous drive to a point / site'],
   ['speed <m/s>', 'autonomy cruise speed'],
   ['limit rpm <n> | limit speed <m/s> | limit torque <%>', 'hard limits (rpm = prototype motor rpm, 300 max)'],
-  ['rpm auto|<n> | turbo on|off|auto', 'smart rpm 120/180/300 or lock the drive'],
-  ['drive <vx> [wz] [vz] | stop', 'direct body-velocity command (m/s, rad/s)'],
+  ['rpm auto|<n> | turbo on|off|auto', 'smart rpm (continuous 120..280, turbo 300) or lock the drive'],
+  ['drive <vx> [wz] | stop', 'direct command: forward speed (m/s) and yaw rate (rad/s, + = left); skid steer has no sideways motion'],
   ['brake on|off', 'parking brake'],
   ['lift kneel|drive|carry|<m> | clamp open|close', 'ride height (kneel / carry) and ring jaws'],
   ['level on|off | ride <m>', 'active leveling, ride-height offset'],
@@ -34,8 +34,9 @@ export const HELP = [
   ['clear faults | clear comms | clear port <n>', 'remove faults (clearing comms runs the queued commands)'],
   ['reroute <A|B> <1|2>', 'send a module to the other receiving port (e.g. when its port is faulted)'],
   ['map clear|save|load|forget | routes', 'SLAM map & route memory (forget = erase the stored copy too)'],
+  ['memory', 'rover memory store: where the map and routes are kept on disk, and which sites are remembered (?site=last reopens the newest)'],
   ['plan | priority <A|B> <category>', 'Mission 11 logistics plan / set request category'],
-  ['reserve <%>', 'battery reserve that triggers solar recharge'],
+  ['reserve <%>', 'battery reserve: below it an empty rover goes to the power dock before its next leg'],
   ['sun <az> <el>', 'sun azimuth / elevation in degrees'],
   ['charge [%] | dock status', 'drive to the solar power dock and charge (default 95 %) / dock power report'],
   ['day | night | lunar on|off [minutes per lunar day]', 'sun up / sun down / run the lunar day-night cycle'],
@@ -92,7 +93,7 @@ export function runCommand(sim, ui, line, _uplinked = false) {
     case 'start': sim.startUp(); break;
     case 'status': {
       const t = R.telemetry();
-      say(`${R.estop ? 'E-STOP' : R.powered ? 'ARMED' : 'DISARMED'} | ${A.mode}${A.missionName ? ' ' + A.missionName : ''} | v ${t.speed.toFixed(2)} m/s | SoC ${(R.power.soc * 100).toFixed(1)}% | tip margin ${t.margin.toFixed(1)} deg | load ${R.loaded ? R.lift.cargo.id : 'none'} | rpm ${R.rpm.proto.toFixed(0)} (${R.rpm.tier}: ${R.rpm.why}; ceiling ${R.limits.rpmCeil}) speed ${R.limits.speed} torque ${R.limits.torquePct}%`);
+      say(`${R.estop ? 'E-STOP' : R.powered ? 'ARMED' : 'DISARMED'} | ${A.mode}${A.missionName ? ' ' + A.missionName : ''} | v ${t.speed.toFixed(2)} m/s | SoC ${(R.power.soc * 100).toFixed(1)}% | tip margin ${t.margin.toFixed(1)} deg | load ${R.loaded ? R.lift.cargo.id : 'none'} | rpm ${R.rpm.proto.toFixed(0)} (${R.rpm.tier}: ${R.rpm.why}; ceiling ${R.limits.rpmCeil}) speed limit ${R.limits.speed >= 99 ? 'none' : R.limits.speed + ' m/s'} torque ${R.limits.torquePct}%`);
       break;
     }
     case 'mission': {
@@ -128,19 +129,19 @@ export function runCommand(sim, ui, line, _uplinked = false) {
     case 'speed': { if ((a[0] || '') === 'auto') { A.speedSetting = 99; say('Autonomy cruise speed: AUTO (smart rpm decides)', 'ok'); } else { A.speedSetting = Math.max(0.1, Math.min(9, num(a[0], 1.2))); say(`Autonomy cruise speed ceiling ${A.speedSetting.toFixed(2)} m/s`, 'ok'); } break; }
     case 'rpm': case 'turbo': {
       const c = cmd;
-      // rpm are PROTOTYPE motor rpm: 300 no-load units capped at 180; wheel rpm = proto / sqrt(K)
+      // rpm are PROTOTYPE motor rpm: 300 no-load units capped at 280; wheel rpm = proto / sqrt(K)
       const k = (a[0] || '').toLowerCase();
       if (c === 'turbo') {
-        if (k === 'off') { R.rpm.mode = 'fixed'; R.rpm.fixed = 180; say('Turbo disabled: locked at 180 rpm', 'ok'); }
+        if (k === 'off') { R.rpm.mode = 'fixed'; R.rpm.fixed = ROVER.motor.protoCapRpm; say(`Turbo disabled: locked at ${ROVER.motor.protoCapRpm} rpm`, 'ok'); }
         else if (k === 'on') { R.rpm.mode = 'fixed'; R.rpm.fixed = 300; say('TURBO locked at 300 rpm (terrain governor bypassed; tip governor still active)', 'warn'); }
-        else { R.rpm.mode = 'auto'; say('Smart rpm AUTO: 120 crawl / 180 cruise / 300 turbo chosen from terrain', 'ok'); }
-      } else if (k === 'auto' || k === '') { R.rpm.mode = 'auto'; say('Smart rpm AUTO: 120 crawl / 180 cruise / 300 turbo chosen from terrain', 'ok'); }
-      else { const v = num(a[0]); if (v == null) say('usage: rpm auto | rpm <60..300>', 'warn'); else { R.rpm.mode = 'fixed'; R.rpm.fixed = Math.max(30, Math.min(300, v)); say(`Drive locked at ${R.rpm.fixed} rpm (= ${(R.rpm.fixed / Math.sqrt(K) * 2 * Math.PI / 60 * ROVER.wheel.radius).toFixed(2)} m/s)`, 'ok'); } }
+        else { R.rpm.mode = 'auto'; say('Smart rpm AUTO: continuous 120..280 rpm set by slope, slip, roughness, tip margin, turn and temperature (turbo 300 on clear straights)', 'ok'); }
+      } else if (k === 'auto' || k === '') { R.rpm.mode = 'auto'; say('Smart rpm AUTO: continuous 120..280 rpm set by slope, slip, roughness, tip margin, turn and temperature (turbo 300 on clear straights)', 'ok'); }
+      else { const v = num(a[0]); if (v == null) say('usage: rpm auto | rpm <30..300>', 'warn'); else { R.rpm.mode = 'fixed'; R.rpm.fixed = Math.max(30, Math.min(300, v)); say(`Drive locked at ${R.rpm.fixed} rpm (= ${(R.rpm.fixed / Math.sqrt(K) * 2 * Math.PI / 60 * ROVER.wheel.radius).toFixed(2)} m/s)`, 'ok'); } }
       break;
     }
     case 'limit': {
       const k = (a[0] || '').toLowerCase(), v = num(a[1]);
-      if (k === 'rpm' && v != null) { R.limits.rpmCeil = Math.max(20, Math.min(300, v)); say(`Motor rpm ceiling ${R.limits.rpmCeil} (prototype rpm; 300 = no-load, 180 = normal cap) = ${(R.limits.rpmCeil / Math.sqrt(K) * 2 * Math.PI / 60 * ROVER.wheel.radius).toFixed(2)} m/s`, 'ok'); }
+      if (k === 'rpm' && v != null) { R.limits.rpmCeil = Math.max(20, Math.min(300, v)); say(`Motor rpm ceiling ${R.limits.rpmCeil} (prototype rpm; 300 = no-load, 280 = normal cap) = ${(R.limits.rpmCeil / Math.sqrt(K) * 2 * Math.PI / 60 * ROVER.wheel.radius).toFixed(2)} m/s`, 'ok'); }
       else if (k === 'speed' && v != null) { R.limits.speed = Math.max(0.05, Math.min(99, v)); say(`Ground speed limit ${R.limits.speed} m/s`, 'ok'); }
       else if (k === 'torque' && v != null) { R.limits.torquePct = Math.max(5, Math.min(100, v)); say(`Motor torque limit ${R.limits.torquePct}%`, 'ok'); }
       else say('usage: limit rpm <n> | limit speed <m/s> | limit torque <%>', 'warn');
@@ -149,8 +150,8 @@ export function runCommand(sim, ui, line, _uplinked = false) {
     case 'drive': {
       if (A.mode === 'AUTO') A.override();
       R.brake = false; ui.manualHold = true;
-      R.cmd.vx = num(a[0], 0); R.cmd.wz = num(a[1], 0); R.cmd.vz = num(a[2], 0);
-      say(`Direct command vx ${R.cmd.vx} m/s, wz ${R.cmd.wz} rad/s, vz ${R.cmd.vz} m/s (type "stop" to end)`, 'ok');
+      R.cmd.vx = num(a[0], 0); R.cmd.wz = num(a[1], 0); R.cmd.vz = 0; // no crab on a skid-steer vehicle (a third number used to be accepted and silently ignored)
+      say(`Direct command: forward ${R.cmd.vx} m/s, yaw rate ${R.cmd.wz} rad/s (type "stop" to end)`, 'ok');
       break;
     }
     case 'stop': R.cmd.vx = R.cmd.vz = R.cmd.wz = 0; ui.manualHold = false; if (A.mode === 'AUTO') A.override(); say('Stopped', 'ok'); break;
@@ -260,7 +261,8 @@ export function runCommand(sim, ui, line, _uplinked = false) {
       const k = (a[0] || '').toLowerCase();
       if (k === 'port') { delete A.faults.port[num(a[1], 1)]; say(`PORT-${num(a[1], 1)} available`, 'ok'); }
       else if (k === 'comms') { A.faults.comms = false; say('Comms link restored', 'ok'); }
-      else sim.clearFaults();
+      else if (k === 'faults' || k === 'all' || !k) sim.clearFaults();
+      else { say('usage: clear faults | clear comms | clear port <n>', 'warn'); break; } // (anything unrecognised used to clear every fault)
       // link back: send what the operator queued during the outage, in order
       if (!A.faults.comms && A.queuedCommands && A.queuedCommands.length) {
         const q = A.queuedCommands; A.queuedCommands = [];
@@ -282,6 +284,7 @@ export function runCommand(sim, ui, line, _uplinked = false) {
       say(`${c.id} rerouted to PORT-${id}`, 'ok');
       break;
     }
+    case 'memory': { ui.memoryStatus?.(); break; }
     case 'map': {
       const k = (a[0] || '').toLowerCase();
       if (k === 'clear') { sim.slam.clear(); say('SLAM map and route memory cleared', 'ok'); }

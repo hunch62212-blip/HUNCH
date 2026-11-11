@@ -11,7 +11,7 @@ const sim = new Sim(RAPIER); const R = sim.rover, S = sim.sensors;
 const run = (sec) => { for (let i = 0; i < sec * 120; i++) sim.stepOnce(); };
 const LEG = 15;
 run(4); R.brake = false;
-for (const v of [0.5, 1, 2, 2.9]) {
+for (const v of [0.5, 1, 2, 3, 4.5]) {
   const d0 = R.odo.dist, o0 = S.odom.dist; R.cmd.vx = v; run(LEG); // ramp included
   const truth = R.odo.dist - d0, odo = S.odom.dist - o0;
   console.log(`v ${v}: true ${truth.toFixed(1)} odo ${odo.toFixed(1)} ratio ${(odo / truth).toFixed(3)} slip ${R.wheels.map((w) => w.slip.toFixed(3)).join(' ')}`);

@@ -8,7 +8,7 @@ const K0 = 273.15;
 
 export function thermalTemplate() {
   const opts = Object.entries(SCENARIOS).map(([k, s]) => `<option value="${k}">${s.name}</option>`).join('');
-  return `<div id="thermPanel" class="panel"><h3>Thermal brain <span class="small" style="text-transform:none;letter-spacing:0">T toggles</span><span class="tog">▾</span></h3><div class="body">
+  return `<div id="thermPanel" class="panel collapsed"><h3>Thermal brain <span class="small" style="text-transform:none;letter-spacing:0">T toggles</span><span class="tog">▾</span></h3><div class="body">
     <div class="mono small" id="thEnv"></div>
     <div id="thScn" class="thScn"></div>
     <table class="wheels thermT"><thead><tr><th style="text-align:left">part</th><th>°C</th><th style="width:96px">range</th><th>K/min</th></tr></thead><tbody id="thRows"></tbody></table>

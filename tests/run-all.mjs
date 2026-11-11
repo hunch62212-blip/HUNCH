@@ -36,6 +36,7 @@ const TESTS = [
   ['drift', 'drift.mjs', [], true, 2400],
   ['faults', 'faults.mjs', [], true, 3600],
   ['fdir', 'fdir.mjs', [], true, 3600],
+  ['power_dock', 'power_dock.mjs', [], true, 3600],
   ['nav_bench', 'nav_bench.mjs', ['hab,pad'], true, 5400],
   ['cycle', 'autonomy.mjs', ['cycle', '12000'], true, 7200],
 ];

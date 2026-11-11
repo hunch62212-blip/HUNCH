@@ -4,7 +4,7 @@ import { WORLD, ROVER } from './config.js';
 import { RES, TILE, CLS } from './slam.js';
 
 const PRES = 2;                                   // planning cell size (m)
-const PN = WORLD.size / PRES;                     // 1024
+const PN = WORLD.size / PRES;                     // 1250 cells per side on the 2.5 km map
 const HALF = WORLD.size / 2;
 export const LETHAL = 1e9;
 
@@ -17,7 +17,12 @@ export class Planner {
     this.stamp = new Uint32Array(PN * PN);
     this.closed = new Uint32Array(PN * PN);
     this.search = 0;
-    this.unknownCost = 1.5;
+    this.unknownCost = 1.5;          // floor of the price of unmapped ground (per m)
+    // v1.5.0: unmapped ground is priced at what the mapped ground has turned out to cost (median of the known cells,
+    // smoothed across builds, clamped 1.5..6). With a fixed 1.5 /m it was ~5x cheaper than mapped ground (median 6-8 /m:
+    // most real ground sits in some rock's soft inflation skirt), so every scan made the route ahead dearer than the
+    // still-unmapped alternatives and A* kept swinging the route sideways or back ("changing its mind").
+    this.unknownAdaptive = null; this.unkEff = this.unknownCost;
     // CHANGES.md §17: unmapped ground within unknownHazardRadius of mapped SLOPE / CRATER ground is a likely rim or pocket
     // (A* "explore" at 1.5 /m routed the loaded rover straight into such pockets and it could not turn round)
     this.unknownNearHazardCost = 12.0;
@@ -40,7 +45,8 @@ export class Planner {
   buildCostmap(routes = []) {
     const t0 = performance.now();
     const C = this.cost;
-    C.fill(this.unknownCost);
+    const unk = this.unkEff = Math.max(this.unknownCost, Math.min(6, this.unknownAdaptive ?? this.unknownCost));
+    C.fill(unk);
     const lethal = [];
     const sub = PRES / RES; // 4
     const perTile = TILE / sub; // 16 planning cells per tile side
@@ -66,14 +72,14 @@ export class Planner {
         if (worst >= 255 && known >= 2) { C[k] = LETHAL; lethal.push(k); continue; }
         const frac = known / (sub * sub);
         const c = Math.max(1, (sum / known) / 20) + (worst > 120 ? 2 : 0);
-        C[k] = frac * c + (1 - frac) * this.unknownCost;
+        C[k] = frac * c + (1 - frac) * unk;
         if (frac < 1) partial.push(k, frac, c);
       }
     }
     // unmapped ground next to mapped slopes / craters costs 12 /m instead of 1.5 /m (CHANGES.md §17)
     this.unknownInflated = 0;
-    if (hazK.length && this.unknownNearHazardCost > this.unknownCost) {
-      const near = this.nearMask(hazK, this.unknownHazardRadius), uh = this.unknownNearHazardCost;
+    if (hazK.length && this.unknownNearHazardCost > unk) {
+      const near = this.nearMask(hazK, this.unknownHazardRadius), uh = Math.max(this.unknownNearHazardCost, unk * 1.5);
       for (let k = 0; k < C.length; k++) if (near[k] && !KM[k]) { C[k] = uh; this.unknownInflated++; }
       for (let q = 0; q < partial.length; q += 3) { const k = partial[q]; if (near[k]) C[k] = partial[q + 1] * partial[q + 2] + (1 - partial[q + 1]) * uh; }
     }
@@ -141,11 +147,19 @@ export class Planner {
       if (C[k] >= LETHAL) continue;
       if (infl[k] >= LETHAL * 0.5) C[k] = LETHAL * 0.5; else C[k] += infl[k];
     }
+    // what mapped, passable ground costs (sampled median), for the next build's unknown-ground price
+    { const KMk = this.knownMask, smp = [];
+      for (let k = 0; k < C.length; k += 3) if (KMk[k] && C[k] < LETHAL * 0.5) smp.push(C[k]);
+      if (smp.length > 200) {
+        smp.sort((a, b) => a - b);
+        const med = smp[smp.length >> 1];
+        this.unknownAdaptive = this.unknownAdaptive == null ? med : this.unknownAdaptive + (med - this.unknownAdaptive) * 0.25;
+      } }
     // teach-and-repeat prior: cells on proven routes are cheaper
     for (const r of routes) {
       for (const p of r.pts) {
         const k = this.idx(p.x, p.z); if (k < 0) continue;
-        for (const dk of [0, 1, -1, PN, -PN]) { const kk = k + dk; if (C[kk] < LETHAL * 0.5) C[kk] = Math.max(0.45, C[kk] * this.routeBonus); }
+        for (const dk of [0, 1, -1, PN, -PN]) { const kk = k + dk; if (kk >= 0 && kk < C.length && C[kk] < LETHAL * 0.5) C[kk] = Math.max(0.45, C[kk] * this.routeBonus); }
       }
     }
     this.lethalCount = lethal.length;
@@ -190,7 +204,8 @@ export class Planner {
       let best = -1, bd = Infinity;
       const gi = goal % PN, gj = (goal / PN) | 0;
       for (let r = 1; r < 15 && best < 0; r++) for (let dj = -r; dj <= r; dj++) for (let di = -r; di <= r; di++) {
-        const k = (gj + dj) * PN + gi + di; if (k < 0 || k >= PN * PN) continue;
+        const i = gi + di, j = gj + dj; if (i < 0 || j < 0 || i >= PN || j >= PN) continue; // (was an index-only check: a goal near the map edge wrapped onto the opposite side of the next row)
+        const k = j * PN + i;
         if (this.cost[k] < LETHAL * 0.5) { const d = di * di + dj * dj; if (d < bd) { bd = d; best = k; } }
       }
       if (best < 0) return null; goal = best;
@@ -212,7 +227,7 @@ export class Planner {
       return k;
     };
     const gi = goal % PN, gj = (goal / PN) | 0;
-    const hw = opts.heuristicWeight ?? 1.6; // weighted A*: unknown terrain costs 1.5/m, so this stays near-optimal but fast
+    const hw = opts.heuristicWeight ?? 1.07 * this.unkEff; // weighted A*, scaled to the price of unmapped ground (most of a long route)
     const H = (k) => { const di = Math.abs(k % PN - gi), dj = Math.abs(((k / PN) | 0) - gj); return hw * PRES * (Math.max(di, dj) + 0.4142 * Math.min(di, dj)); };
     g[s] = 0; ST[s] = stamp; P[s] = -1; push(s, H(s));
     const nb = [[1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1], [1, 1, 1.4142], [1, -1, 1.4142], [-1, 1, 1.4142], [-1, -1, 1.4142]];
@@ -381,10 +396,14 @@ export class LocalPlanner {
     const S = this.slam;
     const dir = opts.dir ?? 1;
     const belly = opts.belly ?? (loaded ? 1.5 : 0.75); // tub underside clearance (carry ride raises it 0.82 m)
-    const kmax = opts.kmax ?? (vDes < 0.6 ? 0.16 : 0.11);
+    // gentle skid steer (v1.5.0): the inner side runs at (1 - |k| b) of the centre speed (b = 3.84 m half track). Keep
+    // |k| b <= 0.5 slow and <= 0.35 above 3 m/s (inner side >= 50 / 65 % of the outer), so turns scrub less and the
+    // rover arcs round a bend instead of skidding into it
+    const half = Math.abs(ROVER.corners[0][1]), sideMax = Math.abs(vDes) < 1 ? 0.5 : Math.abs(vDes) > 3 ? 0.35 : 0.5 - 0.075 * (Math.abs(vDes) - 1);
+    const kmax = opts.kmax ?? Math.min(vDes < 0.6 ? 0.16 : 0.11, sideMax / half);
     const nK = 14;
     const ks = []; for (let i = -nK; i <= nK; i++) ks.push(kmax * i / nK);
-    const horizon = opts.horizon ?? Math.max(9, Math.min(18, Math.abs(vDes) * 10));
+    const horizon = opts.horizon ?? Math.max(9, Math.min(30, Math.abs(vDes) * 6 + 6)); // (max 18 m capped speed at ~4.2 m/s via the stopping-distance governor)
     const c0 = Math.cos(pose.yaw), s0 = Math.sin(pose.yaw);
     const here = WHEELS.map(([wx, wz]) => [pose.x + wx * c0 + wz * s0, pose.z - wx * s0 + wz * c0]);
     const underUs = (px, pz) => { for (const [hx, hz] of here) if ((px - hx) ** 2 + (pz - hz) ** 2 < 1.4 * 1.4) return true; return false; };

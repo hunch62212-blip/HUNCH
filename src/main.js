@@ -11,6 +11,7 @@ import { AegisModel, buildTeamCargo, buildTeamStands } from './render/aegis.js';
 import { loadTeamModels } from './render/teamModels.js';
 import { Dust, Tracks, LidarCloud, PathOverlay, Pebbles } from './render/effects.js';
 import { HUD } from './ui/hud.js';
+import { DiskMemory } from './sim/memoryStore.js';
 import { PowerDockModel } from './render/powerDock.js';
 import { EngineeringOverlay } from './render/engOverlay.js';
 import { trackedRoverCAD } from './render/cadModels.js';
@@ -32,7 +33,10 @@ async function main() {
   await RAPIER.init();
   // a new random crater / boulder layout on every load; ?seed=N reproduces a map
   const qs = new URLSearchParams(location.search);
-  const seed = qs.has('seed') && Number.isFinite(+qs.get('seed')) ? (+qs.get('seed') >>> 0) : (Math.random() * 2 ** 32) >>> 0;
+  // ?site=last: reopen the most recently remembered site (rover memory store, scripts/memory-plugin.mjs)
+  let lastSite = null;
+  if (qs.get('site') === 'last') { const L = await DiskMemory.sites(); lastSite = L && L.sites && L.sites[0] ? L.sites[0].seed : null; }
+  const seed = lastSite != null ? lastSite >>> 0 : qs.has('seed') && Number.isFinite(+qs.get('seed')) ? (+qs.get('seed') >>> 0) : (Math.random() * 2 ** 32) >>> 0;
   await step(15, `Generating ${(WORLD.size / 1000).toFixed(1)} × ${(WORLD.size / 1000).toFixed(1)} km lunar terrain (seed ${seed}): craters, boulders, highlands…`);
   // thermal scenarios happen at random in the browser (?noscen turns them off); headless tests opt in
   const sim = new Sim(RAPIER, { seed, thermalScenarios: !qs.has('noscen') });
@@ -119,9 +123,20 @@ async function main() {
     overlays: { lidar: true, path: true, arcs: false, routes: true, fences: true, dust: true, xray: false, eng: true },
     setView(v) { if (['chase', 'orbit', 'top', 'cam', 'free'].includes(v)) { ui.view = v; onViewChange(); sim.log(`View: ${v}`); } },
     noSave: false,
-    async forgetMap() { ui.noSave = true; sim.slam.clear(); await DB.wipe(); sim.log('Stored map and route memory erased. Reload the page for a completely fresh start (nothing is saved until then).', 'warn'); },
-    async saveMap() { if (ui.noSave) return; try { await DB.put('map', sim.slam.serialize()); sim.log(`SLAM map saved (${sim.slam.tiles.size} tiles, ${sim.slam.routes.length} routes)`, 'ok'); } catch (e) { sim.log('Map save failed: ' + e.message, 'err'); } },
-    async loadMap() { try { const d = await DB.get('map'); if (d && sim.slam.deserialize(d)) sim.log(`Remembered SLAM map loaded: ${d.tiles.length} tiles, ${d.routes.length} proven routes (saved ${new Date(d.savedAt).toLocaleString()})`, 'ok'); else sim.log('No saved map for this world', 'warn'); } catch (e) { sim.log('Map load failed: ' + e.message, 'err'); } },
+    async forgetMap() { ui.noSave = true; sim.slam.clear(); await DB.wipe(); await DiskMemory.forget(sim.terrain.seed); sim.log('Stored map and route memory erased. Reload the page for a completely fresh start (nothing is saved until then).', 'warn'); },
+    async saveMap(quiet = false) {
+      if (ui.noSave) return;
+      const d = sim.slam.serialize();
+      try { await DB.put('map', d); } catch (e) { /* browser copy is only the fallback */ }
+      const r = await DiskMemory.save(d);
+      if (!quiet || !r) sim.log(r ? `Rover memory saved: ${d.tiles.length} map tiles, ${d.routes.length} routes -> ${r.dir} (site ${d.seed}, ${(r.bytes / 1e6).toFixed(1)} MB)` : `SLAM map saved in this browser only (${d.tiles.length} tiles): the on-disk memory store is not reachable`, r ? 'ok' : 'warn');
+    },
+    async memoryStatus() {
+      const L = await DiskMemory.sites();
+      if (!L) { sim.log('Rover memory store not reachable (static build?): maps are kept in this browser only', 'warn'); return; }
+      sim.log(`Rover memory store: ${L.dir} - ${L.sites.length} site(s)${L.sites.length ? ': ' + L.sites.slice(0, 6).map((s) => `${s.seed}${s.seed === sim.terrain.seed ? ' (this site)' : ''} ${(s.bytes / 1e6).toFixed(1)} MB, ${s.history} snapshot(s), saved ${new Date(s.savedAt).toLocaleString()}`).join(' | ') : ''}. Open ?site=last (or ?seed=N) to return to a remembered site.`, 'info');
+    },
+    async loadMap() { try { const d = (await DiskMemory.load(sim.terrain.seed)) || (await DB.get('map')); if (d && sim.slam.deserialize(d)) sim.log(`Remembered SLAM map loaded: ${d.tiles.length} tiles, ${d.routes.length} proven routes (saved ${new Date(d.savedAt).toLocaleString()})`, 'ok'); else sim.log('No saved map for this world', 'warn'); } catch (e) { sim.log('Map load failed: ' + e.message, 'err'); } },
   };
   const controls = new OrbitControls(camera, canvas);
   controls.enableDamping = true; controls.dampingFactor = 0.08; controls.maxPolarAngle = Math.PI * 0.495; controls.minDistance = 6; controls.maxDistance = 1800;
@@ -192,7 +207,7 @@ async function main() {
     if (k === 'c') { const v = ['chase', 'orbit', 'top', 'cam', 'free']; ui.setView(v[(v.indexOf(ui.view) + 1) % v.length]); }
     if (k === 'v') { ui.overlays.lidar = !ui.overlays.lidar; }
     if (k === 'i') { ui.overlays.eng = !ui.overlays.eng; document.querySelector('[data-ov="eng"]')?.classList.toggle('on', ui.overlays.eng); }
-    if (k === 't') { const p = document.getElementById('thermPanel'); if (p) p.style.display = p.style.display === 'none' ? '' : 'none'; }
+    if (k === 't') hud.toggleThermal();
     if (k === 'p') sim.paused = !sim.paused;
     if (k === 'x') { sim.paused = false; sim.timeScale = sim.timeScale >= 50 ? 1 : 50; sim.log(sim.timeScale >= 50 ? 'FAST FORWARD 50x' : 'Time scale 1x', 'ok'); }
     if (k === 'h' || k === '?') hud.toggleHelp();
@@ -249,10 +264,10 @@ async function main() {
   }
 
   // ---------------- remembered map (teach & repeat survives reloads) ----------------
-  if (new URLSearchParams(location.search).has('fresh')) { await DB.wipe(); history.replaceState(null, '', location.pathname); sim.log('Fresh start requested (?fresh): stored map erased', 'warn'); }
-  try { const d = await DB.get('map'); if (d && sim.slam.deserialize(d)) { sim.log(`Remembered SLAM map loaded: ${d.tiles.length} tiles, ${d.routes.length} proven route(s). The rover will reuse routes that worked.`, 'ok'); overlay.setRoutes(sim.slam.routes); } else sim.log('No stored map: the rover will explore and learn the route on its first trip (no pre-mapped path).', 'info'); } catch (e) { /* private mode */ }
-  setInterval(() => ui.saveMap(), 120000);
-  window.addEventListener('beforeunload', () => { if (ui.noSave) return; try { DB.put('map', sim.slam.serialize()); } catch (e) { /* ignore */ } });
+  if (qs.has('fresh')) { await DB.wipe(); await DiskMemory.forget(seed); qs.delete('fresh'); const rest = qs.toString(); history.replaceState(null, '', location.pathname + (rest ? '?' + rest : '')); sim.log('Fresh start requested (?fresh): stored map erased', 'warn'); }
+  try { const disk = await DiskMemory.load(seed), d = disk || (await DB.get('map')); if (d && sim.slam.deserialize(d)) { sim.log(`Remembered SLAM map loaded from ${disk ? 'the rover memory store (disk)' : 'this browser'}: ${d.tiles.length} tiles, ${d.routes.length} proven route(s). The rover will reuse routes that worked.`, 'ok'); overlay.setRoutes(sim.slam.routes); } else sim.log('No stored map: the rover will explore and learn the route on its first trip (no pre-mapped path).', 'info'); } catch (e) { /* private mode */ }
+  setInterval(() => ui.saveMap(true), 120000);
+  window.addEventListener('beforeunload', () => { if (ui.noSave) return; try { const d = sim.slam.serialize(); DB.put('map', d); DiskMemory.saveBeacon(d); } catch (e) { /* ignore */ } });
 
   S.csmRegister(scene);
   // Adaptive quality: 'auto' walks down this ladder when the frame rate sags and back up when there is headroom

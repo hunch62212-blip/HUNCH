@@ -1,6 +1,6 @@
 {
   "name": "llaso-p2-xport-sim",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "NASA HUNCH LLASO-P2-XPORT-2026 external cargo transport rover simulator",
   "type": "module",
   "private": true,
@@ -11,7 +11,7 @@
     "preview": "vite preview --port 5173",
     "test": "node tests/run-all.mjs",
     "test:quick": "node tests/run-all.mjs --quick",
-    "test:long": "node tests/run-all.mjs m3 drift faults fdir nav_bench cycle",
+    "test:long": "node tests/run-all.mjs m3 drift faults fdir power_dock nav_bench cycle",
     "test:fdir": "node tests/run-all.mjs fdir",
     "docs:faults": "node scripts/fault_procedures.mjs > docs/FAULT_PROCEDURES.md",
     "test:physics": "node tests/run-all.mjs physics",

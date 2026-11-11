@@ -1,7 +1,7 @@
 // AEGIS power dock: sun-tracking vertical solar arrays + a night-rated battery bank + an underbody
 // charge coupler pad beside the supply building. The arrays charge the bank through the lunar day; the bank
 // carries its own survival heaters and recharges the rover through the ~354 h lunar night.
-import { POWER_DOCK, ROVER } from './config.js';
+import { POWER_DOCK, ROVER, MOON } from './config.js';
 import { heightAt } from './terrain.js';
 import { G_STRUCT, Q_TERRAIN, yawQuat } from './world.js';
 
@@ -77,7 +77,7 @@ export class PowerDock {
       this.sunlit = lit / A.length;
     }
     const cosI = Math.sqrt(Math.max(0, 1 - sun.y * sun.y)); // panel normal horizontal, pointed at the sun azimuth
-    this.solarW = D.arrays.length * D.arrayArea * D.efficiency * (D.arrayDerate ?? 1) * 1361 * cosI * this.sunlit;
+    this.solarW = D.arrays.length * D.arrayArea * D.efficiency * (D.arrayDerate ?? 1) * MOON.solarConstant * cosI * this.sunlit;
     const night = this.solarW < 500;
     // survival load: avionics + vault thermal control (heaters work hardest at night, ~ -170 C)
     this.loadW = D.hotelW + (night ? D.nightHeaterW : D.dayHeaterW);
@@ -106,7 +106,9 @@ export class PowerDock {
     this.bankWh = Math.max(0, Math.min(cap, this.bankWh + dWh));
     this.genWh += this.solarW * dt / 3600; this.deliveredWh += this.chargeW * dt / 3600;
     R.power.dockW = this.chargeW;
-    this.status = coupled ? (this.chargeW > 0 ? 'CHARGING' : this.coldHold ? 'HOLD: pack below 0 C, warming' : 'ROVER FULL') : onPad ? 'rover on pad (kneel to couple)' : night ? 'NIGHT: bank supplying' : this.bankWh >= cap - 1 ? 'bank full' : 'charging bank';
+    // (a coupled rover that gets no power is not always full: the bank may be at its floor at night, or the pack too hot)
+    const Tb1 = sim.health ? sim.health.th.Tb : 20;
+    this.status = coupled ? (this.chargeW > 0 ? 'CHARGING' : this.coldHold ? 'HOLD: pack below 0 C, warming' : R.power.soc >= 0.999 ? 'ROVER FULL' : Tb1 >= 50 ? 'HOLD: pack at 50 C, cooling' : 'HOLD: bank at floor, waiting for sun') : onPad ? 'rover on pad (kneel to couple)' : night ? 'NIGHT: bank supplying' : this.bankWh >= cap - 1 ? 'bank full' : 'charging bank';
   }
   // hours the bank can carry the dock's survival load through a night with no solar input
   nightHours() { return this.bankWh * POWER_DOCK.bankEff / (POWER_DOCK.hotelW + POWER_DOCK.nightHeaterW); }

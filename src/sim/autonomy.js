@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { ROVER, WORLD, DOCK, MOON, POWER_DOCK } from './config.js';
 import { Planner, LocalPlanner, LETHAL } from './planner.js';
+import { OrbitalDEM, matchToDEM } from './orbitalMap.js';
 const LETHAL_HALF = LETHAL * 0.5; // planner hard-inflation cost (obstacle margin)
 
 const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
@@ -18,6 +19,8 @@ export class Autonomy {
     this.rate = 10;
     this.planner = new Planner(sim, slam);
     this.local = new LocalPlanner(slam);
+    this.dem = sim.terrain ? new OrbitalDEM(sim.terrain) : null; // orbital elevation model for map-relative fixes (orbitalMap.js)
+    this.mrl = { on: true, dLast: 0, tLast: -1e9, fixes: 0, last: null };
     this.mode = 'MANUAL';      // MANUAL | AUTO
     this.gen = null; this.missionName = null;
     this.phase = 'Idle'; this.detail = '';
@@ -122,24 +125,70 @@ export class Autonomy {
     if (d.range < (d.size >= 1.0 ? 80 : 45) && d.known.nx != null) { const dy = wrap(Math.atan2(-d.known.nz, d.known.nx) - (this.dirToEst(d.normal) + d.yawNoise)); F.sy += dy; F.syy += dy * dy; F.ny++; }
     const dx = F.sx / F.w, dz = F.sz / F.w, off = Math.hypot(dx, dz);
     // accept only a well-averaged mean: >= 15 sightings of this tag and a standard error under
-    // max(0.3 m, 3 % of the offset) (was 3 sightings, 0.4 m / 5 %). A large drift is fixed coarsely first and
-    // later sightings refine it; a 0.15 m floor needed ~225 sightings of a 50 m beacon and the refinement never came
-    if (F.n < 15 || 1 / Math.sqrt(F.w) > Math.max(0.3, 0.03 * off)) return;
+    // max(0.3 m, 3 % of the offset). A large drift is fixed coarsely first and later sightings refine it.
+    // The offset must also be significant: more than 3 standard errors (and 0.5 m). The old test applied any mean over
+    // 0.5 m once the standard error reached 0.3 m; with a true offset of zero that happens by chance in ~25 % of the
+    // averages (2-D Gaussian, exp(-0.5^2 / (2 x 0.3^2))), so on the habitat apron the map and the estimate were shifted
+    // 0.5-1.6 m by camera noise every few seconds (tests/out/dock_cyl40.log). At 3 standard errors it is ~1 %.
+    const se = 1 / Math.sqrt(F.w);
+    if (F.n < 15 || se > Math.max(0.3, 0.03 * off)) return;
+    if (off < Math.max(0.5, 3 * se)) {
+      if (se <= 0.5 / 3) FX.delete(d.id);   // averaged as far as it is useful and still no significant offset: no drift, start over
+      return;                               // otherwise keep averaging this tag
+    }
     this._fixes = null;
-    if (off < 0.5) return;
     // heading part of the fix: only from a well-averaged mean (standard error < 0.3 deg over >= 15 sightings), at most 4 deg
     let dyaw = 0;
     if (F.ny >= 15) { const mean = F.sy / F.ny, sd = Math.sqrt(Math.max(0, F.syy / F.ny - mean * mean)), se = sd / Math.sqrt(F.ny); if (se < 0.3 * DEG) dyaw = clamp(mean, -4 * DEG, 4 * DEG); }
     const A = this.slam._fixAnchor || { d: 0 };
     const limit = 5 + 0.08 * (this.sensors.odom.dist - A.d);
     if (off > limit) { this.log(`Fiducial ${d.id}: offset ${off.toFixed(1)} m exceeds plausible drift (${limit.toFixed(1)} m), ignored`, 'info'); return; }
+    const r = this.applyFrameShift(dx, dz, dyaw);
+    this.log(`SLAM fiducial fix (${d.id}): position corrected by ${off.toFixed(1)} m${dyaw ? ` / heading ${(dyaw / DEG).toFixed(2)} deg` : ''}, ${r.cells} map cells re-placed (${r.nodes}-node graph, ${r.iters} sweeps)`, 'ok');
+  }
+
+  // Move the estimate, the map, routes and all plan state by one correction (pose graph: Slam.shiftFrame), then replan
+  applyFrameShift(dx, dz, dyaw = 0) {
     const r = this.slam.shiftFrame(dx, dz, dyaw);
     // plan state lives in the same frame: move it with the correction at the current pose and replan
     for (const p of this.path || []) r.apply(p);
     for (const b of this.planner.blocked) if (!b.fault) r.apply(b);
     for (const p of this.portEst.values()) { r.apply(p); p.nYaw = wrap(p.nYaw + r.dyawEnd); }
     this._replanNow = true;
-    this.log(`SLAM fiducial fix (${d.id}): position corrected by ${off.toFixed(1)} m${dyaw ? ` / heading ${(dyaw / DEG).toFixed(2)} deg` : ''}, ${r.cells} map cells re-placed (${r.nodes}-node graph, ${r.iters} sweeps)`, 'ok');
+    return r;
+  }
+
+  // Map-relative localization (orbitalMap.js): every ~40 m, correlate the local SLAM height map with the orbital DEM
+  // and correct the drift it finds. Same precision-phase guards as the fiducial fixes.
+  orbitalFix() {
+    const M = this.mrl, dist = this.sensors.odom.dist;
+    if (!M.on || !this.dem || dist - M.dLast < 40) return;
+    M.dLast = dist;
+    if (this.slam.lcSuspended || /Final approach|Dock |pre-dock|Pick|Clamp|Lift/.test(this.phase)) return;
+    if (this.sim.time - (this.slam.lastFix?.t ?? -1e9) < 30) return;   // a fiducial fix just did this job
+    const e = this.est();
+    const m = matchToDEM(this.slam, this.dem, e.x, e.z);
+    M.last = { t: this.sim.time, ...m };
+    if (!m.ok) return;
+    // One match is good to ~1.2-1.5 m (DEM noise and 4 m posting), and drift grows ~0.2 m per 40 m, so single matches
+    // are averaged like the fiducial sightings: the 3 most recent agreeing matches (spread < 1.8 m) since the last frame
+    // shift and within 400 m, applied only when the mean is clearly non-zero (> 1.5 m and > 2.5 standard errors).
+    const fixT = this.slam.lastFix?.t ?? -1;
+    M.buf = (M.buf || []).filter((q) => q.fixT === fixT && dist - q.d < 400);
+    M.buf.push({ dx: m.dx, dz: m.dz, d: dist, fixT });
+    // the 3 most recent only: drift keeps growing, and older matches describe an older, smaller error
+    if (M.buf.length > 3) M.buf = M.buf.slice(-3);
+    const B = M.buf, k = B.length;
+    if (k < 3) return;
+    const mx = B.reduce((a, q) => a + q.dx, 0) / k, mz = B.reduce((a, q) => a + q.dz, 0) / k;
+    const sd = Math.sqrt(B.reduce((a, q) => a + (q.dx - mx) ** 2 + (q.dz - mz) ** 2, 0) / (k - 1));
+    const off = Math.hypot(mx, mz), se = sd / Math.sqrt(k);
+    if (sd > 1.8 || off < Math.max(1.5, 2.5 * se)) return;
+    const A = this.slam._fixAnchor || { d: 0 };
+    if (off > 5 + 0.08 * (dist - A.d)) { M.buf = []; return; }
+    const r = this.applyFrameShift(mx, mz, 0);
+    M.fixes++; M.tLast = this.sim.time; M.buf = [];
+    this.log(`SLAM orbital-map fix: local terrain matched the orbital elevation map (${k} agreeing matches, spread ${sd.toFixed(1)} m): position corrected by ${off.toFixed(1)} m, ${r.cells} map cells re-placed`, 'ok');
   }
 
   updateEstimates() {
@@ -229,6 +278,7 @@ export class Autonomy {
     this.dt = dt;
     this.railsOk = false; // set again by navTo's cruise branch when the transit-warp check passes (Sim.stepAuto)
     this.updateEstimates();
+    this.orbitalFix();
     const R = this.sim.rover;
     if (R.estop || !R.powered) { if (this.gen && !this.paused) { this.paused = true; this.mode = 'MANUAL'; } return; }
     if (this.mode !== 'AUTO' || !this.gen || this.paused) return;
@@ -450,14 +500,21 @@ export class Autonomy {
       const e2 = this.est(), i0 = this.nearestOnPath(e2);
       const cur = P.pathCost([{ x: e2.x, z: e2.z }, ...this.path.slice(i0)]);
       const neu = P.pathCost(res.pts);
-      if (Number.isFinite(cur) && neu > cur * 0.85) return true;
+      // commitment (v1.5.0): for 20 s after a switch, a routine replan only replaces a path that has become blocked;
+      // after that the new one must be >15 % AND > 12 m of typical ground cheaper (tiny relative gains on a 2 km route
+      // used to flip the plan every few seconds)
+      if (Number.isFinite(cur) && this.sim.time - (this._pathSwitchT ?? -1e9) < 20) return true;
+      if (Number.isFinite(cur) && (neu > cur * 0.85 || cur - neu < 12 * P.unkEff)) return true;
       // reversal guard: a routine replan that turns the rover back the way it came needs to be clearly (40 %)
       // cheaper. Newly mapped ground keeps raising the cost of the route ahead while the unmapped alternative
       // behind still looks cheap, and the loaded rover (no point turns) thrashed east-west for minutes (CHANGES.md §14)
       const dir = (pts, i) => { const a = pts[i] || pts[0], b = pts[Math.min(pts.length - 1, i + 15)]; return Math.atan2(b.z - a.z, b.x - a.x); };
       const dTurn = Math.abs(wrap(dir(res.pts, 0) - dir(this.path, i0)));
       if (Number.isFinite(cur) && dTurn > 100 * DEG && neu > cur * 0.6) return true;
+      // a plan that swings the rover > 60 deg off its present line costs a long arc (or a stop and pivot): 30 % cheaper
+      if (Number.isFinite(cur) && dTurn > 60 * DEG && neu > cur * 0.7) return true;
     }
+    if (this.path !== res.pts) this._pathSwitchT = this.sim.time;
     this.path = res.pts; this.pathIdx = 0;
     this.pathTight = !!res.tight;
     this.pathSource = 'A* (explore)';
@@ -527,9 +584,17 @@ export class Autonomy {
       if (dGoal < tol) break;
       // overall progress watchdog: 4 minutes without getting 5 m closer => ask for help
       if (dGoal < bestD - 5) { bestD = dGoal; bestT = this.sim.time; episodes = 0; }
-      // a detour around a keep-out zone / crater field moves away from the goal while it maps new ground: that is progress
-      else if (this.slam.tiles.size > bestTiles + 6 && this.sim.time - t00 < 3600) { bestTiles = this.slam.tiles.size; bestT = this.sim.time; }
+      // a detour around a keep-out zone / crater field moves away from the goal while it maps new ground: that is progress,
+      // but only while it stays a detour. (v1.5.0: unbounded, this let a rover that could no longer steer drive 1.3 km
+      // away from PORT-1 "mapping new ground" without the watchdog ever firing)
+      else if (this.slam.tiles.size > bestTiles + 6 && this.sim.time - t00 < 3600 && dGoal < bestD + Math.max(60, 0.1 * bestD)) { bestTiles = this.slam.tiles.size; bestT = this.sim.time; }
       if (this.sim.time - bestT > 240) return fail(`no progress toward ${goal.name || 'goal'} for 4 min: operator assistance required`);
+      if (Number.isFinite(bestD) && dGoal > bestD + Math.max(150, 0.25 * bestD)) return fail(`moving away from ${goal.name || 'goal'} (${dGoal.toFixed(0)} m, was ${bestD.toFixed(0)} m): stopped, operator assistance required`);
+      // steering-authority check: moving, asked to turn, and the gyro says the body is not turning
+      { const f = R._cmdF, yr = Math.abs(this.sensors.imu.yawRate || 0);
+        if (f && !(this.sim.warping && this.railsOk) && Math.abs(f.vx) > 0.5 && Math.abs(f.wz) > 0.04 && yr < 0.25 * Math.abs(f.wz)) this._noSteerT = (this._noSteerT || 0) + this.dt;
+        else this._noSteerT = Math.max(0, (this._noSteerT || 0) - 2 * this.dt);
+        if (this._noSteerT > 15) { this._noSteerT = 0; return fail('vehicle is not responding to steering (yaw rate < 25 % of command for 15 s): stopped, operator assistance required'); } }
       this.pathIdx = this.nearestOnPath(e);
       if (this._replanNow) { this._replanNow = false; lastReplan = -1e9; bestD = Infinity; stuckPos = e; }
       // (in transit warp the map changes per metre, not per second: replanning every 5 sim-s would cost ~10 plans per wall second)
@@ -546,15 +611,17 @@ export class Autonomy {
       }
       // lookahead target on the path
       let li = this.pathIdx;
-      const look = clamp(7 + R.telemetry().speed * 5, 8, 15);
+      const look = clamp(7 + R.telemetry().speed * 4, 8, 25);
       let acc = 0;
       while (li < this.path.length - 1 && acc < look) { acc += Math.hypot(this.path[li + 1].x - this.path[li].x, this.path[li + 1].z - this.path[li].z); li++; }
       const tgt = this.path[li];
       const rel = this.relBody(tgt, e);
       const headErr = Math.atan2(-rel.r, rel.f);
-      // large heading error -> point turn (skid-free on the 4 steered bogies) if the sweep is clear
+      // Turning (v1.5.0): heading errors up to 115 deg are taken on a moving arc (the local planner's curvature, slowed
+      // for the turn below), so the rover no longer stops and spins for every bend. A point turn is kept only for a
+      // target essentially behind it (> 115 deg; > 150 deg within 6 m of the last one), or when no forward arc is free.
       const sinceTurn = Math.hypot(e.x - (lastPivotPos?.x ?? 1e9), e.z - (lastPivotPos?.z ?? 1e9));
-      if (!R.loaded && Math.abs(headErr) > (sinceTurn < 6 ? 100 : 50) * DEG && dGoal > tol + 3 && Math.hypot(rel.f, rel.r) > 5) { // a loaded rover never point-turns: wheels would dig ruts and the CoM is 6.8 m up
+      if (!R.loaded && Math.abs(headErr) > (sinceTurn < 6 ? 150 : 115) * DEG && dGoal > tol + 3 && Math.hypot(rel.f, rel.r) > 5) { // a loaded rover never point-turns: wheels would dig ruts and the CoM is 6.8 m up
         if (this.local.pivotSafe(e)) {
           lastPivotPos = { x: e.x, z: e.z };
           this.stop(); for (let i = 0; i < 5; i++) yield;
@@ -614,7 +681,11 @@ export class Autonomy {
           stuckT = this.sim.time; stuckPos = this.est(); blockedT = 0;
           yield; continue;
         } }
-      const lp = this.local.evaluate(e, tgt, v, loaded);
+      let lp = this.local.evaluate(e, tgt, v, loaded);
+      // the gentle-turn arc set (|k| b <= 0.35-0.5) is the normal choice; in a tight spot try the full skid-steer arc
+      // set at walking pace before declaring a block (v1.5.0: without this, the gentler arcs turned squeezes into
+      // 25 m reverse "unwinds")
+      if (!lp.ok) { const lp2 = this.local.evaluate(e, tgt, Math.min(v, 0.5), loaded, { kmax: loaded ? 0.11 : 0.2 }); if (lp2.ok) { lp = lp2; v = Math.min(v, 0.5); } }
       if (!lp.ok) {
         this.stop();
         const firstBlock = !blockedT;
@@ -649,9 +720,8 @@ export class Autonomy {
         yield; continue;
       }
       blockedT = 0;
-      // stopping-distance governor: be able to stop (0.3 m/s^2, 1/6 g traction) 3 m short of the hazard
-      // Two stopping-distance limits (0.3 m/s^2 braking in 1/6 g): stop 3 m short of any known hazard,
-      // and never outrun the mapped ground - unseen terrain can hide a crater rim (negative obstacle)
+      // Two stopping-distance limits (braking at `dec` below, the same value the dynamics instruments use): stop 3 m
+      // short of any known hazard, and never outrun the mapped ground - unseen terrain can hide a crater rim
       const dec = loaded ? 0.2 : 0.6; // loaded: under the ~0.4 m/s^2 nose-over limit of the passive pitch (CHANGES.md §14)
       let vCmd = Math.min(v, Math.max(0.3, Math.sqrt(2 * dec * Math.max(0, lp.freeDist - 3))));
       vCmd = Math.min(vCmd, Math.max(0.3, Math.sqrt(2 * dec * Math.max(0, lp.knownDist - 1.5))));
@@ -659,6 +729,10 @@ export class Autonomy {
         const mgn = R.tilt.marginF ?? R.tilt.margin, tiltDeg = Math.max(Math.abs(R.tilt.pitch), Math.abs(R.tilt.roll)) * 180 / Math.PI;
         const aOK = MOON.g * Math.tan(Math.min(60, Math.max(0.5, mgn - 9)) * DEG);
         vCmd = Math.min(vCmd, Math.max(0.35, Math.sqrt(aOK / Math.max(Math.abs(lp.k), 0.004))));
+        // ride comfort / no skid in curves (v1.5.0): lateral acceleration <= 0.3 m/s^2 empty, 0.15 loaded (a skid-steer
+        // turn scrubs the tyres sideways; slower = less scrub), and slow into a bend in proportion to the heading change
+        vCmd = Math.min(vCmd, Math.max(0.5, Math.sqrt((loaded ? 0.15 : 0.3) / Math.max(Math.abs(lp.k), 0.002))));
+        vCmd = Math.min(vCmd, Math.max(0.6, vCmd * (0.35 + 0.65 * Math.max(0, Math.cos(headErr)))));
         if (loaded) {
           // ground slope under the footprint from the map, not the body attitude: braking pitches the loaded body
           // forward (passive pitch), and slowing on that pitch braked it further into a nose-over (CHANGES.md §14)
@@ -669,7 +743,7 @@ export class Autonomy {
         }
       }
       // turbo (300 rpm) is only released on a straight, long, mapped, obstacle-free stretch
-      R.turboOk = !loaded && !this.pathTight && Math.abs(lp.k) < 0.012 && lp.freeDist > 45 && lp.knownDist > 40 && dGoal > 50;
+      R.turboOk = !loaded && !this.pathTight && Math.abs(lp.k) < 0.012 && lp.freeDist >= lp.horizon - 1 && lp.knownDist > 25 && dGoal > 50;
       this.cmd(vCmd, 0, vCmd * lp.k);
       this.detail = `${R.rpm.proto.toFixed(0)} rpm ${R.rpm.tier} | ${this.pathSource} | ${dGoal.toFixed(0)} m to go | v ${vCmd.toFixed(2)} m/s${lp.knownDist < 6 ? ' (creeping: unmapped ground ahead)' : ''} | ${Math.abs(lp.k) < 0.004 ? "straight" : `turn ${lp.k > 0 ? "L" : "R"} R=${Math.abs(1 / lp.k).toFixed(0)} m`}`;
       // stuck detection (embedding / slip / hidden obstacle)
@@ -723,7 +797,7 @@ export class Autonomy {
       }
       acc += L;
     }
-    return clamp(v, 0, loaded ? 2.4 : 3.4);
+    return clamp(v, 0, loaded ? 2.4 : 5.0); // (empty was 3.4; v is already capped by speedCap and the governors)
   }
   // Move the estimate along the path by v*h and the true body by the same body-frame motion (so the SLAM frame
   // offset is preserved), feeding the odometry the SLAM filter integrates in Sim.warpStep.
@@ -985,7 +1059,9 @@ export class Autonomy {
       const res = R.clampClose();
       if (!res.ok) { this.log(`Clamp attempt ${attempt} refused: ${res.why}`, 'warn'); yield* waitRide(this, RD.kneel, 'kneeling'); yield* this.backUp(-aft + ROVER.frame.halfLen + 4); continue; }
       while (R.lift.clamp === 'closing') { this.detail = `ring jaws closing ${(R.lift.clampT * 100).toFixed(0)}%  (lugs ${lifted.toFixed(2)} m above the notches)`; yield; }
-      if (R.lift.clamp !== 'closed') { this.log(`Clamp attempt ${attempt} failed: ${R.lift.msg}`, 'warn'); while (R.lift.clamp === 'opening') yield; continue; }
+      // (was: retried straight away with the module still riding unclamped on the raised saddles, so the next attempt's
+      // approach drive carried it off its stand. Set it back down and back out first, like the other failure paths.)
+      if (R.lift.clamp !== 'closed') { this.log(`Clamp attempt ${attempt} failed: ${R.lift.msg}`, 'warn'); while (R.lift.clamp === 'opening') yield; yield* waitRide(this, RD.kneel, 'kneeling'); yield* this.backUp(-aft + ROVER.frame.halfLen + 4); continue; }
       yield* this.wait(0.5, 'verifying load path');
       c.state = 'held';
       // the module is now part of the vehicle: forget its footprint in the terrain map
