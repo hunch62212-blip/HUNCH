@@ -653,3 +653,11 @@ Judge/space-realism notes (not changed in code): SCOUT-1 renders as the printed 
 metal-link tracks (rubber is brittle in lunar cold). Top speed 5.0 m/s empty is at the edge of crewed rover practice
 (Apollo LRV 18 km/h peak); the rocker-bogie layout is normally a low-speed design and the per-wheel struts are the
 mitigation. Prototype BOM parts (Raspberry Pi, Arduino) are Earth-demo stand-ins per the HUNCH "Suggestions" section.
+
+Open, M6 full cycle with three cargo (`node tests/autonomy.mjs cycle 24000`, 2026-11-12). Not passing. Run 1: aborted at 57 min on the
+empty survey drive back to the pad ("no progress toward survey"). Run 2 (different ring-camera noise stream): survey fine,
+CM-40A delivered at 128 min, CP-36C picked up, then at 206 min 75 m from PORT-3 on the loaded leg the steering-authority
+check stopped the mission ("yaw rate < 25 % of command for 15 s"), one of three delivered. With the pod rack removed the
+survey drive completed. The failures are navigation / traction events on the long traverse that depend on the noise stream
+(the same area as the 14,999 s two-cargo run's box-in unwinds), not on docking: all three cargo types dock in their own tests.
+The 24,000 s limit in `tests/run-all.mjs` is therefore a guess that has not yet been met by a passing run.
