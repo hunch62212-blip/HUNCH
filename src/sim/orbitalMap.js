@@ -108,6 +108,15 @@ export function matchToDEM(slam, dem, cx, cz, opts = {}) {
     const c = ncc(cx0 + ox, cz0 + oz); if (c > best.c) best = { c, x: cx0 + ox, z: cz0 + oz };
   }
   const minC = opts.minNcc ?? 0.8, minGap = opts.minGap ?? 0.03;
-  const ok = best.c > minC && best.c - second > minGap;
-  return { ok, dx: best.x, dz: best.z, ncc: best.c, second, relief, n, why: ok ? '' : best.c <= minC ? 'weak match' : 'ambiguous match' };
+  const gapReq = best.c > 0.88 ? Math.min(minGap, 0.015) : minGap;
+  const ok = best.c > minC && best.c - second > gapReq;
+  let sdy = 0, ndy = 0;
+  if (ok) {
+    for (let i = 0; i < n; i++) {
+      const v = dem.sample(cx + px[i] + best.x, cz + pz[i] + best.z);
+      if (v === v) { sdy += v - ph[i]; ndy++; }
+    }
+  }
+  const dy = ndy ? sdy / ndy : 0;
+  return { ok, dx: best.x, dz: best.z, dy, ncc: best.c, second, relief, n, why: ok ? '' : best.c <= minC ? 'weak match' : 'ambiguous match' };
 }

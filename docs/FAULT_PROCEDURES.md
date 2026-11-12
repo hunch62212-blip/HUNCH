@@ -21,9 +21,9 @@ Working height is with the rover knelt (ride -0.65 m).
 | Bay MC-R - starboard motor controllers | starboard tub wall, between the front and middle wheels | side door, 1.6 x 1.0 m, 4 quarter-turn fasteners | 1.25 m |
 | Bay BT-L - battery strings 1-2 | port tub wall, between the middle and rear wheels | side door; string drawers roll out on rails onto the dock exchange cart | 1.05 m |
 | Bay BT-R - battery strings 3-4 | starboard tub wall, between the middle and rear wheels | side door; string drawers roll out on rails onto the dock exchange cart | 1.05 m |
-| Sensor bar | front of the avionics pod (LiDAR, camera, sun sensor heads) | the bar pivots forward and down on a service hinge (pin release, gas strut) to 1.6 m; heads on kinematic quick-release mounts, one connector each | 1.60 m (service position) |
-| Radiators | vertical louvered panels under the port and starboard deck edges | louver actuator boxes at the lower front corner of each panel, 2 fasteners | 2.00 m (service position) |
-| Cradle | ring-clamp jaw drives and load cells at the two V-saddles | module off: from the fold-out deck walkway (rear ladder); load cells sit in the saddle feet, jaw drives are dock-gantry work | 1.50 m (service position) |
+| Sensor bar | front of the avionics pod (LiDAR, camera, sun sensor heads) | the bar pivots forward and down on a service hinge (titanium torsion spring + positive lock pin, no freezing gas struts) to 1.6 m; heads on kinematic quick-release mounts, one connector each | 1.60 m (service position) |
+| Radiators | zenith-shielded / louvered panels paired with OSR & sunshades on the tub | louver actuator boxes at the lower front corner of each panel, 2 fasteners | 2.00 m (service position) |
+| Cradle | ring-clamp jaw drives and load cells at the two V-saddles | module off on dock service gantry only (no 4.6 m open EVA ladder): load cells sit in the saddle feet, jaw drives are gantry-accessed | 1.50 m (service position) |
 | Wheel end | hub of each wheel (motor, gearbox, spring brake, resolver, declutch) | strut lifts the corner clear (3-legged stance); 12-bolt hub flange | 0.41 m |
 | Belly | dock charge coupler under the tub centre | reached from the dock service pit | 0.35 m |
 
@@ -106,7 +106,7 @@ lamp on each door, and a door interlock that opens the bay's solid-state breaker
 * **Cause:** dust on the hub radiator fins or a cracked thermal strap.
 * **Unit and location:** WHL (Wheel-end assembly (hub motor, planetary gearbox, spring brake, resolver, declutch)); Wheel end, hub of each wheel (motor, gearbox, spring brake, resolver, declutch).
 * **Sensors:** winding thermistor (each hub); comparison with the other 5 hubs.
-* **Detection rule:** winding > 40 C and > 20 C above the median of the other hubs, for 10 s.
+* **Detection rule:** winding > 40 C, > 20 C above the median of the other hubs and not cooling, for 10 s.
 * **Automatic response:** autonomy speed derated 30 % to cut copper loss; existing torque derate above 110 C still applies.
 * **Operator:** Prefer flat routes; rest 20 min if the winding passes 100 C.
 * **Operator:** Clean fins / replace strap (field 30 min) or wheel end at the dock.
@@ -429,7 +429,7 @@ lamp on each door, and a door interlock that opens the bay's solid-state breaker
 
 * **Severity / effect:** caution / physics. MTBF 60,000 h per unit.
 * **Cause:** dust in the blade pivots or actuator failure.
-* **Unit and location:** LOUV (Radiator louver actuator); Radiators, vertical louvered panels under the port and starboard deck edges.
+* **Unit and location:** LOUV (Radiator louver actuator); Radiators, zenith-shielded / louvered panels paired with OSR & sunshades on the tub.
 * **Sensors:** louver position encoder; vault thermistors; periodic louver-cycle BIT (10 min).
 * **Detection rule:** position differs from the thermostat command by > 0.25 for 20 s, or the BIT wiggle shows no motion. Latent until the unit is used or the periodic BIT runs.
 * **Automatic response:** the other radiator carries the load (each side sized for the full day load). Both stuck closed with the vault > 45 C: park and shed loads.

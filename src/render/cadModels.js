@@ -64,20 +64,29 @@ function mergeClose(g) {
 // slot cut in its top; for the sim it is replaced by a full shell that can turn into an X-ray.
 export function cargoModuleCAD(T) {
   const root = new THREE.Group();
+  const len = T.length || 12.19;
   const shellMat = new THREE.MeshStandardMaterial({ color: 0xd8d9d4, roughness: 0.55, metalness: 0.08, side: THREE.DoubleSide, transparent: true, opacity: 1 });
-  const shell = new THREE.Mesh(new THREE.CylinderGeometry(T.radius, T.radius, 12.19, 64, 1, true), shellMat);
+  const shell = new THREE.Mesh(new THREE.CylinderGeometry(T.radius, T.radius, len, 64, 1, true), shellMat);
   shell.rotation.z = Math.PI / 2; shell.castShadow = shell.receiveShadow = true;
   root.add(shell);
   const goldMat = new THREE.MeshStandardMaterial({ color: 0xc8921e, roughness: 0.3, metalness: 0.85, transparent: true, opacity: 1 });
-  for (const x of [-4.6, -1.5, 1.5, 4.6]) {
-    const band = new THREE.Mesh(new THREE.CylinderGeometry(T.radius + 0.015, T.radius + 0.015, 0.45, 64, 1, true), goldMat);
+  const bands = T.bands || [-1.3855, 1.3855];
+  const bandW = T.bandW || 0.815;
+  for (const x of bands) {
+    const band = new THREE.Mesh(new THREE.CylinderGeometry(T.radius + 0.015, T.radius + 0.015, bandW, 64, 1, true), goldMat);
     band.rotation.z = Math.PI / 2; band.position.x = x; root.add(band);
   }
-  const interior = new THREE.Group(); interior.rotation.x = -Math.PI / 2; root.add(interior); // CAD is Z-up
+  // LLASO OBJ is +Z-up with radius 1.5374 m and bulkhead length 12.79 m: scale radially to T.radius (~2.59x) and fit inside barrel
+  const radScale = T.radius / 1.5374;
+  const lenScale = len / 12.20;
+  const interior = new THREE.Group();
+  interior.rotation.x = -Math.PI / 2;
+  interior.scale.set(lenScale, radScale, radScale);
+  root.add(interior);
   root.userData = { shellMat, goldMat, interior, xray: false };
   loadOBJ('/models/', 'llaso_lunar_cargo_container').then((obj) => {
     const g = obj.clone(true);
-    g.traverse((o) => { if (o.isMesh && /HullOuter/i.test(o.name)) o.visible = false; });
+    g.traverse((o) => { if (o.isMesh && /HullOuter|HullBulkhead/i.test(o.name)) o.visible = false; });
     interior.add(g);
   }).catch((e) => console.warn('container CAD not loaded', e));
   root.userData.setXray = (on) => {

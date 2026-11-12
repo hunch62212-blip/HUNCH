@@ -25,7 +25,7 @@
   var C = {
     GATE_ALONG: 3.8,        // stand-off point outside the door where the rover squares up
     PARK_ALONG: -1.538,     // rover v4 centre when parked: nose (0.290 ahead of centre) 5 mm off the hard stop at -1.833
-    PAD_OFFSET: -0.19,      // charge pad on the avionics pod, 0.19 m ahead of rover centre (rover local x = +0.19)
+    PAD_OFFSET: 0.0,        // belly blind-mate charge receptacle centered under tub (clear of carried cargo)
     PRECAP_ALONG: -1.138,   // pre-capture check plane (0.40 m before park)
     PRECAP_LAT: 0.012,      // m   — must be inside before the clamp arms may close (jaw closes to 8 mm off the wheel modules)
     PRECAP_PSI: 0.0175,     // rad (1 deg; at 3 deg the corner wheel swings out 24 mm)
@@ -372,7 +372,8 @@
   function build(THREE, dockGroup, m) {
     H = { THREE: THREE, group: dockGroup, mats: m };
     var white = new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.55, metalness: 0.05 });
-    var rubber = new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.9 });
+    var sealMat = new THREE.MeshStandardMaterial({ color: 0x3b2f2f, roughness: 0.72, metalness: 0.15 }); // sintered bronze / Vespel cryogenic grip pad & strap
+    var bellowsBootMat = new THREE.MeshStandardMaterial({ color: 0x9ca3af, metalness: 0.88, roughness: 0.35 }); // welded 321SS metallic bellows boot
     var silver = new THREE.MeshStandardMaterial({ color: 0xcbd5e1, metalness: 0.9, roughness: 0.25 });
     var gold = new THREE.MeshStandardMaterial({ color: 0xd4a017, metalness: 0.85, roughness: 0.38, emissive: 0x2a1c00, emissiveIntensity: 0.3 });
     var led = function (c) { return new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 1.6 }); };
@@ -386,7 +387,7 @@
     [-1, 1].forEach(function (s) {
       var grp = new THREE.Group(); G.add(grp);
       var bar = new THREE.Mesh(new THREE.BoxGeometry(BAR_L, 0.13, 0.035), m.bayTrim);
-      var padM = new THREE.Mesh(new THREE.BoxGeometry(BAR_L - 0.04, 0.10, 0.012), rubber);
+      var padM = new THREE.Mesh(new THREE.BoxGeometry(BAR_L - 0.04, 0.10, 0.012), sealMat);
       var lead = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.13, 0.035), m.hazard);
       bar.castShadow = true; lead.castShadow = true;
       grp.add(bar, padM, lead);
@@ -413,43 +414,43 @@
       H.arms.push({ s: s, grp: grp, bar: bar, pad: padM, lead: lead, acts: acts, screw: screw, nut: nut, rodL: ROD_L });
     });
 
-    /* floating magnetic coupler: a 3-stage scissor lift hung from the roof lowers the head onto the rover pad.
-       (The old single column was stretched with scale.y, which read as rubber, not hardware.) */
+    /* floating magnetic belly coupler: floor-recessed 2-stage scissor lift rises UP to meet the rover's
+       belly blind-mate receptacle (GEOM.pad y=0.058), keeping the overhead cargo bay completely clear. */
     var cg = new THREE.Group(); G.add(cg);
     H.coupler = cg;
     var stowX = C.PARK_ALONG + C.PAD_OFFSET;
-    var mount = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.05, 0.22), m.bayDark); mount.position.set(stowX, 1.425, 0); cg.add(mount);
-    var rail2 = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.015, 0.03), silver); rail2.position.set(stowX, 1.395, 0); cg.add(rail2);
-    var lmot = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.09, 14), m.bayDark); lmot.rotation.z = Math.PI / 2; lmot.position.set(stowX + 0.27, 1.41, 0); cg.add(lmot);
-    H.scissor = { rods: [], pins: [], L: 0.40, n: 3, top: 1.395, x0: stowX };
+    var mount = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.02, 0.26), m.bayDark); mount.position.set(stowX, 0.015, 0); cg.add(mount);
+    var rail2 = new THREE.Mesh(new THREE.BoxGeometry(0.40, 0.010, 0.03), silver); rail2.position.set(stowX, 0.025, 0); cg.add(rail2);
+    var lmot = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.08, 14), m.bayDark); lmot.rotation.z = Math.PI / 2; lmot.position.set(stowX + 0.24, 0.028, 0); cg.add(lmot);
+    H.scissor = { rods: [], pins: [], L: 0.18, n: 2, bot: 0.025, x0: stowX };
     var rodMat = m.bayTrim, pinMat = silver;
-    for (var st = 0; st < 3; st++) {
+    for (var st = 0; st < 2; st++) {
       [-1, 1].forEach(function (side) {                      // two rod pairs, one each side of the head
         [-1, 1].forEach(function (diag) {
-          var r = new THREE.Mesh(new THREE.BoxGeometry(0.40, 0.022, 0.012), rodMat); r.castShadow = true; cg.add(r);
+          var r = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.016, 0.010), rodMat); r.castShadow = true; cg.add(r);
           H.scissor.rods.push({ mesh: r, st: st, side: side, diag: diag });
         });
-        var pin = new THREE.Mesh(new THREE.CylinderGeometry(0.009, 0.009, 0.15, 8), pinMat); pin.rotation.x = Math.PI / 2; cg.add(pin);
+        var pin = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.007, 0.15, 8), pinMat); pin.rotation.x = Math.PI / 2; cg.add(pin);
         H.scissor.pins.push({ mesh: pin, st: st, side: side });
       });
     }
     H.couplerHead = new THREE.Group(); cg.add(H.couplerHead);
-    var body = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.05, 0.26), new THREE.MeshStandardMaterial({ color: 0x1f2937, metalness: 0.5, roughness: 0.35 }));
+    var body = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.036, 0.24), new THREE.MeshStandardMaterial({ color: 0x1f2937, metalness: 0.5, roughness: 0.35 }));
     body.castShadow = true;
     H.couplerHead.add(body);
-    var skirt = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.012, 0.28), m.bayTrim); skirt.position.y = 0.03; H.couplerHead.add(skirt);
+    var skirt = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.010, 0.26), m.bayTrim); skirt.position.y = -0.022; H.couplerHead.add(skirt);
     H.magRings = [];
-    [-0.105, 0.105].forEach(function (px) {
-      var mag = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.02, 20), silver); mag.position.set(px, -0.032, 0); H.couplerHead.add(mag);
+    [-0.095, 0.095].forEach(function (px) {
+      var mag = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.026, 0.016, 20), silver); mag.position.set(px, 0.022, 0); H.couplerHead.add(mag);
       var ringMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x38bdf8, emissiveIntensity: 0.4 });
-      var ring = new THREE.Mesh(new THREE.TorusGeometry(0.034, 0.004, 8, 24), ringMat); ring.rotation.x = Math.PI / 2; ring.position.set(px, -0.041, 0); H.couplerHead.add(ring);
+      var ring = new THREE.Mesh(new THREE.TorusGeometry(0.030, 0.004, 8, 24), ringMat); ring.rotation.x = Math.PI / 2; ring.position.set(px, 0.028, 0); H.couplerHead.add(ring);
       H.magRings.push(ringMat);
     });
     H.pogos = [];
-    [[-0.04, -0.05], [0.04, -0.05], [-0.04, 0.05], [0.04, 0.05]].forEach(function (pp) {
-      var pogo = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.03, 8), m.copper); pogo.position.set(pp[0], -0.04, pp[1]); H.couplerHead.add(pogo); H.pogos.push(pogo);
+    [[-0.04, -0.045], [0.04, -0.045], [-0.04, 0.045], [0.04, 0.045]].forEach(function (pp) {
+      var pogo = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.007, 0.024, 8), m.copper); pogo.position.set(pp[0], 0.026, pp[1]); H.couplerHead.add(pogo); H.pogos.push(pogo);
     });
-    H.couplerLed = new THREE.Mesh(new THREE.SphereGeometry(0.012, 8, 8), led(0xf59e0b)); H.couplerLed.position.set(0, 0.03, 0.13); H.couplerHead.add(H.couplerLed);
+    H.couplerLed = new THREE.Mesh(new THREE.SphereGeometry(0.010, 8, 8), led(0xf59e0b)); H.couplerLed.position.set(0, 0.018, 0.125); H.couplerHead.add(H.couplerLed);
     cg.position.set(0, 0, 0);   // head/scissor positions are set in dock-local coordinates in update()
 
     /* sensors */
@@ -477,7 +478,7 @@
     var BX = -2.26, BZ = 1.05, FLOOR = 0.08;
     var foot = new THREE.Mesh(new THREE.BoxGeometry(0.40, 0.04, 0.34), m.bayDark); foot.position.set(BX, FLOOR + 0.02, BZ); G.add(foot);
     var box = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.30, 0.30), gold); box.position.set(BX, FLOOR + 0.04 + 0.15, BZ); box.castShadow = true; G.add(box); H.box = box;
-    var strap = new THREE.Mesh(new THREE.BoxGeometry(0.37, 0.025, 0.31), rubber); strap.position.set(BX, FLOOR + 0.04 + 0.15, BZ); G.add(strap);
+    var strap = new THREE.Mesh(new THREE.BoxGeometry(0.37, 0.025, 0.31), m.bayDark); strap.position.set(BX, FLOOR + 0.04 + 0.15, BZ); G.add(strap);
     H.heaterGlow = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.14, 0.20), new THREE.MeshStandardMaterial({ color: 0x7c2d12, emissive: 0xf97316, emissiveIntensity: 0 }));
     H.heaterGlow.position.set(BX + 0.19, FLOOR + 0.04 + 0.15, BZ); G.add(H.heaterGlow);             // faces into the bay so the night heater glow is visible
     var boxTop = FLOOR + 0.04 + 0.30, RAD_Y = 1.63;
@@ -486,7 +487,7 @@
       var pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.010, 0.010, len, 10), silver); pipe.position.set(BX + dx, boxTop + len / 2, BZ); G.add(pipe);
       var clampB = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.02, 0.03), m.bayDark); clampB.position.set(BX + dx, 0.95, BZ); G.add(clampB);
     });
-    var boot = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.03, 16), rubber); boot.position.set(BX, 1.535, BZ); G.add(boot);   // roof penetration boot
+    var boot = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.03, 16), bellowsBootMat); boot.position.set(BX, 1.535, BZ); G.add(boot);   // welded 321SS roof penetration bellows
     var rad = new THREE.Group(); rad.position.set(BX, RAD_Y, BZ); G.add(rad); H.rad = rad;
     var panel = new THREE.Mesh(new THREE.BoxGeometry(0.40, 0.02, 0.40), white); rad.add(panel);
     [-0.12, 0, 0.12].forEach(function (zz) { var hp = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.40, 8), silver); hp.rotation.x = Math.PI / 2; hp.position.set(0, 0.016, zz); rad.add(hp); });
@@ -596,12 +597,12 @@
   }
 
   /* ---------------- airlock (replaces the sectional door) ----------------
-   * Outer pressure door at x 2.15 (the old door plane), inner pressure door at x 0.10, purge vestibule between.
-   * Each door is two bi-parting leaves on a belt drive with EPDM seals. Interlock: a door only opens when the other
+   * Outer pressure door at x 2.15 (the old door plane), inner pressure door at x 0.10, closed-loop dust-lock vestibule between.
+   * Each door is two bi-parting leaves on a belt drive with spring-energized PTFE / gold-plated Inconel C-seals. Interlock: a door only opens when the other
    * is shut and the vestibule pressure matches its side (0 kPa = lunar vacuum outside, P_BAY = dry N2 in the bay).
    * The airlock runs itself from the rover's position (dock-local `along`) and travel intent ('in' / 'out' / 'idle'):
-   *   in : outer opens → rover stops at LOCK_X → outer seals → N2 purge → pressurise → inner opens
-   *   out: inner opens → rover stops at LOCK_X → inner seals → vent → outer opens
+   *   in : outer opens → rover stops at LOCK_X → outer seals → closed-loop dry N2 dust-knockdown cycle → equalise → inner opens
+   *   out: inner opens → rover stops at LOCK_X → inner seals → cryosorption pumpdown recovery → outer opens
    * limit(along, dir) is the speed cap (m/s) a driver must respect so the rover never runs into a shut door. */
   var AL = { X_IN: 0.10, X_OUTER: 2.15, LOCK_X: 1.12, P_BAY: 10.0, OPEN_Z: 0.70, LEAF_W: 0.74, LEAF_TRAVEL: 0.76, DOOR_TOP: 1.12, PURGE_S: 2.6, PRESS_S: 2.8, HALF: 0.78 };
   function buildAirlock(THREE, G) {
@@ -621,7 +622,7 @@
       var r = { leaves: [], open: 0, g: g }, HB = 1.45 - 0.08, OZ = AL.OPEN_Z, TOP = AL.DOOR_TOP;
       [-1, 1].forEach(function (s) {
         box(0.10, HB, 1.62 - OZ, M.panel, X, 0.08 + HB / 2, s * (OZ + (1.62 - OZ) / 2), g);                 // pocket walls
-        box(0.12, TOP - 0.08, 0.05, M.seal, X, 0.08 + (TOP - 0.08) / 2, s * (OZ + 0.02), g);                // EPDM jamb seals
+        box(0.12, TOP - 0.08, 0.05, M.seal, X, 0.08 + (TOP - 0.08) / 2, s * (OZ + 0.02), g);                // spring-energized PTFE / Inconel C jamb seals
         [-1, 1].forEach(function (f) { box(0.02, HB, 0.05, M.mid, X + f * 0.06, 0.08 + HB / 2, s * 1.22, g); });
       });
       box(0.10, 1.45 - TOP, 2 * OZ, M.panel, X, (TOP + 1.45) / 2, 0, g);                                    // header
@@ -700,18 +701,18 @@
         nozzles.push({ p: new THREE.Vector3(ax, 0.96, nz), d: new THREE.Vector3(0, -1, 0) });
       });
     });
-    cyl(0.12, 0.86, M.trim, LX, 0.08 + 0.43, -1.36, G, 24);                                                 // N2 purge tank
+    cyl(0.12, 0.86, M.trim, LX, 0.08 + 0.43, -1.36, G, 24);                                                 // closed-loop dry N2 surge & dust cyclone tank
     cyl(0.123, 0.05, M.mid, LX, 0.75, -1.36, G, 24); cyl(0.04, 0.06, M.dark, LX, 0.97, -1.36, G, 12);
-    box(0.38, 0.28, 0.30, M.dark, LX, 0.08 + 0.14, 1.34, G);                                                // vacuum pump (dust + gas recovery)
-    var fan = cyl(0.09, 0.012, M.mid, LX, 0.08 + 0.14, 1.185, G, 24); fan.rotation.x = Math.PI / 2;
-    for (var fr = -0.12; fr <= 0.121; fr += 0.06) box(0.30, 0.012, 0.02, M.mid, LX, 0.367, 1.34 + fr, G);  // cooling fins
-    box(0.05, 0.05, 0.05, M.trim, LX - 0.12, 0.385, 1.22, G); box(0.03, 0.03, 0.30, M.seal, LX - 0.12, 0.385, 1.06, G);   // suction hose
+    box(0.38, 0.28, 0.30, M.dark, LX, 0.08 + 0.14, 1.34, G);                                                // scroll + cryosorption recovery pump (dust + N2 recapture)
+    box(0.24, 0.20, 0.014, M.trim, LX, 0.08 + 0.14, 1.185, G);                                              // radiative cold-plate header (no vacuum cooling fan)
+    for (var fr = -0.12; fr <= 0.121; fr += 0.06) box(0.30, 0.012, 0.02, M.mid, LX, 0.367, 1.34 + fr, G);  // conduction fins to radiator bus
+    box(0.05, 0.05, 0.05, M.trim, LX - 0.12, 0.385, 1.22, G); box(0.03, 0.03, 0.30, M.seal, LX - 0.12, 0.385, 1.06, G);   // recovery manifold
     box(0.14, 0.02, 0.06, new THREE.MeshStandardMaterial({ color: 0x30d158, emissive: 0x30d158, emissiveIntensity: 0.6 }), LX + 0.1, 0.30, 1.188, G);
-    box(0.24, 0.30, 0.07, M.mid, LX + 0.5, 0.95, -1.565, G);                                                // equalisation valve box
+    box(0.24, 0.30, 0.07, M.mid, LX + 0.5, 0.95, -1.565, G);                                                // equalisation & reclaim manifold box
     var gauge = cyl(0.07, 0.012, std(0xeef1f4, { metalness: 0, roughness: 0.5 }), LX + 0.5, 0.97, -1.525, G, 28); gauge.rotation.x = Math.PI / 2;
     var needle = new THREE.Group(); needle.position.set(LX + 0.5, 0.97, -1.517); G.add(needle);
     box(0.008, 0.055, 0.004, std(0xff453a, {}), 0, 0.026, 0, needle);
-    box(0.03, 0.42, 0.03, M.dark, LX + 0.5, 1.24, -1.57, G);                                                // vent line up through the roof
+    box(0.03, 0.42, 0.03, M.dark, LX + 0.5, 1.24, -1.57, G);                                                // closed-loop return line to surge header
     cyl(0.03, 0.24, M.dark, LX + 0.5, 1.65, -1.4, G); cyl(0.06, 0.02, M.dark, LX + 0.5, 1.78, -1.4, G);
     var beacon = new THREE.Group(); beacon.position.set(LX, 1.40, 0); G.add(beacon);                       // amber cycle beacon + interior lamp
     box(0.10, 0.04, 0.10, M.dark, 0, 0.03, 0, beacon);
@@ -774,7 +775,7 @@
       } else if (z === 'OUT' && A.inner < 0.002 && A.outer < 0.002) needP = 0;   // idle with the rover outside: leave it vented
       if (forceO) wantO = 1;
       if (forceI) wantI = 1;
-      // pressure: only moves with both doors shut. An inbound pressurise is preceded by the N2 dust purge.
+      // pressure: only moves with both doors shut. Inbound flow uses closed-loop N2 dust recirculation; outbound reclaims gas via cryosorption before outer opening.
       var sealed = A.outer < 0.002 && A.inner < 0.002, purge = false;
       if (A.outer > 0.02) A.purged = false;
       A.ph = '';
@@ -784,7 +785,7 @@
           if (A.purgeT > AL.PURGE_S) { A.purged = true; A.purgeT = 0; }
         } else {
           A.p += clamp(needP - A.p, -dt * AL.P_BAY / AL.PRESS_S, dt * AL.P_BAY / AL.PRESS_S);
-          A.ph = needP > A.p ? 'PRESS' : 'VENT';
+          A.ph = needP > A.p ? 'PRESS' : 'RECLAIM';
         }
       } else if ((wantO && A.outer < 0.002 && A.inner > 0.002) || (wantI && A.inner < 0.002 && A.outer > 0.002)) A.ph = 'SEAL';
       var okO = A.inner < 0.002 && A.p < 0.05, okI = A.outer < 0.002 && A.p > AL.P_BAY - 0.05;
@@ -820,7 +821,7 @@
     function stopCap(d) { return d <= 0.008 ? 0 : Math.max(0.03, Math.min(0.6, 0.9 * d)); }
     A.snap = function (outer, inner, p) { od.snap(outer); id.snap(inner); A.outer = outer; A.inner = inner; A.p = p; A.ph = ''; A.purged = false; A.purgeT = 0; };
     A.label = function () {
-      return ({ SEAL: 'sealing', PURGE: 'N₂ purge', PRESS: 'pressurising', VENT: 'venting' }[A.ph] ||
+      return ({ SEAL: 'sealing', PURGE: 'N₂ dust-lock', PRESS: 'pressurising', RECLAIM: 'N₂ reclaim' }[A.ph] ||
         (A.inner > 0.02 ? 'open to bay' : (A.outer > 0.02 ? 'open to surface' : 'sealed'))) + ' · ' + A.p.toFixed(1) + ' kPa';
     };
     return A;
@@ -849,7 +850,7 @@
       H.armAct.set(S.armTarget); H.cplAct.set(S.couplerTarget);
       S.arm = clamp(H.armAct.step(dt), 0, 1); S.coupler = clamp(H.cplAct.step(dt), 0, 1);
       H.lastArm = S.arm; H.lastCpl = S.coupler;
-      // contact transients: rubber pads squash when the jaws land, pogo pins compress when the head seats
+      // contact transients: Vespel / sintered-bronze pads seat when jaws close, compliant pogo pins compress upward against belly receptacle
       if (armWas > 0.004 && S.arm <= 0.004) H.armBounce.v = -0.06;
       if (cplWas < 0.996 && S.coupler >= 0.996) H.seat.v = -0.09;
       H.armBounce.step(dt); H.seat.step(dt);
@@ -876,29 +877,30 @@
       a.screw.rotation.y += (H.armAct ? H.armAct.vel : 0) * 22 * dt;    // screw spin follows jaw speed
     });
 
-    // coupler: stowed under the roof; when lowering it tracks the pad (float compliance)
-    var stowY = 1.30, stowX = C.PARK_ALONG + C.PAD_OFFSET;
-    var tx = stowX, ty = stowY, tz = 0;
+    // belly coupler: stowed flush in the floor pit; when deploying it rises onto the rover belly receptacle (float compliance)
+    var stowY = 0.055, stowX = C.PARK_ALONG + C.PAD_OFFSET;
+    var tx = stowX, ty = 0.125, tz = 0;
     if (padObj) {
       if (!_tmp) _tmp = new THREE.Vector3();
       padObj.getWorldPosition(_tmp); H.group.worldToLocal(_tmp);
-      tx = _tmp.x; tz = _tmp.z; ty = _tmp.y + 0.062;
+      tx = _tmp.x; tz = _tmp.z; ty = _tmp.y - 0.032;
     }
     var f = S.coupler;                                       // already a smooth min-jerk profile
     var cl = MO ? MO.smoothstep(0.55, 1.0, f) : f;          // lateral float only engages near the pad (guide lips)
     var hx = stowX + (tx - stowX) * cl, hy = stowY + (ty - stowY) * f + seatDip, hz = tz * cl;
     H.couplerHead.position.set(hx, hy, hz);
-    // scissor stages share the drop equally; each stage is an X of two rods of fixed length
-    var sc = H.scissor, headTop = hy + 0.03, drop = Math.max(0.03, sc.top - headTop), hStage = drop / sc.n;
+    // scissor stages rise equally from floor pit; each stage is an X of two rods of fixed length
+    var sc = H.scissor, headBot = hy - 0.022, rise = Math.max(0.015, headBot - sc.bot);
+    var hStage = Math.min(sc.L * 0.92, rise / sc.n);
     var halfW = Math.sqrt(Math.max(1e-6, sc.L * sc.L - hStage * hStage)) / 2, ang = Math.atan2(hStage, 2 * halfW);
     sc.rods.forEach(function (r) {
-      var yMid = sc.top - (r.st + 0.5) * hStage;
+      var yMid = sc.bot + (r.st + 0.5) * hStage;
       var xMid = sc.x0 + (hx - sc.x0) * ((r.st + 0.5) / sc.n);
       r.mesh.position.set(xMid, yMid, hz * ((r.st + 0.5) / sc.n) + r.side * 0.075 + r.diag * 0.007);
       r.mesh.rotation.set(0, 0, r.diag * ang);
     });
     sc.pins.forEach(function (pn) {
-      var yMid = sc.top - (pn.st + 0.5) * hStage;
+      var yMid = sc.bot + (pn.st + 0.5) * hStage;
       pn.mesh.position.set(sc.x0 + (hx - sc.x0) * ((pn.st + 0.5) / sc.n), yMid, hz * ((pn.st + 0.5) / sc.n) + pn.side * 0.075);
     });
     // status LED: red stowed → amber seated → green breathing while charge current flows

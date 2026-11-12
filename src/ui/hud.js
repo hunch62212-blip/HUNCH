@@ -68,7 +68,7 @@ export class HUD {
   }
 
   template() {
-    const cargoOpts = this.sim.cargo.map((c, i) => `<option value="${i === 0 ? 'A' : 'B'}">${c.id} · ${c.T.label}</option>`).join('');
+    const cargoOpts = this.sim.cargo.map((c, i) => `<option value="${c.id.slice(-1)}">${c.id} · ${c.T.label}</option>`).join('');
     return `
     <div id="topbar" class="panel">
       <div class="brand">AEGIS-V1<span class="brandx"> · LLASO-P2-XPORT-2026</span><small>Rocker-bogie skid-steer cargo carrier · lunar south-pole logistics</small></div>
@@ -199,7 +199,7 @@ export class HUD {
     <div id="overrideBanner" class="panel">OPERATOR OVERRIDE — autonomy paused · type "resume" or press the resume button</div>
     <div id="estopBanner" class="panel"><div class="big">E-STOP LATCHED</div><div style="margin-top:6px">Drive torque removed · spring brakes set · actuators locked</div><div class="small" style="margin-top:6px">Manual restart required: press <b>RESET</b>, then <b>START</b> (power-on self-test)</div></div>
     <div id="helpPanel" class="panel"><h3>Controls & commands <span class="tog" id="helpClose">✕</span></h3><div class="body">
-      <div><b>Driving (manual)</b><br><kbd>W</kbd>/<kbd>S</kbd> forward / reverse (hold)<br><kbd>A</kbd>/<kbd>D</kbd> steer (skid steer: curves while moving, slow point-turn when stopped and unloaded)<br><kbd>Space</kbd> brake · <kbd>Shift</kbd> slow / precise<br>Smart rpm picks 120 / 180 / 300 itself; hold full throttle straight on flat ground for TURBO<br>Gamepad: left stick drive/steer</div>
+      <div><b>Driving (manual)</b><br><kbd>W</kbd>/<kbd>S</kbd> forward / reverse (hold)<br><kbd>A</kbd>/<kbd>D</kbd> steer (skid steer: curves while moving, slow point-turn when stopped and unloaded)<br><kbd>Space</kbd> brake · <kbd>Shift</kbd> slow / precise<br>Smart rpm sets the limit itself, 120 to 280 (the reason is shown under Vehicle state); hold full throttle straight on flat ground for TURBO<br>Gamepad: left stick drive/steer</div>
       <div><b>Cargo handling</b><br><kbd>G</kbd> close / open ring jaws<br><kbd>R</kbd>/<kbd>F</kbd> ride height up / down (kneel under a module, rise to lift it)</div>
       <div><b>Safety</b><br><kbd>Esc</kbd> E-STOP (latching). Restart = RESET then START.<br>Touching the drive keys during a mission pauses autonomy (operator override).</div>
       <div><b>View</b><br><kbd>C</kbd> cycle camera · mouse drag orbit · wheel zoom<br><kbd>V</kbd> LiDAR overlay · <kbd>I</kbd> physics overlay + instruments · <kbd>T</kbd> thermal brain panel · <kbd>P</kbd> pause · <kbd>X</kbd> fast forward 50× · <kbd>H</kbd> this help<br><kbd>Enter</kbd> focus console · <kbd>↑</kbd> history</div>
@@ -457,7 +457,7 @@ export class HUD {
     const g = cv.getContext('2d'), W = cv.width, H = cv.height, T = this.sim.telemetry;
     g.clearRect(0, 0, W, H);
     g.fillStyle = 'rgba(255,255,255,0.03)'; g.fillRect(0, 0, W, H);
-    const lines = [[8, 'speed m/s', '#35d0ff', 0, 3.5], [11, 'tip margin°', '#3ddc84', 0, 50], [14, 'load kW', '#ffb020', 0, 20000], [12, 'SoC %', '#c58cff', 0, 100]];
+    const lines = [[8, 'speed m/s', '#35d0ff', 0, 5.5], [11, 'tip margin°', '#3ddc84', 0, 50], [14, 'load kW', '#ffb020', 0, 20000], [12, 'SoC %', '#c58cff', 0, 100]];
     g.font = '18px sans-serif';
     lines.forEach(([i, label, col, lo, hi], k) => {
       const s = T.series(i, 300);
@@ -519,7 +519,11 @@ export class HUD {
     mark(WORLD.pad.x, WORLD.pad.z, 'LANDER', '#c8d2de');
     for (const p of sim.ports) mark(p.x, p.z, p.name, '#3ddc84');
     for (const c of sim.cargo) { const g = A.cargoEst.get(c.id); if (g) mark(g.x, g.z, c.id, '#ffd23d'); }
-    if (sim.scout.enabled) { const p0 = sim.rover.pose(); mark(sim.scout.x - p0.x + e.x, sim.scout.z - p0.z + e.z, 'SCOUT-1', '#7dffb0'); }
+    if (sim.scout.enabled) {
+      const p0 = sim.rover.pose(), dy = e.yaw - p0.yaw, cy = Math.cos(dy), sy = Math.sin(dy);
+      const rx = sim.scout.x - p0.x, rz = sim.scout.z - p0.z;
+      mark(e.x + rx * cy + rz * sy, e.z - rx * sy + rz * cy, 'SCOUT-1', '#7dffb0');
+    }
     // LiDAR range
     ctx.strokeStyle = 'rgba(53,208,255,0.25)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(W / 2, H / 2, ROVER.lidar.range * z, 0, Math.PI * 2); ctx.stroke();
     // true pose ghost + estimated pose

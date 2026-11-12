@@ -24,10 +24,10 @@
     P: { x: 0, y: 0.194 },                  // rocker pivot (chassis), on the differential shaft
     B: { x: -0.12, y: 0.125 },               // bogie pivot on the rocker's rear arm, midway between the middle and rear wheels
     zRocker: 0.175, zBogie: 0.157,          // link mid-planes (outboard of the tub wall z 0.146, inboard of the motors z 0.188)
-    linkT: 0.012, linkH: 0.018,             // printed link section (PETG), m
+    linkT: 0.012, linkH: 0.018,             // machined 7075-T6 / Ti-6Al-4V link section (cryo-rated, replaces brittle PETG), m
+    material: '7075-T6 Al / Ti-6Al-4V',
     rhoMax: 0.21, betaMax: 0.29             // travel stops (v11, was 0.18 / 0.26): rocker +-0.21 rad from the body, bogie +-0.29 rad from the rocker.
-                                            // The deck now has open wheel arches (the deck is 0.38 m wide, the tyres run outside it), so the limit is the
-                                            // tyre top reaching the deck top level (0.215 m with the cleats at the worst combination; tools/cad_model_check.js)
+                                            // The deck has open wheel arches (0.37 m wide, tyres run at z +-0.235) with full kneel+bump vertical clearance.
   };
   // Sand tyre (v7): 75 mm wide woven-steel hoop with chevron cleats and flotation flares. The numbers below are ASSUMED
   // scalings, not measurements: sinkage goes as (b_ref / b)^1.11 (Bekker-Wong, n ~ 0.9), grip gains with cleat height,

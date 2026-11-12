@@ -30,8 +30,8 @@
       { id: 'S2', od: 0.021, wall: 0.0015, L: 0.268, y0: 0.016 },
       { id: 'S3', od: 0.016, wall: 0.0012, L: 0.262, y0: 0.022 }
     ],
-    collar: { od: 0.032, h: 0.014 },     // lock collar and PTFE bushing on the top of stage 1
-    bushingK: 2.0e6,                     // N/m, contact stiffness of one PTFE bushing (ASSUMED)
+    collar: { od: 0.032, h: 0.014 },     // lock collar and spring-loaded MoS2-filled PTFE / Vespel SP-3 bushing on stage 1
+    bushingK: 2.0e6,                     // N/m, preloaded cryo PEEK/MoS2-PTFE bushing contact stiffness (zero cold-flow lash, ASSUMED)
     minOverlapPerOD: 1.5,                // sliding-fit rule: engagement >= 1.5 x the inner tube's OD
     lidarBase: { h: 0.028, r: 0.032 },   // YDLIDAR X2L base sits on the top cap of stage 3
     lidarHeadY: 0.032,                   // head centre above the top of stage 3

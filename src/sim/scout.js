@@ -3,7 +3,7 @@
 // shared SLAM map, keeps separation from the big rover and reports status over the local network.
 import * as THREE from 'three';
 import { MOON } from './config.js';
-import { Q_TERRAIN } from './world.js';
+import { Q_SENSOR } from './world.js';
 import { gauss } from './sensors.js';
 
 export const SCOUT = {
@@ -29,7 +29,7 @@ export class Scout {
 
   groundAt(x, z) {
     const r = this.ray; r.origin.x = x; r.origin.y = 4000; r.origin.z = z; r.dir.x = 0; r.dir.y = -1; r.dir.z = 0;
-    const hit = this.sim.world.castRay(r, 8000, true, undefined, Q_TERRAIN, undefined, this.sim.rover.body);
+    const hit = this.sim.world.castRay(r, 8000, true, undefined, Q_SENSOR, undefined, this.sim.rover.body);
     return hit ? 4000 - hit.timeOfImpact : null;
   }
 
@@ -66,14 +66,15 @@ export class Scout {
   target() {
     const A = this.sim.autonomy, R = this.sim.rover.pose();
     if (!A.path || !A.gen || A.path.length < 2) return null;
-    // the route is in SLAM coordinates; convert to world using AEGIS-V1's current estimate error
+    // the route is in SLAM coordinates; convert from SLAM est to world using both translation and heading offset
     const e = this.sim.slam.est;
-    const off = { x: R.x - e.x, z: R.z - e.z };
+    const wyaw = R.yaw - e.yaw, cw = Math.cos(wyaw), sw = Math.sin(wyaw);
     const i0 = A.pathIdx || 0;
     let acc = 0, i = i0;
     while (i < A.path.length - 1 && acc < SCOUT.lead) { acc += Math.hypot(A.path[i + 1].x - A.path[i].x, A.path[i + 1].z - A.path[i].z); i++; }
     const p = A.path[i];
-    return { x: p.x + off.x, z: p.z + off.z, ahead: acc };
+    const dx = p.x - e.x, dz = p.z - e.z;
+    return { x: R.x + dx * cw + dz * sw, z: R.z - dx * sw + dz * cw, ahead: acc };
   }
 
   update(dt) {
@@ -128,16 +129,19 @@ export class Scout {
     }
     // don't run away from the convoy: hold if far beyond the lead point
     if (this.mode === 'scouting') { const ahead = (this.x - R.x) * R.fwd.x + (this.z - R.z) * R.fwd.z; if (ahead > SCOUT.lead + 45) vDes = 0; }
-    // slope limit (traction of rubber tracks on regolith in 1/6 g)
+    // slope & ballistic crest limit (1/6 g: prevent launch on steep craters/bumps)
     if (Math.abs(this.pitch) > SCOUT.slopeMax) vDes = Math.min(vDes, 0.2);
+    else if (Math.abs(this.pitch) > 0.14) vDes = Math.min(vDes, 1.8);
+    // keep electrical draw accurate; apply cold-soak battery heater load when ambient sun is off
     this.v += THREE.MathUtils.clamp(vDes - this.v, -0.8 * dt, 0.5 * dt);
     this.yaw += this.w * dt;
     const c = Math.cos(this.yaw), s = Math.sin(this.yaw);
     this.x += c * this.v * dt; this.z += -s * this.v * dt;
     this.odo += this.v * dt; this.trackPhase += this.v * dt;
     this._ground();
-    // power: 2 x 12 V gearmotors + Pi + LiDAR, small solar panel
-    const p = 18 + Math.abs(this.v) * (SCOUT.mass * MOON.g * 0.25 + 8) + Math.abs(this.w) * 6;
+    // power: brushless sealed gearmotors + LiDAR + compute + survival heater at night, small solar panel
+    const heatW = sim.sunDir.y <= 0 ? 4 : 0;
+    const p = 18 + heatW + Math.abs(this.v) * (SCOUT.mass * MOON.g * 0.25 + 8) + Math.abs(this.w) * 6;
     this.soc = Math.max(0, this.soc - (p - 9 * Math.max(0, sim.sunDir.y > 0 ? 1 : 0)) * dt / 3600 / 180);
     // mapping
     this._scanT -= dt;
@@ -163,7 +167,7 @@ export class Scout {
       const az = this.yaw + (k / 72) * Math.PI * 2;
       const d = { x: Math.cos(tilt) * Math.cos(az), y: Math.sin(tilt), z: -Math.cos(tilt) * Math.sin(az) };
       const r = this.ray; r.origin.x = o.x; r.origin.y = o.y; r.origin.z = o.z; r.dir.x = d.x; r.dir.y = d.y; r.dir.z = d.z;
-      const hit = sim.world.castRay(r, SCOUT.lidarRange, true, undefined, Q_TERRAIN, undefined, sim.rover.body);
+      const hit = sim.world.castRay(r, SCOUT.lidarRange, true, undefined, Q_SENSOR, undefined, sim.rover.body);
       if (!hit) continue;
       const t = hit.timeOfImpact + 0.015 * gauss();
       const wx = o.x + d.x * t, wy = o.y + d.y * t, wz = o.z + d.z * t;

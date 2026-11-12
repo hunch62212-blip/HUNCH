@@ -7,9 +7,9 @@ export const HELP = [
   ['help [topic]', 'this list'],
   ['estop | reset | start', 'emergency stop; release latch; power-on self-test (all 3 needed to restart)'],
   ['status', 'one-line vehicle status'],
-  ['mission <1-6|cycle> [A|B]', 'run a NASA mission (A = 40-ft module CM-40A, B = 20-ft container CC-20B)'],
+  ['mission <1-6|cycle> [A|B|C]', 'run a NASA mission (A = 40-ft module CM-40A, B = 20-ft container CC-20B, C = pod rack CP-36C)'],
   ['abort | resume', 'abort mission | resume after operator override'],
-  ['goto <x> <z> | goto <pad|hab|staging|port1|port2|A|B>', 'autonomous drive to a point / site'],
+  ['goto <x> <z> | goto <pad|hab|staging|port1|port2|port3|A|B|C>', 'autonomous drive to a point / site'],
   ['speed <m/s>', 'autonomy cruise speed'],
   ['limit rpm <n> | limit speed <m/s> | limit torque <%>', 'hard limits (rpm = prototype motor rpm, 300 max)'],
   ['rpm auto|<n> | turbo on|off|auto', 'smart rpm (continuous 120..280, turbo 300) or lock the drive'],
@@ -32,10 +32,10 @@ export const HELP = [
   ['thermal | brain on|off', 'thermal state, the thermal brain\'s decisions; brain off = thermostats only (docs/THERMAL_BRAIN.md)'],
   ['scenarios on|off|often|rare | scenario <id>|random|end', 'random thermal scenarios; ids: slope-heat psr-cold eclipse dust-fins climb glint heater-stuck mc-overload cold-start'],
   ['clear faults | clear comms | clear port <n>', 'remove faults (clearing comms runs the queued commands)'],
-  ['reroute <A|B> <1|2>', 'send a module to the other receiving port (e.g. when its port is faulted)'],
+  ['reroute <A|B|C> <1|2|3>', 'send a module to the other receiving port (e.g. when its port is faulted)'],
   ['map clear|save|load|forget | routes', 'SLAM map & route memory (forget = erase the stored copy too)'],
   ['memory', 'rover memory store: where the map and routes are kept on disk, and which sites are remembered (?site=last reopens the newest)'],
-  ['plan | priority <A|B> <category>', 'Mission 11 logistics plan / set request category'],
+  ['plan | priority <A|B|C> <category>', 'Mission 11 logistics plan / set request category'],
   ['reserve <%>', 'battery reserve: below it an empty rover goes to the power dock before its next leg'],
   ['sun <az> <el>', 'sun azimuth / elevation in degrees'],
   ['charge [%] | dock status', 'drive to the solar power dock and charge (default 95 %) / dock power report'],
@@ -71,7 +71,7 @@ export function runCommand(sim, ui, line, _uplinked = false) {
     for (const o of out) sim.log(o.msg, o.level);
     return out;
   }
-  const cargoBy = (k) => { k = (k || 'A').toUpperCase(); return sim.cargo.find((c) => c.id.includes(k === 'A' ? '40A' : k === 'B' ? '20B' : k)) || sim.cargo[0]; };
+  const cargoBy = (k) => { k = (k || 'A').toUpperCase(); return sim.cargo.find((c) => c.id.endsWith(k)) || sim.cargo.find((c) => c.id.toUpperCase() === k) || sim.cargo[0]; }; // A / B / C = last letter of the id
   const site = (name) => {
     const n = (name || '').toLowerCase();
     const P = sim.terrain.pad, H = sim.terrain.hab;
@@ -79,8 +79,8 @@ export function runCommand(sim, ui, line, _uplinked = false) {
     if (n === 'dock') { const L = sim.powerDock.layout; return { ...L.entry, name: 'power dock' }; }
     if (n === 'staging') return { ...P.staging, name: 'staging area' };
     if (n === 'hab') return { x: WORLD.habitat.x + H.nx * 45, z: WORLD.habitat.z + H.nz * 45, name: 'habitat apron' };
-    if (n === 'port1' || n === 'port2') { const p = sim.ports[n === 'port1' ? 0 : 1]; return { x: p.x + H.nx * 35, z: p.z + H.nz * 35, name: p.name + ' approach' }; }
-    if (n === 'a' || n === 'b') { const c = cargoBy(n); const T = c.T; return { x: c.initial.x - Math.cos(c.yaw) * (T.length / 2 + 16), z: c.initial.z + Math.sin(c.yaw) * (T.length / 2 + 16), name: c.id + ' pre-grasp' }; }
+    if (/^port[1-9]$/.test(n) && sim.ports[+n[4] - 1]) { const p = sim.ports[+n[4] - 1]; return { x: p.x + H.nx * 35, z: p.z + H.nz * 35, name: p.name + ' approach' }; }
+    if (n.length === 1 && sim.cargo.some((c) => c.id.toLowerCase().endsWith(n))) { const c = cargoBy(n); const T = c.T; return { x: c.initial.x - Math.cos(c.yaw) * (T.length / 2 + 16), z: c.initial.z + Math.sin(c.yaw) * (T.length / 2 + 16), name: c.id + ' pre-grasp' }; }
     return null;
   };
   switch (cmd) {
@@ -121,7 +121,7 @@ export function runCommand(sim, ui, line, _uplinked = false) {
       let g = null;
       if (a.length >= 2 && Number.isFinite(parseFloat(a[0]))) g = { x: num(a[0]), z: num(a[1]), name: `(${a[0]}, ${a[1]})` };
       else g = site(a[0]);
-      if (!g) { say('usage: goto <x> <z> | goto pad|hab|staging|port1|port2|A|B', 'warn'); break; }
+      if (!g) { say('usage: goto <x> <z> | goto pad|hab|staging|port1|port2|port3|A|B|C', 'warn'); break; }
       if (A.gen) A.abort('new goto');
       A.start(`Goto ${g.name}`, A.missionGoto(g.x, g.z, g.name));
       break;
@@ -196,7 +196,7 @@ export function runCommand(sim, ui, line, _uplinked = false) {
     case 'fault': {
       const k = (a[0] || '').toLowerCase();
       if (k === 'list' || !k) {
-        say('Fault catalogue (fault <id> [unit]): legacy block | lidar | camera | comms | battery <%> | wheel <1-6> | shift | port <1|2>', 'info');
+        say('Fault catalogue (fault <id> [unit]): legacy block | lidar | camera | comms | battery <%> | wheel <1-6> | shift | port <1|2|3> | seal [hard]', 'info');
         for (const m of MODES) say(`  ${m.id.padEnd(8)} ${m.inst[0] == null ? '' : `[${m.inst.join('|')}] `}${m.name} (${m.sev}, ${m.fidelity})`, 'info');
         break;
       }
@@ -261,8 +261,9 @@ export function runCommand(sim, ui, line, _uplinked = false) {
       const k = (a[0] || '').toLowerCase();
       if (k === 'port') { delete A.faults.port[num(a[1], 1)]; say(`PORT-${num(a[1], 1)} available`, 'ok'); }
       else if (k === 'comms') { A.faults.comms = false; say('Comms link restored', 'ok'); }
+      else if (k === 'seal') { A.faults.seal = false; say('Port seal serviced', 'ok'); }
       else if (k === 'faults' || k === 'all' || !k) sim.clearFaults();
-      else { say('usage: clear faults | clear comms | clear port <n>', 'warn'); break; } // (anything unrecognised used to clear every fault)
+      else { say('usage: clear faults | clear comms | clear port <n> | clear seal', 'warn'); break; } // (anything unrecognised used to clear every fault)
       // link back: send what the operator queued during the outage, in order
       if (!A.faults.comms && A.queuedCommands && A.queuedCommands.length) {
         const q = A.queuedCommands; A.queuedCommands = [];
@@ -276,7 +277,7 @@ export function runCommand(sim, ui, line, _uplinked = false) {
     }
     case 'reroute': {
       const c = cargoBy(a[0]), id = Math.round(num(a[1], NaN));
-      if (!a[0] || !sim.ports.some((p) => p.id === id)) { say(`usage: reroute <A|B> <${sim.ports.map((p) => p.id).join('|')}>`, 'warn'); break; }
+      if (!a[0] || !sim.ports.some((p) => p.id === id)) { say(`usage: reroute <A|B|C> <${sim.ports.map((p) => p.id).join('|')}>`, 'warn'); break; }
       if (c.state === 'delivered') { say(`${c.id} is already delivered`, 'warn'); break; }
       const other = sim.cargo.find((x) => x !== c && x.dest === id && x.state !== 'delivered');
       if (other) say(`Note: ${other.id} is also bound for PORT-${id}`, 'warn');
@@ -306,7 +307,7 @@ export function runCommand(sim, ui, line, _uplinked = false) {
     }
     case 'priority': {
       const c = cargoBy(a[0]); const m = A.manifest.find((x) => x.cargo === c); const cat = (a[1] || '').toLowerCase();
-      if (!m || !(cat in PRIORITY)) { say(`usage: priority <A|B> <${Object.keys(PRIORITY).join('|')}>`, 'warn'); break; }
+      if (!m || !(cat in PRIORITY)) { say(`usage: priority <A|B|C> <${Object.keys(PRIORITY).join('|')}>`, 'warn'); break; }
       m.category = cat; say(`${m.id} category -> ${cat}`, 'ok'); break;
     }
     case 'reserve': A.reserveSoc = Math.max(0.05, Math.min(0.8, num(a[0], 20) / 100)); say(`Battery reserve ${(A.reserveSoc * 100).toFixed(0)}%`, 'ok'); break;

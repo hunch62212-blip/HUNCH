@@ -90,7 +90,7 @@ export function snapshot(sim) {
 export function systemPrompt() {
   const cmds = HELP.map(([c, d]) => `  ${c} : ${d}`).join('\n');
   return `You are the AI copilot for ${ROVER.name}, a lunar cargo rover in the NASA HUNCH LLASO-P2-XPORT-2026 simulator.
-Mission: carry landed cargo modules (CM-40A 40-ft module, CC-20B 20-ft container) about 2 km from the landing pad
+Mission: carry landed cargo modules (CM-40A 40-ft module, CC-20B 20-ft container, CP-36C rack of 36 Astrobotic-style pods) about 2 km from the landing pad
 to the habitat and dock them to a pressurised port, with no EVA. 6 wheels, rocker-bogie skid steer, ${Math.round(ROVER.battery.capacityWh / 1000)} kWh battery,
 no on-board solar (recharges at the solar power dock), a deterministic autonomy stack (SLAM, A* planner, mission
 scripts) and FDIR covering 24 hardware failure modes with automatic responses. Cargo priority: life-support and
@@ -112,8 +112,8 @@ Safety rules:
 
 Missions (A = CM-40A, B = CC-20B):
   mission 1          leave the landing zone to the staging area (no cargo)
-  mission 2 A|B      find and approach that cargo, no pickup
-  mission 3 A|B      approach, pick up and secure that cargo (ends holding it at the pad)
+  mission 2 A|B|C      find and approach that cargo, no pickup
+  mission 3 A|B|C      approach, pick up and secure that cargo (ends holding it at the pad)
   mission 4          carry the held cargo to the habitat approach
   mission 5          carry the held cargo to its port and dock it (includes the drive; needs cargo held)
   mission cycle      full logistics cycle: every waiting cargo in priority order (survey, pick up, deliver, return)

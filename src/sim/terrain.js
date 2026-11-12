@@ -70,7 +70,11 @@ export function habitatLayout() {
   const face = { x: habitat.x - nx * 4, z: habitat.z - nz * 4 }; // building wall plane
   // receiving building sized for the 7.96 m module: ports at the carried module-axis height (~10 m)
   const building = { x: face.x - nx * 10, z: face.z - nz * 10, w: 20, d: 46, h: 15.5 };
-  const ports = [-11.5, 11.5].map((off, i) => {
+  // PORT-1 stays at u = -11.5 m (its approach is the validated one: tests dock_cyl40, cycle). PORT-3 (pod rack) is at
+  // +1.5 m and PORT-2 at +14.5 m: 13 m between neighbours, because a docked sled's receiving-stand posts stand +-5.63 m
+  // about its axis and must clear the next port's posts and the 9.9 m wide rover working there. (Two ports at +-11.5 m
+  // with a third at 0 would have put two stands' posts 0.24 m apart.)
+  const ports = [-11.5, 14.5, 1.5].map((off, i) => {
     const px = face.x + tx * off + nx * DOCK.vestibuleLen;
     const pz = face.z + tz * off + nz * DOCK.vestibuleLen;
     return { id: i + 1, name: `PORT-${i + 1}`, x: px, z: pz, nx, nz, tx, tz, wallX: face.x + tx * off, wallZ: face.z + tz * off };
@@ -94,7 +98,7 @@ export function baseStructures(hab) {
     const c = { x: back.x + t.x * off * 15 - n.x * 2, z: back.z + t.z * off * 15 - n.z * 2 };
     items.push({ kind: 'module', x: c.x, z: c.z, r: 2.3, len: 9, yaw: Math.atan2(-t.z, t.x) });
   }
-  // Apron light masts, 18.5 m outside each port's approach axis (ports at u = +-11.5). They stood at u = +-20, only
+  // Apron light masts, 18.5 / 15.5 m outside the outer ports' approach axes (ports at u = -11.5 and +14.5). They stood at u = +-20, only
   // 8.5 m from the axis: 3.6 m from the side of a 9.9 m wide rover, inside the swing of a carried 40-ft module, and
   // inside the planner's soft keep-out, which bent the loaded approach path around each mast into an S-turn tighter
   // than the loaded turning circle (the rover orbited the PORT-1 lead-in point: test dock_cyl40).
@@ -112,6 +116,9 @@ export function padLayout() {
   const cargo = [
     { id: 'CM-40A', type: 'cyl40', x: pad.x + px * 40 + dx * 6, z: pad.z + pz * 40 + dz * 6, yaw: Math.atan2(-dz, dx) },
     { id: 'CC-20B', type: 'box20', x: pad.x - px * 40 + dx * 6, z: pad.z - pz * 40 + dz * 6, yaw: Math.atan2(-dz, dx) },
+    // pod rack: outboard of and behind the container (22 m to the side, 34 m back), inside the pad's 70 m level area;
+    // 11 m clear of the rover's line into and out of CC-20B
+    { id: 'CP-36C', type: 'pod4', x: pad.x - px * 62 - dx * 28, z: pad.z - pz * 62 - dz * 28, yaw: Math.atan2(-dz, dx), dest: 3, category: 'power', tag0: 60 },
   ];
   // parked clear of the lander and cargo, nose toward the habitat (Mission 1 starts from here)
   const roverStart = { x: pad.x - dx * 58, z: pad.z - dz * 58, yaw: Math.atan2(-dz, dx) };

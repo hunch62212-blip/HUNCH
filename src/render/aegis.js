@@ -6,10 +6,11 @@ import * as THREE from 'three';
 import { ROVER, K } from '../sim/config.js';
 import { buildAegis, loadTeamModels } from './teamModels.js';
 import { MODE, bayOf, partPos } from '../sim/health.js';
+import { mergeStatic } from './mergeStatic.js';
 import { KEEPALIVE, FENDER, RADIATOR } from '../sim/config.js';
 
-// sim bogie index (FL FR ML MR RL RR) for the model's wheel order (FL ML BL FR MR BR)
-const MODEL_TO_SIM = [0, 2, 4, 1, 3, 5];
+// sim bogie index (FL=0, FR=1, ML=2, MR=3, RL=4, RR=5 where L=-z, R=+z) for fusion_rover wheelGroups order ([0..2] at +z, [3..5] at -z)
+const MODEL_TO_SIM = [1, 3, 5, 0, 2, 4];
 
 export class AegisModel {
   constructor(scene) {
@@ -34,6 +35,9 @@ export class AegisModel {
       this.root.add(s); this.root.add(s.target); this.lights.push(s);
     }
     this.wheelGroups = rig.wheelGroups; this.tires = rig.tires;
+    // each tyre is ~60 rigid parts (40 chevron cleats, spokes, flanges, hub) that only ever spin together
+    // (the cleat and spoke materials are per-wheel and fade with speed as a whole, so they may merge although transparent)
+    for (const t of this.tires) mergeStatic(t, undefined, { transparent: true });
     this.bogie = window.roverBogie; this.cradle = window.moduleCradle; this.heads = window.lidarHeads || [window.lidarHead].filter(Boolean);
     this.lastRide = null;
     this.buildSurvivalHardware();
@@ -45,7 +49,7 @@ export class AegisModel {
   // Survival / serviceability hardware added to the team model (full-scale metres, body frame): louvered side
   // radiators, service-bay doors with BIT status lamps, omni antennas, beacon, hazard cameras, the keep-alive
   // solar blanket and a locator that marks the failed part. Positions follow src/sim/health.js BAYS.
-  // Everything is mounted on the team body as measured (tub walls z +-2.23..2.33, deck top y 3.67 to z +-3.09 and
+  // Everything is mounted on the team body as measured (tub walls z +-2.23..2.33, deck top y 3.67 to z +-2.94 and
   // x +-4.73, front face x 4.08..4.25, rear face x -4.26..-4.34): deck items are seated on the surface by a ray cast
   // so nothing floats (CHANGES.md §20).
   buildSurvivalHardware() {
@@ -73,6 +77,9 @@ export class AegisModel {
       for (const dy of [-0.3, 0.3]) box(R.len - 0.2, 0.08, 0.16, steelM, 0, R.y + dy, sz * (R.z - 0.09)); // rails back to the wall
       for (let i = 0; i < 12; i++) this.slats[s].push(box(R.len - 0.1, 0.07, 0.012, slatM, 0, R.y - R.h / 2 + 0.07 + i * 0.065, sz * (R.z + 0.07)));
     }
+    // zenith Z-93 OSR secondary thermal strips on the unshaded fore/aft deck margins (clear of ring saddles)
+    const osrM = mat(0xf4f6f8, { roughness: 0.22, metalness: 0.15 });
+    for (const sx of [-3.6, 3.6]) box(1.1, 0.04, 3.6, osrM, sx, deckY(sx, 0) + 0.03, 0);
     this.buildFenders(mat);
     // service-bay doors with a status lamp (green = BIT pass, amber / red flashing = alarm in that bay)
     const doorM = mat(0x3b4754), lampG = new THREE.SphereGeometry(0.08, 10, 8);
@@ -192,14 +199,14 @@ export class AegisModel {
       const [f, m, r] = i0; const dyF = d[f], dyM = d[m], dyR = d[r];
       return { rho: (dyF - (dyM + dyR) / 2) / (RB.xF - RB.B.x), beta: (dyM - dyR) / (RB.xM - RB.xR) };
     };
-    const L = side([0, 2, 4]), Rr = side([1, 3, 5]);
+    const posZ = side([1, 3, 5]), negZ = side([0, 2, 4]);
     const cl = (v, m) => Math.max(-m, Math.min(m, v));
-    const rho = cl((L.rho - Rr.rho) / 2, RB.rhoMax);
-    this.bogie.pose(rho, cl(L.beta, RB.betaMax), cl(Rr.beta, RB.betaMax));
-    const ride = rover.rideOffset / K;
+    const rho = cl((posZ.rho - negZ.rho) / 2, RB.rhoMax);
+    this.bogie.pose(rho, cl(posZ.beta, RB.betaMax), cl(negZ.beta, RB.betaMax));
+    const ride = cl(rover.rideOffset / K, -0.045, 0.065);
     for (let i = 0; i < 6; i++) {
       const wg = this.wheelGroups[i], w = rover.wheels[MODEL_TO_SIM[i]];
-      wg.group.position.y -= ride;           // body rises on the struts, wheels stay down
+      wg.group.position.y -= ride;           // body rises on the struts, wheels stay down (kneel+bump wheel-arch limit preserved)
       wg.strut.setLength(ride);
       this.tires[i].rotation.y = -w.angle;
     }
@@ -225,6 +232,7 @@ export async function buildTeamCargo(c) {
   const g = new THREE.Group();
   const m = T.ModuleModels.buildModuleMesh(); m.scale.setScalar(K); g.add(m);
   g.userData.cad = null;
+  mergeStatic(g);                 // the module is one rigid body: 161 parts -> one mesh per material
   return g;
 }
 export async function buildTeamStands(cargo, heightAt, terrain) {
@@ -233,11 +241,17 @@ export async function buildTeamStands(cargo, heightAt, terrain) {
   for (const c of cargo) {
     const wrap = new THREE.Group(); wrap.scale.setScalar(K); out.add(wrap);
     const st = T.ModuleModels.buildStand(`${c.id}`);
+    const lugs = c.T.lugXs || [-c.T.lugX, c.T.lugX];
+    const midX = (lugs[0] + lugs[1]) / 2;
+    const spanX = lugs[1] - lugs[0], nomSpanX = 2 * (c.T.shape === 'cylinder' ? c.T.lugX : 0.21 * K);
+    const stX = c.initial.x + Math.cos(c.yaw) * midX, stZ = c.initial.z - Math.sin(c.yaw) * midX;
     const yB = (c.initial.y - (c.T.adapterR || c.T.radius)) / K;
-    T.ModuleModels.placeStand(st, c.initial.x / K, c.initial.z / K, yB, (mx, mz) => heightAt(terrain, mx * K, mz * K) / K);
-    // yaw about the stand centre
+    T.ModuleModels.placeStand(st, stX / K, stZ / K, yB, (mx, mz) => heightAt(terrain, mx * K, mz * K) / K);
+    st.scale.x = spanX / nomSpanX;
+    // yaw about the stand centre (offset to box20 asymmetric lug midpoint when applicable)
     const pivot = new THREE.Group(); pivot.position.copy(st.position); st.position.set(0, 0, 0); pivot.rotation.y = c.yaw; pivot.add(st);
     wrap.add(pivot);
+    mergeStatic(pivot);           // ~55 small parts per stand, none of them move
     c.standVis = pivot;
   }
   return out;

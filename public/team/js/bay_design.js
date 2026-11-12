@@ -76,7 +76,7 @@
   var DUST = {
     moduleAreaM2: Math.PI * MOD.D * MOD.L + 2 * Math.PI * MOD.R * MOD.R,
     exposedFrac: 0.15, exposedLoadGm2: 8.0, restLoadGm2: 0.3,     // ASSUMED: the underside and lug end meet the wheel plume; the rest only settles
-    brushPassEff: 0.88,                                            // ASSUMED: one pass of a nylon-bristle roller on a cylinder
+    brushPassEff: 0.88,                                            // ASSUMED: one pass of a conductive PEEK/phosphor-bronze bristle roller on a cylinder
     edsEff: 0.75,                                                  // ASSUMED: electrodynamic pulse train on a dielectric skin
     sealLeakMg: 0.5,                                               // ASSUMED: brush-seal leakage per door opening
     targetMg: 5.0,                                                 // requirement: residue carried into a bay per transfer

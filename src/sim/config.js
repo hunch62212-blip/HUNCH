@@ -164,6 +164,17 @@ export const CARGO_TYPES = {
   },
 };
 
+// Astrobotic-class cargo pods (LLASO-P2 Missions 3 and 8: "4-ft x 2-ft cargo pod"): 1.22 m long x 0.61 m pods, 36 to a
+// 20-ft flat rack (4 along x 3 across x 3 tiers). The rack has the 20-ft ISO footprint and rides in the same ring-adapter
+// sled as the 20-ft container, so the rover, the stands and the ports see box20's geometry; only the mass and the look
+// differ. That is the point of Mission 8: one ring interface, three cargo systems (40-ft module, 20-ft container, pods).
+// [ASSUMED] pod 110 kg loaded (36 = 3,960 kg), rack + sled 1,940 kg.
+CARGO_TYPES.pod4 = {
+  ...CARGO_TYPES.box20,
+  label: '36 x 4-ft cargo pods on a 20-ft flat rack, ring-adapter sled', mass: 5900, color: 0xe8e8e2,
+  visual: 'podrack', pods: { length: 1.22, dia: 0.61, along: 4, across: 3, tiers: 3, massEach: 110 },
+};
+
 // Docking interface: the module's berthing ring meets the supply-building port at the carried axis height.
 // portCenterH derived from [CAD] values; opening, vestibule and force limits [ASSUMED].
 export const DOCK = {
@@ -172,7 +183,13 @@ export const DOCK = {
   // vestibule depth 2.4 m (was 1.2): the 20-ft container rides 1.75 m behind the rover's front (box face 3.18 m,
   // frame front 4.89 m from the rover centre), so with 1.2 m the rover hit the building wall 0.5 m short of the port
   vestibuleLen: 2.4, vestibuleW: 6.0, vestibuleH: 13.5,
-  maxPushN: 6000, softCaptureN: 900,
+  maxPushN: 6000, softCaptureN: 750,
+  // Dust-exclusion coupling: a welded metal-bellows soft-capture ring that stands `free` m proud of the rigid collar
+  // (drawn on every port, props.js). It is what the module actually pushes against: a spring-damper, so the 23 t
+  // vehicle settles on the push force instead of ringing on a rigid wall (rigid-wall contact gave single-step force
+  // spikes of 2-6 kN that changed from run to run). The latches fire with the ring compressed to captureGap.
+  //   free m, k N/m, c N s/m [ASSUMED]: 1,100 N at 35 mm of compression; damping ratio ~0.4 with the loaded rover
+  bellows: { free: 0.06, k: 31000, c: 20000 }, captureGap: 0.036,
 };
 
 // AEGIS power dock beside the supply building (positions in the habitat frame: u along the building face,

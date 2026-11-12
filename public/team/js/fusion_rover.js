@@ -4,7 +4,7 @@
  * Fits a 24 in (0.6096 m) cube: 0.584 x 0.604 m swept footprint, 0.556 m tall (top of lidar).
  * Six 360-degree swerve modules (6 drive gearmotors + 6 continuous-rotation steering servos), belly tub with
  * the 12.8 V 5 Ah LiFePO4 pack centred and low, 2-link grabber arm that stows over the deck, two cargo
- * canisters carried crosswise in V-saddle cradles with trunnion latches, dock charge pad on the avionics pod.
+ * canisters carried crosswise in V-saddle cradles with trunnion latches, belly shuttered dock charge receptacle.
  * Part masses and sizes: see NASA_RoverBOM (js/rover_bom.js) and review/docs/rover-v4-design.md.
  *
  * Root frame: +X forward, +Y up, ±Z sides, ground at y = 0, wheel axles at y = 0.065.
@@ -125,7 +125,7 @@
   var GEOM = {
     wheelR: 0.065, wheelW: 0.075, axleY: 0.065, deckY: 0.225, modX: 0.24, modZ: 0.235,   // modX / modZ = wheel x / z (rocker_bogie GEO)
     halfLen: 0.30, halfWid: 0.302, height: 0.58, collR: 0.33,
-    pad: { x: 0.19, y: 0.286, z: 0 },          // dock coupler reference: 11 mm under the copper face (y 0.297) so the pogos compress 4 mm
+    pad: { x: 0.0, y: 0.058, z: 0 },           // belly shuttered blind-mate charge coupler under tub center (clear of overhead cargo module)
     battery: { L: 0.155, W: 0.100, H: 0.100 }      // 12.8 V 10 Ah envelope (Green Cell CUBE listing; geometry TBC)
   };
 
@@ -150,10 +150,11 @@
     var mAluDark = new THREE.MeshStandardMaterial({ color: 0x6f7a87, roughness: 0.34, metalness: 0.8 });
     var mSteel = new THREE.MeshStandardMaterial({ color: 0xaab2bc, roughness: 0.18, metalness: 0.95 });
     var mFoil = new THREE.MeshStandardMaterial({ color: 0xffffff, map: foilTexture(), roughness: 0.4, metalness: 0.6 });
-    var mRubber = new THREE.MeshStandardMaterial({ color: 0x15171b, roughness: 0.93, metalness: 0.02 });
-    var mTire = new THREE.MeshStandardMaterial({ color: 0x1b1d22, map: treadTexture(), roughness: 0.88, metalness: 0.04 });
-    var mBell = new THREE.MeshStandardMaterial({ color: 0x1b1d22, roughness: 0.8, metalness: 0.05 });   // air-spring bellows (one shared material)
+    var mVespel = new THREE.MeshStandardMaterial({ color: 0x3b2f2f, roughness: 0.75, metalness: 0.12 }); // cryo-rated Vespel SP-21 / PEEK-CF30
+    var mTire = new THREE.MeshStandardMaterial({ color: 0x454c57, map: treadTexture(), roughness: 0.72, metalness: 0.35 }); // Ti-6Al-4V / NiTi mesh tread
+    var mBellows = new THREE.MeshStandardMaterial({ color: 0x9ca3af, roughness: 0.35, metalness: 0.88 }); // welded 321SS metallic bellows (no rubber air bags)
     var mCopper = new THREE.MeshStandardMaterial({ color: 0xc27a2c, roughness: 0.3, metalness: 0.85 });
+    var mWhite = new THREE.MeshStandardMaterial({ color: 0xf5f7fa, roughness: 0.55, metalness: 0.05 }); // Z-93 white thermal-control coating (OSR radiator panel)
     var mLens = new THREE.MeshPhysicalMaterial({ color: 0x050b14, emissive: 0x0b66b8, emissiveIntensity: 0.45, roughness: 0.04, metalness: 0.4, clearcoat: 1 });
     var mGlass = new THREE.MeshPhysicalMaterial({ color: 0x0c1a2b, roughness: 0.05, metalness: 0.2, clearcoat: 1, transparent: true, opacity: 0.85 });
     var mPcb = new THREE.MeshStandardMaterial({ color: 0x0f5a2e, roughness: 0.6, metalness: 0.2 });
@@ -203,25 +204,27 @@
       for (var lv = 0; lv < 7; lv++) rbox(0.006, 0.040, 0.004, 0.002, mGraphiteMatte, 0.10 + lv * 0.014, 0.128, s * (TUB_W / 2 + 0.006), root);
       rbox(0.14, 0.022, 0.003, 0.004, mBlue, -0.11, 0.150, s * (TUB_W / 2 + 0.006), root);
     });
-    // deck: rounded white plate with a diamond-tread walkway between the cargo cradles
-    // v11: the deck is 0.38 m wide and the tyres run outside it (open wheel arches), so a wheel can rise to deck level without touching anything
-    rbox(0.58, 0.014, 0.38, 0.030, mPaint, 0, DY - 0.007, 0, root, true);
-    rbox(0.10, 0.002, 0.30, 0.02, mDeck, -0.21, DY + 0.001, 0, root);                                     // diamond-tread step pad, aft of the rear ring
-    [1, -1].forEach(function (s) {                                                                           // blue edge piping
-      rbox(0.54, 0.006, 0.006, 0.003, mBlue, 0, DY - 0.010, s * 0.188, root);
+    // deck: rounded Z-93 OSR thermal white plate (narrowed to 0.36 m for full kneel+bump tyre-arch clearance)
+    rbox(0.58, 0.014, 0.36, 0.030, mPaint, 0, DY - 0.007, 0, root, true);
+    rbox(0.10, 0.002, 0.28, 0.02, mDeck, -0.21, DY + 0.001, 0, root);                                     // diamond-tread step pad, aft of the rear ring
+    [1, -1].forEach(function (s) {                                                                           // blue edge piping (clear of inner tyre z 0.1975)
+      rbox(0.54, 0.006, 0.006, 0.003, mBlue, 0, DY - 0.010, s * 0.178, root);
     });
-    // frame rails under the deck (aluminium extrusion) on the tub top, inboard of the rocker-bogie links and wheels
+    // shuttered belly blind-mate charge receptacle under tub skid plate (avoids overhead cargo clash)
+    rbox(0.145, 0.012, 0.175, 0.006, mGraphite, 0, TUB_Y0 - 0.006, 0, root, true);
+    [-0.045, 0.045].forEach(function (z) { rbox(0.110, 0.004, 0.030, 0.002, mCopper, 0, TUB_Y0 - 0.012, z, root); });
+    // chassis side rails under the deck (7075-T6 extrusion)
     [1, -1].forEach(function (s) {
       rbox(0.56, 0.018, 0.020, 0.003, mAluDark, 0, DY - 0.023, s * 0.125, root, true);
     });
 
     // =========================================================================
-    // 2. ROCKER-BOGIE — per side: a bent rocker on the chassis pivot (front wheel + bogie pivot) and a bogie
+    // 2. ROCKER-BOGIE — per side: a bent 7075-T6 / Ti-6Al-4V rocker on the chassis pivot (front wheel + bogie pivot) and a bogie
     //    (middle + rear wheel); a bevel differential on the transverse shaft ties the two rockers together.
     //    Geometry and travel come from js/rocker_bogie.js (one source for the mesh, the sim and the checks).
     // =========================================================================
     var RB = global.NASA_RockerBogie, RG_ = RB.GEO, P = RG_.P, BP0 = RG_.B, LT = RG_.linkT, LH = RG_.linkH;
-    var mPetg = new THREE.MeshStandardMaterial({ color: 0x15171b, roughness: 0.62, metalness: 0.08 });   // black printed PETG, as in the reference photo
+    var mPetg = new THREE.MeshStandardMaterial({ color: 0x3a414d, roughness: 0.42, metalness: 0.72 });   // hard-anodized 7075-T6 Al (replaces brittle PETG)
     function arm(x0, y0, x1, y1, z, parent) {                                // straight link segment between two points
       var L = Math.hypot(x1 - x0, y1 - y0), m = rbox(L + LH, LH, LT, 0.006, mPetg, (x0 + x1) / 2, (y0 + y1) / 2, z, parent, true);
       m.rotation.z = Math.atan2(y1 - y0, x1 - x0); return m;
@@ -288,7 +291,7 @@
       [1, -1].forEach(function (s) {
         var flare = new THREE.Mesh(new THREE.CylinderGeometry(R - 0.012, R - 0.001, 0.012, 40, 1, true), mTire);   // flotation flare
         flare.position.y = s * (G.wheelW / 2 - 0.002); if (s < 0) flare.rotation.x = Math.PI; tire.add(flare);
-        var bead = new THREE.Mesh(new THREE.TorusGeometry(R - 0.014, 0.0035, 8, 48), mRubber);
+        var bead = new THREE.Mesh(new THREE.TorusGeometry(R - 0.014, 0.0035, 8, 48), mVespel);   // Vespel bead retainer ring
         bead.rotation.x = Math.PI / 2; bead.position.y = s * (G.wheelW / 2 - 0.002); tire.add(bead);
       });
       cyl(R - 0.020, R - 0.020, 0.004, mAluDark, 0, G.wheelW / 2 - 0.006, 0, tire, null, 36);                // thin inner flange rings
@@ -309,13 +312,13 @@
       // air-spring strut (self-adjusting suspension, js/suspension.js): a bellows and a damper rod over the axle, inboard of the tyre,
       // from the carrier up to the link bracket. setLength(x): extra stroke in m (ride-height raise plus body sag); the bellows stretch with it.
       var strutGrp = new THREE.Group(); strutGrp.position.set(0, 0.012, -wd.s * (Math.abs(wz) - Math.abs(linkZ)) * 0.92); wg.add(strutGrp);
-      var bellows = new THREE.Mesh(new THREE.CylinderGeometry(0.0085, 0.0085, 1, 14), mBell); strutGrp.add(bellows);
+      var bellows = new THREE.Mesh(new THREE.CylinderGeometry(0.0085, 0.0085, 1, 14), mBellows); strutGrp.add(bellows);   // welded 321SS dust bellows
       var rings = []; for (var rk = 0; rk < 5; rk++) { var rg2 = new THREE.Mesh(new THREE.TorusGeometry(0.0095, 0.0022, 6, 14), mBlue); rg2.rotation.x = Math.PI / 2; strutGrp.add(rg2); rings.push(rg2); }
       var rod = new THREE.Mesh(new THREE.CylinderGeometry(0.0035, 0.0035, 1, 10), mSteel); strutGrp.add(rod);
       cyl(0.011, 0.011, 0.008, mAluDark, 0, 0, 0, strutGrp, null, 16);                                           // lower cap on the carrier
       var topCap = cyl(0.011, 0.011, 0.008, mAluDark, 0, 0.07, 0, strutGrp, null, 16);                           // upper cap on the link bracket
       var strutApi = { setLength: function (x) {
-        var top = 0.07 + Math.max(-0.060, Math.min(0.12, x));                                      // v11: kneel -40 mm, raise +60 mm, strut stroke +-50 mm
+        var top = 0.07 + Math.max(-0.045, Math.min(0.065, x));                                      // physical kneel -45 mm / lift +65 mm wheel-arch clearance limit
         bellows.scale.y = top; bellows.position.y = top / 2;
         rod.scale.y = top * 0.9; rod.position.y = top * 0.55; topCap.position.y = top;
         for (var q = 0; q < rings.length; q++) rings[q].position.y = top * (q + 0.5) / rings.length;
@@ -411,11 +414,9 @@
     [[0.2, 0.05], [0.2, -0.05], [0.14, -0.055], [0.14, 0.05]].forEach(function (c) {
       [-1, 1].forEach(function (a) { [-1, 1].forEach(function (b) { cyl(0.0025, 0.0025, 0.006, mAlu, c[0] + a * 0.034, DY + PT + 0.003, c[1] + b * 0.02, upperShell, null, 8); }); });
     });
-    rbox(0.085, 0.003, 0.056, 0.002, mPcb, 0.2, pcb, 0.05, upperShell, true);                                 // Raspberry Pi 5
-    cyl(0.017, 0.017, 0.007, mGraphite, 0.2, pcb + 0.005, 0.05, upperShell, null, 20);                         // active cooler
-    var piFan = new THREE.Group(); piFan.position.set(0.2, pcb + 0.0095, 0.05); upperShell.add(piFan);
-    for (var fb = 0; fb < 7; fb++) { var bl = box(0.013, 0.001, 0.004, mAluDark, 0.006, 0, 0, piFan); bl.rotation.y = fb / 7 * Math.PI * 2; }
-    piFan.userData.spin = 'y'; fanRotors.push(piFan);
+    rbox(0.085, 0.003, 0.056, 0.002, mPcb, 0.2, pcb, 0.05, upperShell, true);                                 // Raspberry Pi 5 (compute module)
+    rbox(0.036, 0.005, 0.036, 0.002, mCopper, 0.2, pcb + 0.004, 0.05, upperShell, true);                      // Cu cold-plate spreader (no vacuum air fan)
+    rbox(0.090, 0.003, 0.012, 0.001, mCopper, 0.155, pcb + 0.006, 0.05, upperShell, false);                   // Cu heat-pipe thermal strap to zenith radiator
     rbox(0.101, 0.003, 0.053, 0.002, mPcb, 0.2, pcb, -0.05, upperShell, true);                                // Arduino Mega 2560
     box(0.012, 0.010, 0.030, mGraphite, 0.2 + 0.044, pcb + 0.006, -0.05, upperShell);                         // USB-B jack
     rbox(0.025, 0.003, 0.062, 0.002, mPcb, 0.14, pcb, -0.055, upperShell, true);                              // PCA9685 servo driver
@@ -424,14 +425,10 @@
     box(0.030, 0.003, 0.052, mAlu, 0.14, pcb + 0.0155, 0.05, upperShell);                                      // buck heatsink
     rbox(0.004, 0.030, 0.150, 0.004, mGraphiteMatte, 0.268, DY + 0.030, 0, upperShell);                    // front vent
     for (var vk = 0; vk < 5; vk++) rbox(0.003, 0.003, 0.140, 0.001, mAluDark, 0.271, DY + 0.018 + vk * 0.006, 0, upperShell);
-    var P = G.pad;
+    // lid covers the whole pod cleanly; zenith Z-93 OSR radiator panel rejects electronics heat (belly dock coupler is under tub)
     rbox(0.155, 0.006, 0.200, 0.004, mPaint, 0.0775, -0.002, 0, avLid, true);                              // lid plate: covers the whole pod
-    rbox(0.140, 0.008, 0.170, 0.014, mGraphite, P.x - 0.115, 0.004, 0, avLid, true);                       // pad base (lid)
-    [-0.045, 0.045].forEach(function (z) { rbox(0.110, 0.004, 0.030, 0.003, mCopper, P.x - 0.115, 0.010, z, avLid); });
-    rbox(0.016, 0.003, 0.070, 0.002, mLedGreen, P.x - 0.115 + 0.060, 0.009, 0, avLid);
-    [1, -1].forEach(function (s) {                                                                          // coupler guide lips
-      var lip = rbox(0.140, 0.014, 0.006, 0.003, mBlue, P.x - 0.115, 0.012, s * 0.086, avLid); lip.rotation.x = -s * 0.5;
-    });
+    rbox(0.136, 0.004, 0.168, 0.002, mWhite, 0.0775, 0.004, 0, avLid, true);                               // zenith Z-93 OSR thermal radiator panel
+    [-0.048, 0.048].forEach(function (z) { rbox(0.112, 0.003, 0.010, 0.001, mCopper, 0.0775, 0.0025, z, avLid); });   // Cu heat-pipe condenser bars under radiator
     // stereo camera pair on the pod nose (v10: moved off the mast, which now stands beside the module)
     rbox(0.008, 0.012, 0.096, 0.003, mGraphite, 0.268, DY + 0.050, 0, upperShell, true);
     [-0.034, 0.034].forEach(function (z) { cyl(0.0055, 0.0065, 0.006, mLens, 0.270, DY + 0.050, z, upperShell, 'x', 16); });
@@ -492,6 +489,12 @@
         rbox(0.020, hgt, 0.020, 0.004, mAluDark, RX, DY + hgt / 2, -pp[0], cargoBay, true);
       });
       rbox(0.026, 0.006, 0.330, 0.003, mAluDark, RX, DY + 0.003, 0, cargoBay, true);                      // foot rail bolted to the deck
+      if (sg > 0) {
+        [-0.12, 0.12].forEach(function (bz) {
+          rbox(0.036, 0.008, 0.032, 0.002, mSteel, RX, DY + 0.009, bz, cargoBay, true);                     // forward ring CTE slotted slide bracket (+-3.4 mm axial compliance)
+          cyl(0.004, 0.004, 0.042, mBlue, RX, DY + 0.009, bz, cargoBay, 'x', 12);                          // MoS2-lubricated guide pin
+        });
+      }
       // jaws: each a group rotating about the ring axis; closed it covers -30..+30 deg (port) or 150..210 (starboard)
       var jaws = [], padDefs = [];
       [1, -1].forEach(function (side) {
@@ -499,9 +502,9 @@
         var base = side > 0 ? -JAW / 2 : 180 - JAW / 2;
         var arcJ = new THREE.Mesh(new THREE.TorusGeometry(RMID, RT * 0.9, 12, 24, JAW * rad), mPaint);
         arcJ.rotation.z = base * rad; arcJ.castShadow = true; jg.add(arcJ);
-        [base + 14, base + JAW - 14].forEach(function (an) {                 // two pads per jaw, each closes along its normal
+        [base + 14, base + JAW - 14].forEach(function (an) {                 // two Vespel SP-21 friction pads per jaw (cryo vacuum)
           var a2 = an * rad, nx = Math.cos(a2), ny = Math.sin(a2), r0 = RIN - 0.004;
-          var pd = rbox(0.008, 0.032, 0.024, 0.002, mRubber, nx * r0, ny * r0, 0, jg, true); pd.rotation.z = a2;
+          var pd = rbox(0.008, 0.032, 0.024, 0.002, mVespel, nx * r0, ny * r0, 0, jg, true); pd.rotation.z = a2;
           pd.userData = { x0: nx * r0, y0: ny * r0, nx: nx, ny: ny, travel: Math.max(0, r0 - 0.004 - MDr - 0.0005) };
           padDefs.push(pd);
         });
@@ -570,7 +573,8 @@
     var _up = new THREE.Vector3(0, 1, 0), _a = new THREE.Vector3(), _b = new THREE.Vector3(), _d = new THREE.Vector3();
     var finishes = {
       flight: { paint: 0xf4f6f8, shade: 0xdfe4ea, map: paintMap, rough: 0.32, clear: 1.0 },
-      petg: { paint: 0x1c1f24, shade: 0x2a2e35, map: null, rough: 0.46, clear: 0.35 }
+      darkAl: { paint: 0x262c36, shade: 0x343c48, map: null, rough: 0.42, clear: 0.2 },
+      petg: { paint: 0x262c36, shade: 0x343c48, map: null, rough: 0.42, clear: 0.2 }   // legacy key mapped to anodized 7075-T6
     };
     var rig = {
       root: root, wheelGroups: wheelGroups, tires: wheels, R: R, finish: 'flight', geom: GEOM,

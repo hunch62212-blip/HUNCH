@@ -203,8 +203,22 @@ export function buildWorld(RAPIER, seed = WORLD.seed) {
       col = mk(RAPIER.ColliderDesc.cylinder(T.length / 2, T.radius).setRotation(qzR));
     } else {
       col = mk(RAPIER.ColliderDesc.cuboid(T.length / 2, T.height / 2, T.width / 2));
-      // ring-adapter sled: two ring bands the saddles and jaws grip, plus a keel frame
+      // ring-adapter sled: two ring bands the saddles and jaws grip, plus a continuous lower cylindrical keel shroud
+      // connecting the aft sled (-4.35 m) through both rings up to +2.10 m (staying shy of the +3.029 m docking face)
+      // so the under-module CASS laser rangefinders lock onto the exact adapterR cylinder contour well before contact.
       for (const rx of T.adapterRings) extra.push(mk(RAPIER.ColliderDesc.cylinder(0.41, T.adapterR).setTranslation(rx, 0, 0).setRotation(qzR)));
+      const xAft = (T.adapterX || 0) - (T.adapterLen || T.length) / 2;
+      const xFwd = Math.min(T.length / 2 - 0.9, (T.adapterRings?.[1] ?? 1.24) + 0.86);
+      const keelPts = [];
+      for (const kx of [xAft, xFwd]) {
+        for (let a = -28; a <= 28; a += 4) {
+          const th = a * Math.PI / 180;
+          keelPts.push(kx, -T.adapterR * Math.cos(th), T.adapterR * Math.sin(th));
+        }
+        keelPts.push(kx, -T.height / 2, -1.1, kx, -T.height / 2, 1.1);
+      }
+      const kd = RAPIER.ColliderDesc.convexHull(new Float32Array(keelPts));
+      if (kd) extra.push(mk(kd));
     }
     for (const lx of T.lugXs) for (const sz of [-1, 1]) {   // trunnion lug pins
       const inner = T.shape === 'cylinder' ? T.radius - 0.1 : T.adapterR - 0.1, len = T.lugZ + 0.25 - inner;
@@ -214,7 +228,7 @@ export function buildWorld(RAPIER, seed = WORLD.seed) {
     const inertia = { x: 0.8 * T.mass * r2, y: T.mass * (3 * r2 + T.length ** 2) / 12, z: T.mass * (3 * r2 + T.length ** 2) / 12 };
     const comX = T.adapterX || 0;
     body.setAdditionalMassProperties(T.mass, { x: comX * 0.3, y: 0, z: 0 }, inertia, { x: 0, y: 0, z: 0, w: 1 }, true);
-    cargo.push({ ...c, T, body, collider: col, colliders: [col, ...extra], stand, groundY: gy, state: 'staged', dest: c.type === 'cyl40' ? 1 : 2, deliveredAt: null, initial: { x: c.x, y: cy, z: c.z, yaw: c.yaw } });
+    cargo.push({ ...c, T, body, collider: col, colliders: [col, ...extra], stand, groundY: gy, state: 'staged', dest: c.dest ?? (c.type === 'cyl40' ? 1 : 2), deliveredAt: null, initial: { x: c.x, y: cy, z: c.z, yaw: c.yaw } });
   }
   // receiving cradle jacks at each port are created when they extend (see Sim.extendJacks)
   for (const port of ports) {

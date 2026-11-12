@@ -3,7 +3,7 @@
 // carries its own survival heaters and recharges the rover through the ~354 h lunar night.
 import { POWER_DOCK, ROVER, MOON } from './config.js';
 import { heightAt } from './terrain.js';
-import { G_STRUCT, Q_TERRAIN, yawQuat } from './world.js';
+import { G_STRUCT, Q_SENSOR, yawQuat } from './world.js';
 
 export function powerDockLayout(hab) {
   const D = POWER_DOCK, n = { x: hab.nx, z: hab.nz }, t = { x: hab.tx, z: hab.tz };
@@ -44,7 +44,9 @@ export class PowerDock {
   get soc() { return this.bankWh / POWER_DOCK.bankWh; }
   roverOnPad() {
     const R = this.sim.rover, p = R.pose(), L = this.layout;
-    return Math.hypot(p.x - L.pad.x, p.z - L.pad.z) < POWER_DOCK.couplerTol && R.telemetry().speed < 0.08;
+    const dyaw = Math.abs(Math.atan2(Math.sin(p.yaw - L.yaw), Math.cos(p.yaw - L.yaw)));
+    const aligned = Math.min(dyaw, Math.abs(Math.PI - dyaw)) < 8 * Math.PI / 180;
+    return aligned && Math.hypot(p.x - L.pad.x, p.z - L.pad.z) < POWER_DOCK.couplerTol && R.telemetry().speed < 0.08;
   }
   update(dt) {
     const sim = this.sim, D = POWER_DOCK, sun = sim.sunDir, R = sim.rover;
@@ -61,8 +63,8 @@ export class PowerDock {
       this.litFrac = A.map((a, i) => {
         if (sun.y <= -0.005) return 0;
         const g = heightAt(sim.terrain, a.x, a.z);
-        const o = { x: a.x + sun.x * 6, y: g + D.mastH - D.panelH / 2 + sun.y * 6, z: a.z + sun.z * 6 };
-        if (sim.world.castRay(new sim.RAPIER.Ray(o, { x: sun.x, y: sun.y, z: sun.z }), 3000, true, undefined, Q_TERRAIN)) return 0;
+        const o = { x: a.x + sun.x * 0.6, y: g + D.mastH - D.panelH / 2 + sun.y * 0.6, z: a.z + sun.z * 0.6 };
+        if (sim.world.castRay(new sim.RAPIER.Ray(o, { x: sun.x, y: sun.y, z: sun.z }), 3000, true, undefined, Q_SENSOR)) return 0;
         let f = 1;
         for (let j = 0; j < A.length; j++) {
           if (j === i) continue;
@@ -96,7 +98,7 @@ export class PowerDock {
       // taper to zero between 40 C and the 50 C pack limit
       const Tb = sim.health ? sim.health.th.Tb : 20;
       this.coldHold = Tb < (D.chargeMinCellC ?? -99);
-      if (this.coldHold) want = 0; else want *= Math.max(0, Math.min(1, (50 - Tb) / 10));
+      if (this.coldHold) want = 0; else want *= Math.max(0, Math.min(1, (48 - Tb) / 8));
     }
     const avail = Math.max(0, this.solarW - this.loadW) + (this.bankWh > D.bankWh * D.bankFloor ? D.bankMaxDischargeW : 0);
     this.chargeW = Math.min(want, avail);

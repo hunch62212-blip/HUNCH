@@ -40,6 +40,7 @@ async function main() {
   await step(15, `Generating ${(WORLD.size / 1000).toFixed(1)} × ${(WORLD.size / 1000).toFixed(1)} km lunar terrain (seed ${seed}): craters, boulders, highlands…`);
   // thermal scenarios happen at random in the browser (?noscen turns them off); headless tests opt in
   const sim = new Sim(RAPIER, { seed, thermalScenarios: !qs.has('noscen') });
+  sim.idleSolar = !qs.has('noidlesolar');
   sim.log(`Terrain seed ${seed}: crater and boulder layout is random each load (add ?seed=${seed} to the URL to repeat this map, or type "newmap")`, 'info');
   await step(45, 'Building renderer, lunar sky and lighting…');
   const canvas = document.getElementById('view');
@@ -73,9 +74,6 @@ async function main() {
       for (const sz of [-1, 1]) { const t = tagMesh(id + 2, 0.8); t.position.set(-1.2, -0.3, sz * (half + 0.035)); t.rotation.y = sz > 0 ? 0 : Math.PI; g.add(t); }
     } else {
       g = buildCargo(c);
-      const T = c.T; // ring-adapter sled the saddles and jaws grip
-      const ringM = new THREE.MeshStandardMaterial({ color: 0xb7bec7, metalness: 0.9, roughness: 0.3 });
-      for (const rx of T.adapterRings) { const r = new THREE.Mesh(new THREE.CylinderGeometry(T.adapterR, T.adapterR, 0.82, 48, 1, true), ringM); r.rotation.z = Math.PI / 2; r.position.x = rx; r.castShadow = true; g.add(r); }
     }
     g.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
     scene.add(g); cargoVis.push({ c, g });
@@ -90,11 +88,17 @@ async function main() {
       if (!v) {
         const t = c.body.translation(), r = c.body.rotation();
         const q = new THREE.Quaternion(r.x, r.y, r.z, r.w), ax = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+        const yaw = Math.atan2(-ax.z, ax.x);
+        const lugs = c.T.lugXs || [-c.T.lugX, c.T.lugX];
+        const midX = (lugs[0] + lugs[1]) / 2, spanX = lugs[1] - lugs[0];
+        const nomSpanX = 2 * (c.T.shape === 'cylinder' ? c.T.lugX : 0.21 * K);
         const wrap = new THREE.Group(); wrap.scale.setScalar(K);
         const st = TM.ModuleModels.buildStand(port.name);
         const half = c.T.adapterR || c.T.radius;
-        TM.ModuleModels.placeStand(st, t.x / K, t.z / K, (t.y - half) / K, () => port.ground / K);
-        const pivot = new THREE.Group(); pivot.position.copy(st.position); st.position.set(0, 0, 0); pivot.rotation.y = Math.atan2(-ax.z, ax.x); pivot.add(st);
+        const stX = t.x + Math.cos(yaw) * midX, stZ = t.z - Math.sin(yaw) * midX;
+        TM.ModuleModels.placeStand(st, stX / K, stZ / K, (t.y - half) / K, () => port.ground / K);
+        st.scale.x = spanX / nomSpanX;
+        const pivot = new THREE.Group(); pivot.position.copy(st.position); st.position.set(0, 0, 0); pivot.rotation.y = yaw; pivot.add(st);
         wrap.add(pivot); scene.add(wrap);
         v = { wrap, depth: (t.y - half - port.ground) };
         jackVis.set(port, v);
@@ -138,6 +142,18 @@ async function main() {
     },
     async loadMap() { try { const d = (await DiskMemory.load(sim.terrain.seed)) || (await DB.get('map')); if (d && sim.slam.deserialize(d)) sim.log(`Remembered SLAM map loaded: ${d.tiles.length} tiles, ${d.routes.length} proven routes (saved ${new Date(d.savedAt).toLocaleString()})`, 'ok'); else sim.log('No saved map for this world', 'warn'); } catch (e) { sim.log('Map load failed: ' + e.message, 'err'); } },
   };
+  // pixels the picture must move up so that the view centre lands in the middle of the panel-free band at the
+  // horizontal centre of the window (between the top bar / thermal header and the instruments / status / console)
+  let viewShift = 0, viewShiftWant = 0, vsW = 0, vsH = 0;
+  function freeAreaShift() {
+    const H = window.innerHeight, cx = window.innerWidth / 2; let top = 0, bot = H;
+    for (const id of ['topbar', 'thermPanel', 'instPanel', 'autoPanel', 'console']) {
+      const el = document.getElementById(id); if (!el) continue;
+      const r = el.getBoundingClientRect(); if (!r.width || !r.height || r.left > cx || r.right < cx) continue;
+      if (r.bottom < H * 0.35) top = Math.max(top, r.bottom); else if (r.top > H * 0.35) bot = Math.min(bot, r.top);
+    }
+    return Math.max(-0.3 * H, Math.min(0.3 * H, H / 2 - (top + bot) / 2));
+  }
   const controls = new OrbitControls(camera, canvas);
   controls.enableDamping = true; controls.dampingFactor = 0.08; controls.maxPolarAngle = Math.PI * 0.495; controls.minDistance = 6; controls.maxDistance = 1800;
   camera.position.set(p0.x - p0.fwd.x * 32 + 14, p0.y + 13, p0.z - p0.fwd.z * 32 + 10);
@@ -158,7 +174,7 @@ async function main() {
   }
 
   const hud = new HUD(sim, ui);
-  sim.on('routes', () => { overlay.setRoutes(sim.slam.routes); ui.saveMap(); });
+  sim.on('routes', () => { overlay.setRoutes(sim.slam.routes); ui.saveMap(true); }); // quiet: this fires on every SLAM correction and filled the console with "memory saved" lines
   sim.on('path', () => overlay.setPath(sim.autonomy.path));
   sim.on('scan', (s) => { if (ui.overlays.lidar && lidar.points.visible) lidar.set(s, sim.rover.pose().y); });
 
@@ -371,6 +387,16 @@ async function main() {
       camera.fov = 52;
     } else { camera.fov = 52; controls.update(); }
     if (!(camera.aspect > 0)) camera.aspect = 16 / 9;
+    // Keep the rover in the part of the window the panels leave free. On a 900 px-high laptop screen the instruments
+    // panel sits over the middle of the view, exactly where the followed rover is drawn. The picture is shifted up by
+    // a lens-shift (view offset), which moves nothing in the world and keeps mouse picking exact.
+    if (frame % 20 === 0) viewShiftWant = ui.view === 'cam' ? 0 : freeAreaShift();
+    if (Math.abs(viewShiftWant - viewShift) > 0.5 || window.innerWidth !== vsW || window.innerHeight !== vsH) {
+      viewShift += (viewShiftWant - viewShift) * Math.min(1, dt * 6);
+      const W = vsW = window.innerWidth, H = vsH = window.innerHeight;   // the offset is in window pixels: redo it after a resize
+      if (Math.abs(viewShift) < 1 && viewShiftWant === 0) { viewShift = 0; camera.clearViewOffset(); } else camera.setViewOffset(W, H, 0, Math.round(viewShift), W, H);
+      camera.updateProjectionMatrix(); S.csm.updateFrustums();
+    }
     camera.updateProjectionMatrix();
 
     // shadows follow the area of interest

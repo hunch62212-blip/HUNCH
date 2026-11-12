@@ -281,7 +281,7 @@ export class Slam {
       lev[m * 3] = v.x; lev[m * 3 + 1] = v.y; lev[m * 3 + 2] = v.z; m++;
     }
     // ---- loop closure on revisit, then local correlative scan-to-map tracking
-    if (this.matching && this.cellsKnown > 4000) { this._loopClosure(lev, m); this._match(lev, m); }
+    if (this.matching && !this.matchSuspended && this.cellsKnown > 4000) { this._loopClosure(lev, m); this._match(lev, m); }
     // ---- map update with the corrected pose
     if (this.mapping) {
       const c = Math.cos(e.yaw), s = Math.sin(e.yaw);
@@ -370,7 +370,9 @@ export class Slam {
     } else this.lastMatch = { ...this.lastMatch, ok: false, t: this.sim.time };
     restoreVar();
     const off = ok ? best.off : base.off;          // vertical: rover height relative to the map
-    e.y -= Math.max(-0.3, Math.min(0.3, off)) * 0.5;
+    const yGain = (ok || base.used >= 100) ? 0.65 : 0.45;
+    const yMax = (ok || base.used >= 100) ? 1.0 : 0.3;
+    e.y -= Math.max(-yMax, Math.min(yMax, off)) * yGain;
   }
 
   // Loop closure: when most of a scan lands in map tiles built long ago (a revisit), search a wide
@@ -379,10 +381,19 @@ export class Slam {
   _loopClosure(lev, m) {
     const now = this.sim.time;
     if (this.lcSuspended || now - (this._lcT || 0) < 10) return;
+    // surveyed fiducial beacons near LANDER / HAB beat height-only terrain matching
+    if (now - Math.max(this.lastFix?.t ?? -1e9, this.lastFixCheck?.t ?? -1e9) < 60) return;
+    const anchor = Math.max(this._anchorDist || 0, this._fixAnchor?.d || 0);
+    const travelled = Math.max(0, this.sensors.odom.dist - anchor);
+    if (travelled < 40) return;
     const e = this.est;
     const idx = [];
     const stride = Math.max(1, Math.floor(m / 260));
-    for (let i = 0; i < m; i += stride) { const r = Math.hypot(lev[i * 3], lev[i * 3 + 2]); if (r > 6 && r < 70) idx.push(i); }
+    for (let i = 0; i < m; i += stride) {
+      const r = Math.hypot(lev[i * 3], lev[i * 3 + 2]);
+      const inc = (ROVER.lidar.mountLocal.y - lev[i * 3 + 1]) / Math.max(1, r);
+      if (r > 6 && r < 55 && inc > 0.055) idx.push(i);
+    }
     if (idx.length < 80) return;
     const OLD = 240;
     const oldH = (x, z) => {
@@ -390,7 +401,7 @@ export class Slam {
       const t = this.tiles.get(tx * 100000 + tz);
       if (!t) return NaN;
       const k = (iz - tz * TILE) * TILE + (ix - tx * TILE);
-      return t.n[k] >= 2 && t.t0[k] !== 0 && now - t.t0[k] > OLD ? t.h0[k] : NaN;
+      return t.n[k] >= 2 && t.v[k] < 0.04 && t.t0[k] !== 0 && now - t.t0[k] > OLD ? t.h0[k] : NaN;
     };
     // is this a revisit? (most points fall into old tiles at the current estimate)
     let oldHits = 0;
@@ -399,35 +410,51 @@ export class Slam {
     if (oldHits < idx.length * 0.45) return;
     this._lcT = now;
     const res = new Float32Array(idx.length);
+    const minU = Math.max(60, Math.floor(idx.length * 0.45));
     const score = (x, z, yaw) => {
       const c = Math.cos(yaw), s = Math.sin(yaw); let u = 0, sum = 0;
       for (const i of idx) { const h = oldH(x + lev[i * 3] * c + lev[i * 3 + 2] * s, z - lev[i * 3] * s + lev[i * 3 + 2] * c); if (h !== h) continue; const r = e.y + lev[i * 3 + 1] - h; res[u++] = r; sum += r; }
-      if (u < 60) return { sc: 0, u };
+      if (u < minU) return { sc: 0, u, mass: 0 };
       const mu = sum / u; let sc = 0;
       for (let k = 0; k < u; k++) { const r = res[k] - mu; sc += Math.exp(-(r * r) / (2 * 0.25 * 0.25)); }
-      return { sc: sc / u * Math.min(1, u / (idx.length * 0.6)), u, mu };
+      return { sc: sc / u, u, mu, mass: sc };
     };
     const cur = score(e.x, e.z, e.yaw);
-    let best = { sc: -1 };
+    let best = { sc: -1, u: 0, mass: 0 };
     for (let a = -3; a <= 3; a++) for (let i = -8; i <= 8; i++) for (let j = -8; j <= 8; j++) {
       const r = score(e.x + i * 1.5, e.z + j * 1.5, e.yaw + a * 0.0175);
       if (r.sc > best.sc) best = { ...r, x: e.x + i * 1.5, z: e.z + j * 1.5, yaw: e.yaw + a * 0.0175 };
     }
-    // refine around the winner
+    // refine around the winner (capture the coarse winner first so the loop does not walk off it)
+    const bx0 = best.x, bz0 = best.z, byaw0 = best.yaw;
     for (let a = -2; a <= 2; a++) for (let i = -4; i <= 4; i++) for (let j = -4; j <= 4; j++) {
-      const r = score(best.x + i * 0.35, best.z + j * 0.35, best.yaw + a * 0.005);
-      if (r.sc > best.sc) best = { ...r, x: best.x + i * 0.35, z: best.z + j * 0.35, yaw: best.yaw + a * 0.005 };
+      const r = score(bx0 + i * 0.35, bz0 + j * 0.35, byaw0 + a * 0.005);
+      if (r.sc > best.sc) best = { ...r, x: bx0 + i * 0.35, z: bz0 + j * 0.35, yaw: byaw0 + a * 0.005 };
     }
     const shift = Math.hypot(best.x - e.x, best.z - e.z);
-    // plausibility: odometry + IMU drift is ~1-3 % of distance travelled since the last anchor
-    const travelled = this.sensors.odom.dist - (this._anchorDist || 0);
-    const maxShift = 2 + 0.03 * travelled;
-    if (best.sc > 0.75 && best.sc > cur.sc * 1.25 && shift > 0.8 && shift < maxShift && cur.sc > 0.3) {
-      this.lastLoop = { t: now, shift, dyaw: (best.yaw - e.yaw) * 57.3, score: best.sc, before: cur.sc };
-      e.x = best.x; e.z = best.z; e.yaw = best.yaw; e.y -= Math.max(-1, Math.min(1, best.mu)) * 0.8;
+    // plausibility: odometry + IMU drift is ~1-3 % of distance travelled since the last anchor (odometric or fiducial)
+    const maxShift = (this._fixAnchor && this._fixAnchor.d >= (this._anchorDist || 0) ? 0.6 : 1.2) + 0.03 * travelled;
+    const maxYaw = Math.min(4 * Math.PI / 180, (0.5 + 0.0023 * travelled) * Math.PI / 180);
+    const wrappedYaw = Math.atan2(Math.sin(best.yaw), Math.cos(best.yaw));
+    const dy = Math.atan2(Math.sin(wrappedYaw - e.yaw), Math.cos(wrappedYaw - e.yaw));
+    let sharp = true;
+    if (shift > 0.8) {
+      const ux = (best.x - e.x) / shift, uz = (best.z - e.z) / shift;
+      const f1 = score(best.x + ux * 1.5, best.z + uz * 1.5, best.yaw);
+      const b1 = score(best.x - ux * 1.5, best.z - uz * 1.5, best.yaw);
+      const valid = [f1, b1].filter((q) => q.u >= minU);
+      const maxNb = valid.length ? Math.max(...valid.map((q) => q.sc)) : 1;
+      const avgNb = valid.length ? valid.reduce((a, q) => a + q.sc, 0) / valid.length : 1;
+      sharp = b1.u >= minU && valid.length >= 1 && best.sc - avgNb >= 0.025 && best.sc - maxNb >= 0.008;
+    }
+    const overlapOk = best.u >= cur.u * 0.85 && best.mass > cur.mass * 1.08;
+    const pureY = best.sc > 0.78 && Math.abs(best.mu) > 0.35 && Math.abs(best.mu) < 3.0 && shift < Math.min(0.8, maxShift) && best.u >= cur.u * 0.90;
+    if (Math.abs(dy) <= maxYaw && ((sharp && overlapOk && best.sc > 0.78 && best.sc > Math.max(cur.sc + 0.08, cur.sc * 1.10) && shift > 0.8 && shift < maxShift && cur.sc > 0.3) || pureY)) {
+      this.lastLoop = { t: now, shift, dyaw: dy * 57.3, dy: -best.mu, score: best.sc, before: cur.sc };
+      e.x = best.x; e.z = best.z; e.yaw = wrappedYaw; e.y -= Math.max(-2.5, Math.min(2.5, best.mu)) * 0.85;
       this._repairMap(e.x, e.z, now);
       this._anchorDist = this.sensors.odom.dist;
-      this.sim.log(`SLAM loop closure: revisited mapped area, pose corrected by ${shift.toFixed(1)} m / ${this.lastLoop.dyaw.toFixed(2)} deg (match ${cur.sc.toFixed(2)} -> ${best.sc.toFixed(2)})`, 'ok');
+      this.sim.log(`SLAM loop closure: revisited mapped area, pose corrected by ${shift.toFixed(1)} m / ${this.lastLoop.dyaw.toFixed(2)} deg${Math.abs(best.mu) > 0.35 ? ` / vert ${(-best.mu * 0.85).toFixed(2)} m` : ''} (match ${cur.sc.toFixed(2)} -> ${best.sc.toFixed(2)})`, 'ok');
     }
   }
 
@@ -452,12 +479,12 @@ export class Slam {
   }
 
   // ---------- route memory (teach & repeat) ----------
-  beginRecord(from, to) { this.recording = { from, to, pts: [{ x: this.est.x, z: this.est.z }], t0: this.sim.time, e0: this.sim.rover.power.energyUsedWh }; }
+  beginRecord(from, to) { this.recording = { from, to, pts: [{ x: this.est.x, z: this.est.z, t: this.sim.time }], t0: this.sim.time, e0: this.sim.rover.power.energyUsedWh, loadedOk: this.limits.slopeLethal <= 12 }; }
   endRecord(success) {
     const r = this.recording; this.recording = null;
     if (!r || !success || r.pts.length < 3) return null;
     let len = 0; for (let i = 1; i < r.pts.length; i++) len += Math.hypot(r.pts[i].x - r.pts[i - 1].x, r.pts[i].z - r.pts[i - 1].z);
-    const route = { id: `R${this.routes.length + 1}`, from: r.from, to: r.to, pts: r.pts, length: len, time: this.sim.time - r.t0, energyWh: this.sim.rover.power.energyUsedWh - r.e0, uses: 0, created: Date.now(), ok: true };
+    const route = { id: `R${this.routes.length + 1}`, from: r.from, to: r.to, pts: r.pts, length: len, time: this.sim.time - r.t0, energyWh: this.sim.rover.power.energyUsedWh - r.e0, uses: 0, created: Date.now(), ok: true, loadedOk: !!r.loadedOk };
     // keep the best (shortest/fastest) route per endpoint pair
     const prev = this.routes.find((x) => x.from === r.from && x.to === r.to);
     if (prev && prev.time <= route.time) { prev.uses++; return prev; }
@@ -479,7 +506,28 @@ export class Slam {
   relocalize(p) {
     this.est.x = p.x; this.est.y = p.y; this.est.z = p.z; this.est.yaw = p.yaw;
     this._fixAnchor = { t: this.sim.time, d: this.sensors.odom.dist };
+    this._yAnchorT = this.sim.time;
     this.kf = []; this._keyframe(this.est, true);
+  }
+
+  // Fraction of mapped cells around (cx, cz) whose first observation predates _fixAnchor.t (not moved by shiftFrame).
+  anchoredFraction(cx, cz, radius = 45) {
+    const at = this._fixAnchor?.t;
+    if (at == null) return 0;
+    const step = 4, r2 = radius * radius;
+    let total = 0, old = 0;
+    for (let dz = -radius; dz <= radius; dz += step) for (let dx = -radius; dx <= radius; dx += step) {
+      if (dx * dx + dz * dz > r2) continue;
+      const ix = Math.floor((cx + dx) / RES), iz = Math.floor((cz + dz) / RES);
+      const tx = Math.floor(ix / TILE), tz = Math.floor(iz / TILE);
+      const t = this.tiles.get(this.tileKey(tx, tz));
+      if (!t) continue;
+      const k = (iz - tz * TILE) * TILE + (ix - tx * TILE);
+      if (!t.n[k]) continue;
+      total++;
+      if (!(t.t0[k] > at)) old++;
+    }
+    return total ? old / total : 0;
   }
 
   // ---------- keyframe pose graph (CHANGES.md §17) ----------
@@ -590,7 +638,7 @@ export class Slam {
   // pose). The graph since the last fix is relaxed with that node pinned (see relaxChain), then each map cell first seen
   // since the last fix, each breadcrumb and each route point since then is moved rigidly with the blend of its two
   // neighbouring nodes' corrections. Data older than the previous fix stays put.
-  shiftFrame(dx, dz, dyaw = 0) {
+  shiftFrame(dx, dz, dyaw = 0, dy = 0) {
     const now = this.sim.time, dNow = this.sensors.odom.dist, e = this.est;
     const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
     const A = this._fixAnchor || { t: 0, d: 0 };
@@ -602,7 +650,9 @@ export class Slam {
     const corr = chain.map((q, i) => ({ cx: q.x, cz: q.z, dx: rel.P[i].x - q.x, dz: rel.P[i].z - q.z, dyaw: wrap(rel.P[i].yaw - q.yaw) }));
     const rot = (vx, vz, a) => { const c = Math.cos(a), s = Math.sin(a); return [vx * c + vz * s, -vx * s + vz * c]; };
     const warpBy = (c, x, z) => { const [rx, rz] = rot(x - c.cx, z - c.cz, c.dyaw); return [c.cx + c.dx + rx, c.cz + c.dz + rz]; };
-    const tAt = chain.map((q) => q.t), tFirst = chain[0].t;
+    const tAt = chain.map((q) => q.t), tFirst = chain[0].t, tLast = tAt[tAt.length - 1];
+    const yAnchorT = this._yAnchorT ?? 0;
+    const dyAt = (t) => !dy || !(t > yAnchorT) ? 0 : dy;
     const seg = (t) => { // chain segment holding time t (binary search)
       let lo = 0, hi = chain.length - 1;
       while (lo < hi - 1) { const mid = (lo + hi) >> 1; if (tAt[mid] <= t) lo = mid; else hi = mid; }
@@ -610,21 +660,59 @@ export class Slam {
     };
     const warp = (x, z, t) => {
       if (!(t > tFirst)) return [x, z];
-      if (t >= tAt[tAt.length - 1]) return warpBy(corr[corr.length - 1], x, z);
+      if (t >= tLast) return warpBy(corr[corr.length - 1], x, z);
       const j = seg(t), a = (t - tAt[j]) / Math.max(1e-6, tAt[j + 1] - tAt[j]);
       const [x0, z0] = warpBy(corr[j], x, z), [x1, z1] = warpBy(corr[j + 1], x, z);
       return [x0 + (x1 - x0) * a, z0 + (z1 - z0) * a];
     };
     // map: lift every cell first seen since the anchor, then drop it at its warped position
+    // When dy !== 0, feather the vertical shift from 0 (within <= 4 m of anchored t0 <= yAnchorT cells) to dy over ~24 m
+    // via a bilinearly sampled block distance field, so anchor boundaries cannot become sharp >0.6 m vertical cliffs.
+    let dyAtPos = dy ? (gx, gz, t0) => (t0 > yAnchorT ? dy : 0) : () => 0;
+    if (dy) {
+      const R = 12, dist4 = new Map(), key4 = (bx, bz) => (bx + 32768) * 65536 + (bz + 32768);
+      const qx = [], qz = [], qd = [];
+      for (const t of this.tiles.values()) {
+        for (let i = 0; i < t.n.length; i++) {
+          if (!t.n[i] || t.t0[i] > yAnchorT) continue;
+          const bx = Math.floor((t.tx * TILE + (i % TILE)) / 4), bz = Math.floor((t.tz * TILE + Math.floor(i / TILE)) / 4);
+          const k = key4(bx, bz);
+          if (!dist4.has(k)) { dist4.set(k, 0); qx.push(bx); qz.push(bz); qd.push(0); }
+        }
+      }
+      for (let h = 0; h < qx.length; h++) {
+        const bx = qx[h], bz = qz[h], d = qd[h];
+        if (d >= R) continue;
+        for (let dbz = -1; dbz <= 1; dbz++) for (let dbx = -1; dbx <= 1; dbx++) {
+          if (!dbx && !dbz) continue;
+          const nx = bx + dbx, nz = bz + dbz, k = key4(nx, nz);
+          if (!dist4.has(k)) { dist4.set(k, d + 1); qx.push(nx); qz.push(nz); qd.push(d + 1); }
+        }
+      }
+      const wBlock = (bx, bz) => { const d = dist4.get(key4(bx, bz)); return d == null ? 1 : d <= 1 ? 0 : (d - 1) / R; };
+      dyAtPos = (gx, gz, t0) => {
+        if (!(t0 > yAnchorT)) return 0;
+        const fx = (gx + 0.5) / 4 - 0.5, fz = (gz + 0.5) / 4 - 0.5;
+        const x0 = Math.floor(fx), z0 = Math.floor(fz), ax = fx - x0, az = fz - z0;
+        const w0 = wBlock(x0, z0) * (1 - ax) + wBlock(x0 + 1, z0) * ax;
+        const w1 = wBlock(x0, z0 + 1) * (1 - ax) + wBlock(x0 + 1, z0 + 1) * ax;
+        return dy * (w0 * (1 - az) + w1 * az);
+      };
+    }
     const moved = [];
     for (const t of this.tiles.values()) {
       for (let i = 0; i < t.n.length; i++) {
-        if (!t.n[i] || !(t.t0[i] > A.t)) continue;
+        if (!t.n[i]) continue;
+        const inH = t.t0[i] > A.t, inY = dy && t.t0[i] > yAnchorT;
+        if (!inH && !inY) continue;
         const ix = t.tx * TILE + (i % TILE), iz = t.tz * TILE + Math.floor(i / TILE);
+        const dyy = dyAtPos(ix, iz, t.t0[i]);
+        if (!inH) { if (dyy) { t.h[i] += dyy; t.h0[i] += dyy; } continue; }
         const [wx, wz] = warp((ix + 0.5) * RES, (iz + 0.5) * RES, t.t0[i]);
         const nx = Math.floor(wx / RES), nz = Math.floor(wz / RES);
-        if (nx === ix && nz === iz) continue;
-        moved.push(nx, nz, t.h[i], t.h0[i], t.t0[i], t.v[i], t.n[i]);
+        const dyyN = dyAtPos(nx, nz, t.t0[i]);
+        if (nx === ix && nz === iz) { if (dyyN) { t.h[i] += dyyN; t.h0[i] += dyyN; } continue; }
+        moved.push(nx, nz, t.h[i] + dyyN, t.h0[i] + dyyN, t.t0[i], t.v[i], t.n[i]);
         t.n[i] = 0; this.cellsKnown--;
       }
     }
@@ -644,18 +732,19 @@ export class Slam {
     // keyframes themselves take their relaxed poses (the sighting node ends on the surveyed pose)
     for (let i = 0; i < chain.length; i++) { chain[i].x = rel.P[i].x; chain[i].z = rel.P[i].z; chain[i].yaw = rel.P[i].yaw; }
     const c0 = corr[corr.length - 1], pre = { x: c0.cx, z: c0.cz };
-    e.x = rel.P[chain.length - 1].x; e.z = rel.P[chain.length - 1].z; e.yaw = wrap(e.yaw + c0.dyaw);
+    e.x = rel.P[chain.length - 1].x; e.z = rel.P[chain.length - 1].z; e.yaw = wrap(e.yaw + c0.dyaw); e.y += dy;
     this._fixAnchor = { t: this.kf[this.kf.length - 1].t, d: dNow };
+    if (dy) this._yAnchorT = this._fixAnchor.t;
     // the same rigid correction for state that lives at the current pose (planned path, port estimates)
     const apply = (p) => { const [wx, wz] = warpBy(c0, p.x, p.z); p.x = wx; p.z = wz; };
-    this.lastFix = { t: now, dx, dz, dyaw, cells: moved.length / 7, nodes: chain.length, iters: rel.iters, apply, dyawEnd: c0.dyaw, pre };
+    this.lastFix = { t: now, dx, dz, dyaw, dy, cells: moved.length / 7, nodes: chain.length, iters: rel.iters, apply, dyawEnd: c0.dyaw, pre };
     this.version++;
     this.sim.emit('routes');
     return this.lastFix;
   }
 
   clear() {
-    this.tiles.clear(); this.cellsKnown = 0; this.routes = []; this.trajectory = []; this.kf = []; this.version++;
+    this.tiles.clear(); this.cellsKnown = 0; this.routes = []; this.trajectory = []; this.kf = []; this._fixAnchor = null; this._yAnchorT = 0; this.version++;
     this.sim.emit('routes');
   }
 
@@ -663,10 +752,11 @@ export class Slam {
   serialize() {
     const tiles = [];
     for (const t of this.tiles.values()) tiles.push({ tx: t.tx, tz: t.tz, h: t.h, h0: t.h0, n: t.n, v: t.v });
-    return { seed: this.sim.terrain.seed, savedAt: Date.now(), tiles, routes: this.routes };
+    return { layout: MAP_LAYOUT, seed: this.sim.terrain.seed, savedAt: Date.now(), tiles, routes: this.routes };
   }
   deserialize(d) {
-    if (!d || d.seed !== this.sim.terrain.seed) return false;
+    // a map saved before the port/pad layout changed (3 ports, pod rack) would put obstacles in the wrong places
+    if (!d || d.seed !== this.sim.terrain.seed || d.layout !== MAP_LAYOUT) return false;
     this.tiles.clear(); this.cellsKnown = 0;
     for (const s of d.tiles) {
       const t = this.getTile(s.tx, s.tz, true);
@@ -681,4 +771,5 @@ export class Slam {
   }
 }
 
+export const MAP_LAYOUT = 2;   // bump when pad, port or building positions change
 export { TS as TILE_SIZE_M };

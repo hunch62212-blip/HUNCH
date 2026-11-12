@@ -90,13 +90,16 @@ export class Sensors {
     for (const c of this.sim.cargo) {
       const T = c.T;
       const h = T.shape === 'cylinder' ? T.radius : T.height / 2;
-      this.targets.push({ id: `${c.id}/AFT`, obj: c, kind: 'cargo', local: new THREE.Vector3(-T.length / 2 - 0.01, -h * 0.62, 0), normal: new THREE.Vector3(-1, 0, 0), size: 0.8 }); // low on the aft cap so the rover camera keeps it in view while driving under
+      // low on the aft frame so the rover camera keeps it in view down to CASS acquisition (box20 sits at aft keel frame)
+      const aftX = T.shape === 'cylinder' ? -T.length / 2 - 0.01 : (T.adapterX || 0) - (T.adapterLen || T.length) / 2 - 0.01;
+      const aftY = T.shape === 'cylinder' ? -h * 0.62 : -(T.adapterR || h) * 0.62;
+      this.targets.push({ id: `${c.id}/AFT`, obj: c, kind: 'cargo', local: new THREE.Vector3(aftX, aftY, 0), normal: new THREE.Vector3(-1, 0, 0), size: 0.8 });
       this.targets.push({ id: `${c.id}/FWD`, obj: c, kind: 'cargo', local: new THREE.Vector3(T.length / 2 + 0.01, h * 0.62, 0), normal: new THREE.Vector3(1, 0, 0), size: 0.6 });
       for (const sz of [-1, 1]) this.targets.push({ id: `${c.id}/${sz < 0 ? 'L' : 'R'}`, obj: c, kind: 'cargo', local: new THREE.Vector3(-1.2, -0.3, sz * ((T.shape === 'cylinder' ? T.radius : T.width / 2) + 0.035)), normal: new THREE.Vector3(0, 0, sz), size: 0.8 });
     }
     for (const p of this.sim.ports) {
       const w = new THREE.Vector3(p.x + p.nx * 0.02, p.y - 1.5, p.z + p.nz * 0.02);
-      this.targets.push({ id: `${p.name}`, obj: p, kind: 'port', world: w, normal: new THREE.Vector3(p.nx, 0, p.nz), size: 0.55, known: { x: w.x, z: w.z, nx: p.nx, nz: p.nz } });
+      this.targets.push({ id: `${p.name}`, obj: p, kind: 'port', world: w, normal: new THREE.Vector3(p.nx, 0, p.nz), size: 0.55, known: { x: w.x, y: w.y, z: w.z, nx: p.nx, nz: p.nz } });
     }
     // surveyed beacons on the lander's 4 sides, on the descent-stage wall. Same LANDER_SCALE as the lander's
     // colliders and model: unscaled, the tags sat 7 m inside the descent-stage collider and the camera's
@@ -105,18 +108,18 @@ export class Sensors {
     for (let k = 0; k < 4; k++) {
       const a = k * Math.PI / 2, nx = Math.cos(a), nz = Math.sin(a);
       const w = new THREE.Vector3(lx + nx * LANDER_TAG.r * LS, ly, lz + nz * LANDER_TAG.r * LS);
-      this.targets.push({ id: `LANDER-${'ENWS'[k]}`, obj: { id: 'lander' }, kind: 'beacon', world: w, normal: new THREE.Vector3(nx, 0, nz), size: LANDER_TAG.size * LS, known: { x: w.x, z: w.z, nx, nz } });
+      this.targets.push({ id: `LANDER-${'ENWS'[k]}`, obj: { id: 'lander' }, kind: 'beacon', world: w, normal: new THREE.Vector3(nx, 0, nz), size: LANDER_TAG.size * LS, known: { x: w.x, y: w.y, z: w.z, nx, nz } });
     }
     // surveyed beacon on the power-dock battery vault, facing the charge pad (1.0 m tag, ASSUMED): bounds the
     // SLAM error at the dock so the rover can park on the coupler from the map alone
     { const H = this.sim.terrain.hab, L = powerDockLayout(H), b = L.bank, nx = H.nx, nz = H.nz;
       const w = new THREE.Vector3(b.x + nx * (b.d / 2 + 0.02), heightAt(this.sim.terrain, b.x, b.z) + b.h * 0.6, b.z + nz * (b.d / 2 + 0.02));
-      this.targets.push({ id: 'POWER-DOCK', obj: { id: 'powerdock' }, kind: 'beacon', world: w, normal: new THREE.Vector3(nx, 0, nz), size: 1.0, known: { x: w.x, z: w.z, nx, nz } }); }
+      this.targets.push({ id: 'POWER-DOCK', obj: { id: 'powerdock' }, kind: 'beacon', world: w, normal: new THREE.Vector3(nx, 0, nz), size: 1.0, known: { x: w.x, y: w.y, z: w.z, nx, nz } }); }
     // surveyed beacon on the habitat supply building facade (1.2 m tag, ASSUMED): bounds
     // SLAM drift when approaching the habitat from the landing pad traverse
     { const H = this.sim.terrain.hab, f = H.face, nx = H.nx, nz = H.nz;
       const w = new THREE.Vector3(f.x + nx * 0.05, heightAt(this.sim.terrain, f.x, f.z) + 7.5, f.z + nz * 0.05);
-      this.targets.push({ id: 'HAB-FACE', obj: { id: 'hab' }, kind: 'beacon', world: w, normal: new THREE.Vector3(nx, 0, nz), size: 1.2, known: { x: w.x, z: w.z, nx, nz } }); }
+      this.targets.push({ id: 'HAB-FACE', obj: { id: 'hab' }, kind: 'beacon', world: w, normal: new THREE.Vector3(nx, 0, nz), size: 1.2, known: { x: w.x, y: w.y, z: w.z, nx, nz } }); }
   }
 
   cameraPose() {
@@ -155,29 +158,54 @@ export class Sensors {
     // but inverted wheel by wheel through the nonlinear thrust curve they did not, and the loaded rover's odometry
     // read 6-7 % short in every turn (1.4 % on straights): ~30 m of SLAM drift over a 1.5 km leg (CHANGES.md §14)
     let ux = 0, uz = 0, n = 0, Tnet = 0, Nsum = 0, nc = 0;
+    const side = [{ ux: 0, n: 0, T: 0, N: 0, nc: 0 }, { ux: 0, n: 0, T: 0, N: 0, nc: 0 }];
     for (const b of R.bogies) {
+      const S = side[b.z < 0 ? 0 : 1];
       let vsum = 0, k = 0;
       for (const w of b.wheels) {
         const omPrev = this._omPrev.get(w) ?? w.omega;
         this._omPrev.set(w, w.omega);
         if (w.contact && w.load > 50) {
-          Tnet += w.torque - (dt > 0 ? ROVER.wheel.inertia * (w.omega - omPrev) / dt : 0);
-          Nsum += w.load; nc++;
+          const Tw = w.torque - (dt > 0 ? ROVER.wheel.inertia * (w.omega - omPrev) / dt : 0);
+          Tnet += Tw; Nsum += w.load; nc++;
+          S.T += Tw; S.N += w.load; S.nc++;
+          vsum += w.omega * ROVER.wheel.radius; k++;
         }
-        vsum += w.omega * ROVER.wheel.radius; k++;
       }
+      if (!k) continue;
       const s = (vsum / k) * (1 + 0.004 * gauss());
       const st = b.steer + 0.002 * gauss();
-      ux += s * Math.cos(st); uz += -s * Math.sin(st); n++;
+      const bx = s * Math.cos(st);
+      ux += bx; uz += -s * Math.sin(st); n++;
+      S.ux += bx; S.n++;
     }
-    ux /= n; uz /= n;
-    if (nc) {
-      const sEst = this.slipFromTorque(Tnet / nc, Nsum / nc), f = sEst >= 0 ? 1 - sEst : 1 / (1 - sEst);
+    if (!n) { ux = 0; uz = 0; } else { ux /= n; uz /= n; }
+    const vL = side[0].n ? side[0].ux / side[0].n : 0, vR = side[1].n ? side[1].ux / side[1].n : 0;
+    // In sharp turns and in-place pivots the left and right sides carry opposing or very unequal torques, so
+    // vehicle-mean Tnet cancels inner/outer slip (leaving +8% turn error and 0 velocity during slope pivots).
+    // Invert slip per side whenever the tracks split significantly in speed or torque sign.
+    const diffTurn = Math.abs(vL - vR) > 0.25 || (side[0].T * side[1].T < 0 && Math.abs(ux) > 0.15) || (Math.abs(vL - vR) > 0.05 && Math.abs(ux) < 0.2);
+    if (diffTurn && side[0].nc && side[1].nc) {
+      let uxS = 0;
+      for (const S of side) {
+        const vS = S.ux / S.n, Ts = S.T / S.nc, Ns = S.N / S.nc;
+        const sEst = Math.abs(this.slipFromTorque(Ts, Ns));
+        uxS += Ts * vS >= 0 ? vS * (1 - sEst) : vS / Math.max(0.5, 1 - sEst);
+      }
+      ux = 0.5 * uxS;
+    } else if (nc) {
+      const sEst = this.slipFromTorque(Tnet / nc, Nsum / nc);
+      // Driving (Tnet and ux same sign): v_ground = v_wheel * (1 - |sEst|). Braking: cap denominator against transient load drops over craters.
+      const driving = Tnet * ux >= 0;
+      const f = driving ? 1 - Math.abs(sEst) : 1 / Math.max(0.88, 1 - Math.abs(sEst));
       ux *= f; uz *= f;
     }
     const cp = Math.cos(this.imu.pitch);
+    const lvlAvg = R.bogies.reduce((a, b) => a + b.level, 0) / R.bogies.length;
+    const dLvl = this._prevLvl == null ? 0 : lvlAvg - this._prevLvl;
+    this._prevLvl = lvlAvg;
     this.odom.vx = ux; this.odom.vz = uz;
-    this.odom.dx += ux * cp * dt; this.odom.dz += uz * dt; this.odom.dy += ux * Math.sin(this.imu.pitch) * dt; {
+    this.odom.dx += ux * cp * dt; this.odom.dz += uz * dt; this.odom.dy += ux * Math.sin(this.imu.pitch) * dt + (Math.abs(dLvl) < 0.05 ? dLvl : 0); {
       // skid-steer yaw scrub correction on the heading integral (ROVER.imu, CHANGES.md §17); zero for this gyro model
       const wz = this.imu.yawRate, K = ROVER.imu;
       const scrub = R.loaded && K.kScrub && Math.abs(wz) > K.scrubMinWz ? K.kScrub * Math.sign(wz) * Math.abs(ux * wz) : 0;
@@ -264,7 +292,7 @@ export class Sensors {
   warpScan() {
     const R = this.sim.rover;
     this.detections = []; this.rockDetections = [];
-    if (!this.lidarOn || this.faults.lidar || !R.powered) return;
+    if (!this.lidarOn || this.faults.lidar || !R.powered || this.sim.thermal?.ok.lidar === false) return;
     const C = this.lidarCfg;
     if (C.hRes !== 120) { C.hRes = 120; C.rateHz = 12; this._buildDirs(); this._polT = this.sim.time; }
     this._partial = null;
@@ -340,8 +368,14 @@ export class Sensors {
       const ax = Math.atan2(rx, fx), ay = Math.atan2(uy, fx);
       if (Math.abs(ax) > hf || Math.abs(ay) > vf) continue;
       if (r.d / range < 0.012) continue;
+      // Line-of-sight occlusion raycast (do not detect boulders hidden behind terrain rims, walls, or other obstacles)
+      const dir = v.clone().divideScalar(range);
+      const hit = this._castRay(cam.pos, dir, range);
+      if (hit && this.sim.colliderRock.get(hit.collider.handle) !== i && hit.timeOfImpact < range - r.d * 0.75) continue;
       const ang = Math.atan2(r.d * 0.6, range);
-      rocks.push({ u: 0.5 + Math.tan(ax) / Math.tan(hf) * 0.5, v: 0.5 - Math.tan(ay) / Math.tan(vf) * 0.5, w: Math.tan(ang) / Math.tan(hf), h: Math.tan(ang * r.sy) / Math.tan(vf), d: r.d, range, conf: Math.min(0.99, 0.55 + r.d / range * 9) });
+      const rangeMeas = Math.max(0.2, range + 0.015 * range * gauss());
+      const dMeas = Math.max(0.15, r.d * (1 + 0.06 * gauss()));
+      rocks.push({ u: 0.5 + Math.tan(ax) / Math.tan(hf) * 0.5, v: 0.5 - Math.tan(ay) / Math.tan(vf) * 0.5, w: Math.tan(ang) / Math.tan(hf), h: Math.tan(ang * r.sy) / Math.tan(vf), d: dMeas, range: rangeMeas, conf: Math.min(0.99, 0.55 + r.d / range * 9) });
     }
     rocks.sort((a, b) => a.range - b.range);
     this.rockDetections = rocks.slice(0, 40);
@@ -383,18 +417,35 @@ export class Sensors {
       res.valid = true;
       res.lateral = (offs[0].c + offs[1].c) / 2;            // + => module axis to the right (+Z)
       res.yaw = Math.atan2(offs[1].c - offs[0].c, offs[1].x - offs[0].x);
-      // band-edge sensors: axial position of the clamp bands relative to the rings
-      const c = offs[0].target, t = c.body.translation();
-      const rel = new THREE.Vector3(t.x - p.x, t.y - p.y, t.z - p.z).applyQuaternion(p.q.clone().invert());
-      if (Math.abs(rel.x - (c.T.carryX || 0)) < 1.2) res.cargoX = rel.x + 0.02 * gauss();
+      // band-edge sensors: inductive linear proximity sweep (+-1.2 m along saddle X) locating each clamp band
+      // against its saddle via upward proximity rays + hull collar geometry
+      const c = offs[0].target, tr = c.body.rotation(), cq = new THREE.Quaternion(tr.x, tr.y, tr.z, tr.w);
+      const t = c.body.translation();
+      const qinv = p.q.clone().invert();
+      const bands = c.T.adapterRings || [-ROVER.ringX, ROVER.ringX];
+      const saddles = [-ROVER.ringX, ROVER.ringX];
+      let bandSum = 0, bandN = 0;
+      for (let i = 0; i < 2; i++) {
+        o.set(saddles[i], F.deckY + 0.05, 0).applyQuaternion(p.q).add(P);
+        d.set(0, 1, 0).applyQuaternion(p.q);
+        const midHit = this._castRay(o, d, 12);
+        const midOwn = midHit && this.sim.colliderOwner.get(midHit.collider.handle);
+        if (midOwn && midOwn.ref === c) {
+          const bWorld = new THREE.Vector3(bands[i], 0, 0).applyQuaternion(cq).add(new THREE.Vector3(t.x, t.y, t.z));
+          const bRel = bWorld.sub(P).applyQuaternion(qinv);
+          const dxSaddle = bRel.x - saddles[i];
+          if (Math.abs(dxSaddle) < 1.2) { bandSum += dxSaddle; bandN++; }
+        }
+      }
+      if (bandN > 0) res.cargoX = (c.T.carryX || 0) + (bandSum / bandN) + 0.02 * gauss();
       res.seatGap = Math.min(...res.lat.filter((l) => l.d != null).map((l) => l.d)) - (ROVER.seatY - F.deckY - 0.05);
     }
     const L = R.lift;
     if (L.cargo) {
       const t = L.cargo.body.translation(), r = L.cargo.body.rotation();
       const q = new THREE.Quaternion(r.x, r.y, r.z, r.w);
-      // dock gap sensor: from the held module's forward (hatch) end, straight ahead
-      o.set(L.cargo.T.length / 2 + 0.02, 0, 0).applyQuaternion(q).add(new THREE.Vector3(t.x, t.y, t.z));
+      // dock gap sensor: at the held module's forward (hatch) end, straight ahead
+      o.set(L.cargo.T.length / 2, 0, 0).applyQuaternion(q).add(new THREE.Vector3(t.x, t.y, t.z));
       d.set(1, 0, 0).applyQuaternion(q);
       const hit = this._castRay(o, d, 12, L.cargo.body);
       res.gap = hit ? hit.timeOfImpact + 0.002 * gauss() : null;

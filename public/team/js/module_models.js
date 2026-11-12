@@ -57,7 +57,7 @@
     var gold = new THREE.MeshPhysicalMaterial({ color: 0xc9a23a, metalness: 1.0, roughness: 0.28, clearcoat: 0.5, clearcoatRoughness: 0.2, envMapIntensity: 1.4 });
     var white = new THREE.MeshPhysicalMaterial({ color: 0xeef1f4, metalness: 0.05, roughness: 0.42, clearcoat: 0.6, clearcoatRoughness: 0.2 });
     var steel = new THREE.MeshPhysicalMaterial({ color: 0xb7bec7, metalness: 1.0, roughness: 0.2, envMapIntensity: 1.3 });
-    var dark = mat(0x20262e, 0.55, 0.5), rubber = mat(0x15181c, 0.9, 0.05);
+    var dark = mat(0x20262e, 0.55, 0.5), sealPtfe = mat(0xd0d4dc, 0.45, 0.15); // cryo spring-energized PTFE / metallic wiper seal (replaces rubber)
     var cell = new THREE.MeshPhysicalMaterial({ color: 0x0d1b3a, metalness: 0.4, roughness: 0.18, clearcoat: 1.0, clearcoatRoughness: 0.04, envMapIntensity: 1.2 });
     // hull: three blanket bays between seams, slightly different sheen like the reference
     var bays = [[X0, -0.13, foil], [-0.13, 0.13, foilB], [0.13, X1, foil]];
@@ -82,7 +82,7 @@
     var hatch = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.50, R * 0.50, 0.010, 48), white); hatch.rotation.z = Math.PI / 2; hatch.position.x = FX + 0.004; g.add(hatch);
     [0.30, 0.42].forEach(function (rr) { var hr = new THREE.Mesh(new THREE.TorusGeometry(R * rr, 0.0018, 6, 40), dark); hr.rotation.y = Math.PI / 2; hr.position.x = FX + 0.0095; g.add(hr); });
     var wheelH = new THREE.Mesh(new THREE.TorusGeometry(R * 0.10, 0.0028, 6, 20), steel); wheelH.rotation.y = Math.PI / 2; wheelH.position.x = FX + 0.011; g.add(wheelH);
-    var dustRing = new THREE.Mesh(new THREE.TorusGeometry(R * 0.62, 0.0045, 6, 56), rubber); dustRing.rotation.y = Math.PI / 2; dustRing.position.x = FX + 0.013; dustRing.name = 'dustCapCollar'; g.add(dustRing);   // dust seal on the berthing ring rim (the hatch stays visible)
+    var dustRing = new THREE.Mesh(new THREE.TorusGeometry(R * 0.62, 0.0045, 6, 56), sealPtfe); dustRing.rotation.y = Math.PI / 2; dustRing.position.x = FX + 0.013; dustRing.name = 'dustCapCollar'; g.add(dustRing);   // cryo PTFE/Inconel seal on the berthing ring rim
     var plateT = textTex([{ text: 'CARGO', font: '700 46px Helvetica, Arial', x: 26, y: 40 }, { text: '⚠ HANDLE BY LUGS', font: '600 22px Helvetica, Arial', x: 26, y: 92 }], 256, 128, '#eef1f4', '#22272e');
     var plate = new THREE.Mesh(new THREE.PlaneGeometry(0.075, 0.038), new THREE.MeshStandardMaterial({ map: plateT, roughness: 0.5 })); plate.rotation.y = Math.PI / 2; plate.position.set(FX + 0.001, -R * 0.74, R * 0.32); g.add(plate);
     for (var q = 0; q < 4; q++) {                                                                     // four reaction-control nozzles on the rim
@@ -127,7 +127,7 @@
     // clamp bands (wear sleeves) and their wiper lips; the ring pads grip here (v9 seal scheme)
     [1, -1].forEach(function (sg) {
       var bd = new THREE.Mesh(new THREE.CylinderGeometry(R + 0.0015, R + 0.0015, MOD.bandW, 64, 1, true), steel); bd.rotation.z = Math.PI / 2; bd.position.x = sg * MOD.bandX; g.add(bd);
-      [-1, 1].forEach(function (e) { var wl = new THREE.Mesh(new THREE.TorusGeometry(R + 0.0022, 0.0020, 6, 64), rubber); wl.rotation.y = Math.PI / 2; wl.position.x = sg * MOD.bandX + e * (MOD.bandW / 2 + 0.002); g.add(wl); });
+      [-1, 1].forEach(function (e) { var wl = new THREE.Mesh(new THREE.TorusGeometry(R + 0.0022, 0.0020, 6, 64), sealPtfe); wl.rotation.y = Math.PI / 2; wl.position.x = sg * MOD.bandX + e * (MOD.bandW / 2 + 0.002); g.add(wl); });
     });
     // four gasketed access panels (captive screws), curved on the hull, low on the sides clear of the doors and bands
     [[1, 1], [1, -1], [-1, 1], [-1, -1]].forEach(function (pp) {
@@ -136,9 +136,9 @@
       g.add(hullPatch(R + 0.0018, a, 0.27, x, 0.068, white, 10));
       for (var b = 0; b < 8; b++) { var ba = a + (b % 2 ? 1 : -1) * 0.115, bx = x + (Math.floor(b / 2) - 1.5) * 0.019; var sp3 = onHull(R + 0.0026, ba, bx); var hx = new THREE.Mesh(new THREE.CylinderGeometry(0.0026, 0.0026, 0.002, 6), dark); hx.position.copy(sp3); hx.rotation.x = ba; g.add(hx); }
     });
-    // four side lift lugs (trunnion pins) the skid stand holds
+    // four side lift lugs (slotted +/-3.4 mm CAD / +/-55 mm full-scale delta-CTE axial compliance on forward trunnions)
     [1, -1].forEach(function (sx) { [1, -1].forEach(function (sz) {
-      var base = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.045, 0.010), steel); base.position.set(sx * MOD.lugX, 0, sz * (R - 0.002)); g.add(base);
+      var base = new THREE.Mesh(new THREE.BoxGeometry(sx > 0 ? 0.056 : 0.045, 0.045, 0.010), steel); base.position.set(sx * MOD.lugX, 0, sz * (R - 0.002)); g.add(base);
       var pin = new THREE.Mesh(new THREE.CylinderGeometry(MOD.lugR, MOD.lugR, MOD.lugZ + 0.014 - R, 16), steel); pin.rotation.x = Math.PI / 2; pin.position.set(sx * MOD.lugX, 0, sz * (R + MOD.lugZ + 0.014) / 2); pin.castShadow = true; g.add(pin);
       var collar = new THREE.Mesh(new THREE.CylinderGeometry(MOD.lugR * 1.6, MOD.lugR * 1.6, 0.005, 16), gold); collar.rotation.x = Math.PI / 2; collar.position.set(sx * MOD.lugX, 0, sz * (MOD.lugZ + 0.017)); g.add(collar);
     }); });
@@ -179,29 +179,29 @@
         g.userData.posts.push({ m: br, kind: 'brace', z: Z, d: d ? 1 : -1 });
       }
     });
-    // Regolith-proof pickup (js/bay_design.js PICKUP): a sintered apron under the stand so the approach never kicks loose dust onto the clamp
-    // interface, a flared funnel at each end that centres the rover on the pads, a bellows boot on every post foot, and a hinged dust cap
-    // lifted off each V notch. Each barrier multiplies the dust reaching the friction pads by 0.10 / 0.30 / 0.20 (ASSUMED, to be bench tested).
+    // Regolith-proof pickup (js/bay_design.js PICKUP): compact sintered apron under the stand (< 16 m full-scale width) so approach stays dust-free,
+    // flared lead-in guides, 321-SS welded bellows boots on every post foot, and Vespel/Al hinged dust shields over each V notch.
     var tile = new THREE.MeshStandardMaterial({ color: 0x4d5258, roughness: 0.92, metalness: 0.05 });
     var tileEdge = new THREE.MeshStandardMaterial({ color: 0x2f3338, roughness: 0.8, metalness: 0.2 });
-    var rubber = new THREE.MeshStandardMaterial({ color: 0x1d2024, roughness: 0.95, metalness: 0.0 });
-    var AX = 2 * MOD.lugX + 2.6, AZ = 2 * MOD.lugZ + 0.9;                                                // apron footprint, long along the drive axis
+    var bellowsMat = new THREE.MeshStandardMaterial({ color: 0x9ca3af, roughness: 0.42, metalness: 0.85 });
+    var vespelMat = new THREE.MeshStandardMaterial({ color: 0x3b2f2f, roughness: 0.72, metalness: 0.1 });
+    var AX = 2 * MOD.lugX + 0.56, AZ = 2 * MOD.lugZ + 0.24;                                                // compact apron (< 16 m full-scale outrigger footprint)
     var apron = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), tile); apron.receiveShadow = true; g.add(apron);
     g.userData.posts.push({ m: apron, kind: 'apron', sx: AX, sz: AZ });
     for (var jx = -4; jx <= 4; jx++) {                                                                  // tile joints
       var jt = new THREE.Mesh(new THREE.BoxGeometry(0.006, 0.0015, AZ), tileEdge); g.add(jt);
       g.userData.posts.push({ m: jt, kind: 'apronRel', x: jx * AX / 8.5, z: 0, dy: 0.0016 });
     }
-    [1, -1].forEach(function (sx) { [1, -1].forEach(function (sz) {                                      // funnel wings: flared 0.30 rad, 45 mm tall
-      var w = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.045, 0.012), tileEdge); w.castShadow = true; g.add(w);
-      w.rotation.y = -sx * sz * 0.30;
-      g.userData.posts.push({ m: w, kind: 'apronRel', x: sx * (AX / 2 - 0.30), z: sz * (MOD.lugZ + 0.22), dy: 0.024 });
+    [1, -1].forEach(function (sx) { [1, -1].forEach(function (sz) {                                      // compact funnel wings within stand apron
+      var w = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.045, 0.012), tileEdge); w.castShadow = true; g.add(w);
+      w.rotation.y = -sx * sz * 0.28;
+      g.userData.posts.push({ m: w, kind: 'apronRel', x: sx * (AX / 2 - 0.14), z: sz * (MOD.lugZ + 0.06), dy: 0.024 });
     }); });
     [1, -1].forEach(function (sz) { [1, -1].forEach(function (sx) {
       var bx0 = sx * MOD.lugX, bz0 = sz * MOD.lugZ;
-      var boot = new THREE.Mesh(new THREE.CylinderGeometry(0.030, 0.042, 0.055, 18, 3), rubber); boot.castShadow = true; g.add(boot);
+      var boot = new THREE.Mesh(new THREE.CylinderGeometry(0.030, 0.042, 0.055, 18, 3), bellowsMat); boot.castShadow = true; g.add(boot);
       g.userData.posts.push({ m: boot, kind: 'apronRel', x: bx0, z: bz0, dy: 0.030 });
-      var cap = new THREE.Mesh(new THREE.BoxGeometry(0.036, 0.004, 0.022), rubber); g.add(cap);          // cap hinged on the outboard edge of the notch, swung up and open
+      var cap = new THREE.Mesh(new THREE.BoxGeometry(0.036, 0.004, 0.022), vespelMat); g.add(cap);       // Vespel cap hinged on the outboard edge of the notch
       cap.position.set(bx0, notchY + CR.hornH + 0.012, bz0 + sz * 0.020); cap.rotation.x = sz * 1.15;
     }); });
     var sc = document.createElement('canvas'); sc.width = 512; sc.height = 96; var x2 = sc.getContext('2d');

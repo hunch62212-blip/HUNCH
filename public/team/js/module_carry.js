@@ -15,8 +15,9 @@
  *   3. the suspension RISES: at ride -8 mm the saddles touch, their 120 deg V centres the module sideways, then the
  *      weight moves onto the rover over 4 mm of strut travel and the lugs lift 58 mm (46 mm over the notch horns, so the
  *      module can slide out over the posts);
- *   4. each ring's two jaws rotate up round the module on a circular track (60 deg arcs; saddle + jaws wrap 240 deg, so the
- *      module cannot come out of the top) and rubber pads squeeze to 90 N; worm drives self-lock (0 W holding);
+ *   4. each ring's two articulated jaws rotate up round the module on a circular track (60 deg arcs; saddle + jaws wrap 240 deg, so the
+ *      module cannot come out of the top) and textured Vespel SP-21 / sintered-bronze flexure pads squeeze to 90 N; worm drives self-lock (0 W holding).
+ *      The forward clamp ring floats on +-3.4 mm (+-55 mm full-scale) linear bearings for lunar day/night delta-CTE thermal compliance.
  *   5. drive. Unload is the reverse: over the stand, jaws open and retract, the rover lowers until the lugs seat, kneels clear, drives out.
  *
  * Frame: rover root, x forward, y up, z port. State h = ride extension - kneel extension (0 = fully knelt), so the lift
@@ -39,10 +40,11 @@
   var CRADLE = {
     seatX: 0.0, stopX: 0.0,                            // module centre over the six-wheel base centre: even weight on the wheels
     ringX: 0.085,                                      // two rings, just aft of the avionics pod (pod front edge x 0.1125)
-    seatY: 0.318,                                      // module bottom when seated, rover root frame (14 mm over the charge pad lips)
+    seatY: 0.318,                                      // module bottom when seated, rover root frame (belly charge coupler; clear of top avionics lid)
     standY: 0.310,                                     // module bottom on the stand, above ground + tyre sinkage, at ride 0
     kneelExt: -0.040, carryExt: 0.050,                 // suspension ride: knelt for the approach, raised to carry (= the auto loaded ride, v11: 50 mm)
     hornH: 0.012,                                      // stand V-notch horns rise 12 mm above the notch bottom
+    cteComplianceM: 0.0034,                            // +-3.4 mm CAD (+-55 mm full scale) slotted axial compliance at fwd ring/trunnions across 40..400 K
     saddleRim: D / 2 + 0.012, saddleArcDeg: 120, jawArcDeg: 60, jawStowDeg: 60, ringT: 0.012,
     shareTravel: 0.004,                                // strut travel over which the weight moves from the stand to the rover
     liftV: 0.050, liftXferV: 0.015,                    // m/s: suspension high-flow speed in a pickup, and the slow speed through the 4 mm weight transfer (ASSUMED)
@@ -53,7 +55,7 @@
     padGap: 0.012, padKpad: 20000, padVsq: 0.006,      // radial clearance, pad stiffness N/m, squeeze speed m/s
     clampMaxN: 90, clampLockN: 45, clampKF: 35,        // per-ring force limit, "locked" threshold, worm-drive N per amp (ASSUMED)
     motorI0: 0.15, motorV: 12.0,
-    muPad: 0.6,                                        // rubber pad on the wear sleeve (ASSUMED)
+    muPad: 0.55,                                       // textured Vespel SP-21 / sintered-bronze cryogenic pad on steel wear sleeve
     notchDetentN: 6                                    // V notch holds the lugs against rolling drag
   };
   CRADLE.axisY = CRADLE.seatY + MODULE.R;              // module axis when seated (rover root frame)

@@ -6,6 +6,7 @@ import { WORLD, DOCK, CARGO_TYPES } from '../sim/config.js';
 import { heightAt, mulberry32 } from '../sim/terrain.js';
 import { LANDER_SCALE } from '../sim/world.js';
 import { cargoModuleCAD } from './cadModels.js';
+import { mergeStatic } from './mergeStatic.js';
 
 export const MAT = {
   white: new THREE.MeshStandardMaterial({ color: 0xd2d2cc, roughness: 0.6, metalness: 0.05 }),
@@ -166,6 +167,36 @@ export function buildLander(terrain) {
   for (let k = 0; k < 16; k++) { const a = k / 16 * Math.PI * 2; const bcn = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.15, 0.12, 10), new THREE.MeshStandardMaterial({ color: 0x302000, emissive: k % 2 ? 0xffb020 : 0xffffff, emissiveIntensity: 2.5 })); bcn.position.set(Math.cos(a) * WORLD.pad.radius, 0.06, Math.sin(a) * WORLD.pad.radius); outer.add(bcn); }
   const lbl = new THREE.Mesh(new THREE.PlaneGeometry(4, 1), new THREE.MeshBasicMaterial({ map: labelTexture('CARGO LANDER CL-1', { color: '#202020' }), transparent: true }));
   lbl.position.set(0, 9, 3.42); g.add(lbl);
+  // Surface detail (visual only, at most 0.2 model units outside the body / deck colliders): ring frames, stringers,
+  // an interstage band, the cargo-bay door the crane serves, RCS quads, a second strut pair on each leg, antennas.
+  {
+    const at = (m, x, y, z) => { m.position.set(x, y, z); g.add(m); return m; };
+    const yB0 = 3.9, yB1 = 13.1;                                  // body cylinder: bottom / top
+    for (const y of [yB0 + 0.15, 6.9, 10.0, yB1 - 0.15]) at(cyl(3.46, 3.46, 0.22, MAT.steel, 48), 0, y, 0);
+    at(cyl(3.75, 4.3, 0.5, MAT.dark, 40), 0, yB0 - 0.05, 0);     // interstage adapter on the descent stage
+    for (let k = 0; k < 12; k++) { const a = k / 12 * Math.PI * 2 + Math.PI / 12; const st = at(box(0.1, yB1 - yB0, 0.14, MAT.offwhite), Math.cos(a) * 3.43, (yB0 + yB1) / 2, Math.sin(a) * 3.43); st.rotation.y = -a; }
+    // cargo-bay door on the crane (+z) side: frame, two leaves, hinges
+    for (const [w, h, x, y] of [[3.3, 0.14, 0, 8.15], [3.3, 0.14, 0, 4.65], [0.14, 3.6, -1.62, 6.4], [0.14, 3.6, 1.62, 6.4], [0.08, 3.4, 0, 6.4]]) { const f = at(box(w, h, 0.12, MAT.dark), x, y, 3.3 + (x ? 0.02 : 0.12)); if (x) f.position.z = Math.sqrt(3.4 * 3.4 - x * x) + 0.03; }
+    for (const y of [5.2, 6.4, 7.6]) for (const x of [-1.72, 1.72]) at(box(0.16, 0.3, 0.16, MAT.steel), x, y, Math.sqrt(3.4 * 3.4 - x * x) + 0.06);
+    for (let k = 0; k < 4; k++) {                                 // RCS quads near the top of the body
+      const a = k * Math.PI / 2 + Math.PI / 4, ca = Math.cos(a), sa = Math.sin(a);
+      const pod = at(box(0.5, 0.6, 0.6, MAT.dark), ca * 3.6, 11.9, sa * 3.6); pod.rotation.y = -a;
+      for (const [dy, tilt] of [[0.42, 0], [-0.42, Math.PI]]) { const n = at(cyl(0.1, 0.2, 0.3, MAT.steel, 12), ca * 3.72, 11.9 + dy, sa * 3.72); n.rotation.x = tilt; }
+      const side = at(cyl(0.1, 0.2, 0.3, MAT.steel, 12), ca * 3.98, 11.9, sa * 3.98); side.rotation.z = Math.PI / 2; side.rotation.y = -a + Math.PI;
+    }
+    for (let k = 0; k < 4; k++) {                                 // side struts: footpad up to the deck, either side of the main leg
+      const a = Math.PI / 4 + k * Math.PI / 2;
+      for (const da of [-0.42, 0.42]) {
+        const p0 = new THREE.Vector3(Math.cos(a) * 6.5, 0.3, Math.sin(a) * 6.5), p1 = new THREE.Vector3(Math.cos(a + da) * 4.55, 2.2, Math.sin(a + da) * 4.55);
+        const s2 = cyl(0.09, 0.09, p0.distanceTo(p1), MAT.steel, 8); s2.position.copy(p0).add(p1).multiplyScalar(0.5);
+        s2.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), p1.clone().sub(p0).normalize()); g.add(s2);
+      }
+    }
+    at(cyl(0.05, 0.07, 2.4, MAT.steel, 8), 0.9, 17.2, -0.6);     // low-gain whip
+    const hg = new THREE.Mesh(new THREE.SphereGeometry(0.9, 24, 8, 0, Math.PI * 2, 0, Math.PI / 3.2), new THREE.MeshStandardMaterial({ color: 0xe6e6e0, roughness: 0.5, metalness: 0.2, side: THREE.DoubleSide }));
+    hg.rotation.set(Math.PI - 0.6, 0, 0.4); hg.castShadow = true; at(hg, -3.9, 13.6, -1.2); at(cyl(0.06, 0.06, 1.2, MAT.steel, 8), -3.65, 12.9, -1.1);
+  }
+  mergeStatic(g);
   return outer;
 }
 
@@ -182,8 +213,35 @@ export function buildHabitat(terrain, ports) {
   const berm = (w, h, d, x, z) => { const m = box(w, h, d, bagMat); m.position.set(x, h / 2, z); bld.add(m); };
   berm(2.4, 3.2, b.d + 3, -b.w / 2 - 1.2, 0);
   berm(b.w + 2, 3.2, 2.4, -1, b.d / 2 + 1.2); berm(b.w + 2, 3.2, 2.4, -1, -b.d / 2 - 1.2);
-  const sign = new THREE.Mesh(new THREE.PlaneGeometry(9, 1.4), new THREE.MeshBasicMaterial({ map: labelTexture('SUPPLY BUILDING  SB-1', { color: '#151515' }), transparent: true }));
-  sign.position.set(b.w / 2 + 0.02, 4.3, 0); sign.rotation.y = Math.PI / 2; bld.add(sign);
+  const sign = new THREE.Mesh(new THREE.PlaneGeometry(6.4, 1.0), new THREE.MeshBasicMaterial({ map: labelTexture('SUPPLY BUILDING  SB-1', { color: '#151515' }), transparent: true }));
+  sign.position.set(b.w / 2 + 0.14, b.h - 0.9, 5.0); sign.rotation.y = Math.PI / 2; bld.add(sign);   // between two port vestibules, above the seam
+  // Shell detail (visual only, within 0.12 m of the wall collider): a rigid-panel pressure shell reads as frames,
+  // panel seams and a plinth, not a blank box. Ribs are left off the docking face where a port vestibule stands.
+  {
+    const ribMat = new THREE.MeshStandardMaterial({ color: 0x9ea3a6, roughness: 0.5, metalness: 0.55 });
+    const seamMat = new THREE.MeshStandardMaterial({ color: 0x74787b, roughness: 0.7, metalness: 0.3 });
+    const put = (w, h, d, m, x, y, z) => { const me = box(w, h, d, m); me.position.set(x, y, z); bld.add(me); return me; };
+    const cy = Math.cos(H.yaw), sy = Math.sin(H.yaw);
+    const portZ = ports.map((p) => (p.x - b.x) * sy + (p.z - b.z) * cy);
+    const clearOfPort = (z) => portZ.every((pz) => Math.abs(z - pz) > DOCK.vestibuleW / 2 + 0.6);
+    const nz = 8, nx = 4;
+    for (let i = 0; i <= nz; i++) { const z = -b.d / 2 + i * b.d / nz;
+      if (clearOfPort(z)) put(0.2, b.h, 0.36, ribMat, b.w / 2 + 0.02, b.h / 2, z);
+      put(0.2, b.h, 0.36, ribMat, -b.w / 2 - 0.02, b.h / 2, z); }
+    for (let i = 0; i <= nx; i++) { const x = -b.w / 2 + i * b.w / nx;
+      for (const sz of [-1, 1]) put(0.36, b.h, 0.2, ribMat, x, b.h / 2, sz * (b.d / 2 + 0.02)); }
+    for (const y of [b.h / 3, 2 * b.h / 3]) { put(b.w + 0.1, 0.1, b.d + 0.1, seamMat, 0, y, 0); }
+    put(b.w + 0.24, 0.5, b.d + 0.24, seamMat, 0, 0.25, 0);            // plinth
+    put(b.w + 0.5, 0.35, b.d + 0.5, ribMat, 0, b.h + 0.42, 0).scale.set(1, 1, 1); // parapet cap over the foil roof edge
+    const roofTop = box(b.w - 0.6, 0.3, b.d - 0.6, MAT.foil); roofTop.position.y = b.h + 0.5; bld.add(roofTop);
+    // roof equipment: three body-mounted radiators, an equipment hatch and a high-gain dish (Earth link)
+    for (const z of [-14, 0, 14]) { const r = put(7, 0.12, 9, MAT.white, -3, b.h + 1.25, z); r.rotation.z = 0.12;
+      for (const sx of [-1, 1]) put(0.15, 0.9, 0.15, ribMat, -3 + sx * 3, b.h + 0.95, z); }
+    put(2.6, 0.5, 2.6, seamMat, 6, b.h + 0.9, 18);
+    const mast = cyl(0.12, 0.16, 3.2, MAT.steel, 12); mast.position.set(6.5, b.h + 2.2, -18); bld.add(mast);
+    const dish = new THREE.Mesh(new THREE.SphereGeometry(1.6, 28, 10, 0, Math.PI * 2, 0, Math.PI / 3.2), new THREE.MeshStandardMaterial({ color: 0xe6e6e0, roughness: 0.5, metalness: 0.2, side: THREE.DoubleSide }));
+    dish.position.set(6.5, b.h + 5.2, -18); dish.rotation.set(Math.PI - 0.5, 0, 0.3); dish.castShadow = true; bld.add(dish);
+  }
   // floodlights over the docking face
   for (const s of [-12, 0, 12]) { const l = box(0.3, 0.25, 0.8, MAT.whiteGlow); l.position.set(b.w / 2 + 0.3, b.h - 0.3, s); bld.add(l); }
 
@@ -245,48 +303,149 @@ export function buildHabitat(terrain, ports) {
   { const a = terrain.base.find((i) => i.kind === 'array'); const pts = [];
     for (let k = 0; k <= 24; k++) { const u = k / 24; const x = a.x + (b.x - a.x) * u, z = a.z + (b.z - a.z) * u; pts.push(new THREE.Vector3(x, heightAt(terrain, x, z) + 0.06, z)); }
     const cable = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 60, 0.12, 6, false), new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.8 })); cable.receiveShadow = true; root.add(cable); }
+  { const live = new Set(portVis.map((v) => v.g)); for (const c of [...root.children]) if (!live.has(c)) mergeStatic(c); }
   return { root, portVis };
 }
 
 // ---------------- cargo ------------------------------------------------------
 export function buildCargo(c) {
   const T = c.T, g = new THREE.Group();
-  const id = c.id.charCodeAt(3);
+  const id = c.tag0 ?? c.id.charCodeAt(3);
   if (T.shape === 'cylinder') {
     const cad = cargoModuleCAD(T); g.add(cad); g.userData.cad = cad;
-    // end bulkhead domes + collars out to the CAD's +/-6.39 m
+    // end bulkhead domes + collars out to +/-6.39 m (keep dome compact so ringG clears at > 6.395 m)
+    const bx = T.length / 2;
     for (const sgn of [-1, 1]) {
       const dome = new THREE.Mesh(new THREE.SphereGeometry(T.radius, 48, 16, 0, Math.PI * 2, 0, Math.PI / 2), MAT.offwhite);
-      dome.scale.set(1, 0.13, 1); dome.rotation.z = -sgn * Math.PI / 2; dome.position.x = sgn * 6.095; dome.castShadow = true; g.add(dome);
+      dome.scale.set(1, 0.075, 1); dome.rotation.z = -sgn * Math.PI / 2; dome.position.x = sgn * bx; dome.castShadow = true; g.add(dome);
       dome.userData.xrayable = true;
       const collar = cyl(1.1, 1.18, 0.12, MAT.steel, 40); collar.rotation.z = Math.PI / 2; collar.position.x = sgn * 6.33; g.add(collar);
     }
-    for (const sx of [-1, 1]) for (const sz of [-1, 1]) { const lug = cyl(0.14, 0.14, 0.5, MAT.steel, 12); lug.rotation.x = Math.PI / 2; lug.position.set(sx * T.lugX, -0.2, sz * (T.radius + 0.2)); g.add(lug); }
+    const innerZ = T.radius - 0.1, lugLen = (T.lugZ || T.radius + 0.35) + 0.25 - innerZ;
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) { const lug = cyl(T.lugR || 0.14, T.lugR || 0.14, lugLen, MAT.steel, 12); lug.rotation.x = Math.PI / 2; lug.position.set(sx * T.lugX, 0, sz * (innerZ + lugLen / 2)); g.add(lug); }
     const lbl = new THREE.Mesh(new THREE.PlaneGeometry(5, 0.9), new THREE.MeshBasicMaterial({ map: labelTexture(`${c.id}  LIFE SUPPORT`, { color: '#1b1b1b' }), transparent: true, side: THREE.DoubleSide }));
     lbl.position.set(0, 0.6, T.radius + 0.03); g.add(lbl);
     const lbl2 = lbl.clone(); lbl2.position.z = -T.radius - 0.03; lbl2.rotation.y = Math.PI; g.add(lbl2);
   } else {
-    const ctex = corrugatedTexture();
-    const m = new THREE.MeshStandardMaterial({ color: T.color, map: ctex, roughness: 0.65, metalness: 0.3 });
-    const b = box(T.length, T.height, T.width, m); g.add(b);
-    for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) { const cc = box(0.18, 0.12, 0.16, MAT.dark); cc.position.set(sx * (T.length / 2 - 0.09), sy * (T.height / 2 - 0.06), sz * (T.width / 2 - 0.08)); g.add(cc); }
-    const lbl = new THREE.Mesh(new THREE.PlaneGeometry(3.6, 0.7), new THREE.MeshBasicMaterial({ map: labelTexture(`${c.id}  HAB SUPPLIES`, { color: '#111' }), transparent: true, side: THREE.DoubleSide }));
+    if (T.visual === 'podrack') g.add(buildPodRack(T));
+    else {
+      const ctex = corrugatedTexture();
+      const m = new THREE.MeshStandardMaterial({ color: T.color, map: ctex, roughness: 0.65, metalness: 0.3 });
+      const b = box(T.length, T.height, T.width, m); g.add(b);
+      for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) { const cc = box(0.18, 0.12, 0.16, MAT.dark); cc.position.set(sx * (T.length / 2 - 0.09), sy * (T.height / 2 - 0.06), sz * (T.width / 2 - 0.08)); g.add(cc); }
+    }
+    if (T.adapterR && T.adapterLen) g.add(buildRingAdapterSled(T));
+    const lbl = new THREE.Mesh(new THREE.PlaneGeometry(3.6, 0.7), new THREE.MeshBasicMaterial({ map: labelTexture(`${c.id}  ${T.visual === 'podrack' ? 'CARGO PODS' : 'HAB SUPPLIES'}`, { color: '#111' }), transparent: true, side: THREE.DoubleSide }));
     lbl.position.set(0, 0.6, T.width / 2 + 0.02); g.add(lbl);
   }
-  // forward (hatch) end: docking ring + hatch
+  // forward (hatch) end: docking ring + hatch (outside cylinder bulkhead collar +/-6.39 m)
   const half = T.shape === 'cylinder' ? T.radius : T.height / 2;
-  const fx = T.length / 2 + (T.shape === 'cylinder' ? 0.02 : 0.01);
+  const fx = T.shape === 'cylinder' ? Math.max(T.length / 2 + 0.02, 6.41) : T.length / 2 + 0.01;
   const ringG = new THREE.Group(); ringG.position.x = fx; ringG.rotation.y = Math.PI / 2; g.add(ringG);
   const ring = new THREE.Mesh(new THREE.TorusGeometry(0.98, 0.1, 12, 40), MAT.steel); ringG.add(ring);
   const hatch = new THREE.Mesh(new THREE.CircleGeometry(0.88, 32), MAT.dark); hatch.position.z = 0.01; ringG.add(hatch);
   g.userData.hatch = hatch;
-  // fiducials (same placement as the sensor model)
-  const aft = tagMesh(id, 0.8); aft.position.set(-T.length / 2 - 0.02, half * 0.45, 0); aft.rotation.y = -Math.PI / 2; g.add(aft);
+  // fiducials (same placement as sensors.js model)
+  const aftX = T.shape === 'cylinder' ? -Math.max(T.length / 2 + 0.02, 6.41) : (T.adapterX || 0) - (T.adapterLen || T.length) / 2 - 0.02;
+  const aftY = -(T.adapterR || half) * 0.62;
+  const aft = tagMesh(id, 0.8); aft.position.set(aftX, aftY, 0); aft.rotation.y = -Math.PI / 2; g.add(aft);
   const fwd = tagMesh(id + 1, 0.6); fwd.position.set(fx + 0.01, half * 0.62, 0); fwd.rotation.y = Math.PI / 2; g.add(fwd);
   const sw = T.shape === 'cylinder' ? T.radius : T.width / 2;
   for (const sz of [-1, 1]) { const s = tagMesh(id + 2, 0.8); s.position.set(-1.2, -0.3, sz * (sw + 0.035)); s.rotation.y = sz > 0 ? 0 : Math.PI; g.add(s); }
   g.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   return g;
+}
+// Ring-adapter sled for the 20-ft container (Mission 8): gives the box the same 7.96 m ring interface as the 40-ft
+// module, so the same saddles, ring jaws and stands carry it. Every part mirrors a collider in world.js:
+//   two clamp rings (0.82 m bands at T.adapterRings), the keel shroud under the box (the convex hull the under-module
+//   rangefinders see: box bottom +-1.1 m down to a +-28 deg arc of the ring radius, aft sled end to just short of the
+//   docking face) and the four trunnion pins at T.lugXs. The spokes, U-hoops and longerons are the load path that
+//   joins them to the box; they have no collider of their own (they lie inside the ring envelope).
+function buildRingAdapterSled(T) {
+  const s = new THREE.Group(); s.name = 'ring-adapter-sled';
+  const R = T.adapterR, H = T.height, W = T.width, tk = 0.14;
+  const frame = new THREE.MeshStandardMaterial({ color: 0xa9b0b8, metalness: 0.85, roughness: 0.35, side: THREE.DoubleSide });
+  const skin = new THREE.MeshStandardMaterial({ color: 0x6f757c, metalness: 0.6, roughness: 0.55, side: THREE.DoubleSide });
+  const add = (m) => { m.castShadow = m.receiveShadow = true; s.add(m); return m; };
+  // clamp rings: outer band, inner band and two flange faces
+  for (const rx of T.adapterRings) {
+    for (const r of [R, R - tk]) { const b = add(new THREE.Mesh(new THREE.CylinderGeometry(r, r, 0.82, 64, 1, true), frame)); b.rotation.z = Math.PI / 2; b.position.x = rx; }
+    for (const sx of [-1, 1]) { const f = add(new THREE.Mesh(new THREE.RingGeometry(R - tk, R, 64), frame)); f.rotation.y = Math.PI / 2; f.position.x = rx + sx * 0.41; }
+    // spokes from the box to the ring: four corner posts, one crown post and two side posts
+    const dirs = [[H / 2, W / 2], [H / 2, -W / 2], [-H / 2, W / 2], [-H / 2, -W / 2], [H / 2, 0], [0, W / 2], [0, -W / 2]];
+    for (const [dy, dz] of dirs) {
+      const r0 = Math.hypot(dy, dz), len = R - tk - r0, mid = r0 + len / 2;
+      const sp = add(new THREE.Mesh(new THREE.BoxGeometry(0.5, len, 0.16), frame));
+      sp.position.set(rx, dy / r0 * mid, dz / r0 * mid); sp.rotation.x = Math.atan2(dz, dy);
+    }
+  }
+  // keel shroud (same section and ends as the physics hull)
+  const xAft = (T.adapterX || 0) - T.adapterLen / 2;
+  const xFwd = Math.min(T.length / 2 - 0.9, (T.adapterRings?.[1] ?? 1.24) + 0.86);
+  const a = 28 * Math.PI / 180, sh = new THREE.Shape();
+  sh.moveTo(-1.1, -H / 2); sh.lineTo(1.1, -H / 2); sh.lineTo(R * Math.sin(a), -R * Math.cos(a));
+  sh.absarc(0, 0, R, -Math.PI / 2 + a, -Math.PI / 2 - a, true); sh.closePath();
+  const keel = add(new THREE.Mesh(new THREE.ExtrudeGeometry(sh, { depth: xFwd - xAft, bevelEnabled: false, curveSegments: 16 }), skin));
+  keel.rotation.y = Math.PI / 2; keel.position.x = xAft;
+  // trunnion U-hoops (lower half rings) with a tie beam, one at each pair of lug pins; pins as in world.js
+  const lugs = T.lugXs || [-T.lugX, T.lugX], rz = R - 0.1;
+  for (const lx of lugs) {
+    const hoopG = new THREE.Group(); hoopG.position.x = lx; hoopG.rotation.y = Math.PI / 2; s.add(hoopG);
+    const hoop = new THREE.Mesh(new THREE.TorusGeometry(rz, 0.1, 10, 48, Math.PI), frame); hoop.rotation.z = Math.PI; hoop.castShadow = true; hoopG.add(hoop);
+    const tie = add(new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 2 * rz), frame)); tie.position.set(lx, 0, 0);
+    const lugLen = (T.lugZ || R + 0.35) + 0.25 - rz;
+    for (const sz of [-1, 1]) { const lug = add(cyl(T.lugR || 0.14, T.lugR || 0.14, lugLen, frame, 12)); lug.rotation.x = Math.PI / 2; lug.position.set(lx, 0, sz * (rz + lugLen / 2)); }
+  }
+  // longerons joining the hoops and rings at axis height, and two braces from the aft hoop up to the box
+  for (const sz of [-1, 1]) {
+    const lon = add(new THREE.Mesh(new THREE.BoxGeometry(lugs[1] - lugs[0], 0.18, 0.18), frame)); lon.position.set((lugs[0] + lugs[1]) / 2, 0, sz * (rz - 0.02));
+    const x1 = -T.length / 2, dx = x1 - lugs[0], dzb = rz - W / 2, len = Math.hypot(dx, dzb);
+    const br = add(new THREE.Mesh(new THREE.BoxGeometry(len, 0.16, 0.16), frame));
+    br.position.set((lugs[0] + x1) / 2, 0, sz * (rz + W / 2) / 2); br.rotation.y = sz * Math.atan2(dzb, dx);
+  }
+  mergeStatic(s);
+  return s;
+}
+// Astrobotic-class pod rack (CARGO_TYPES.pod4): a 20-ft flat rack with the ISO footprint of the container, open sides,
+// three shelves and 36 pods of 1.22 x 0.61 m (4 ft x 2 ft). The forward end is a bulkhead that carries the transfer ring,
+// so the rack berths to a port like the other two cargo systems and the pods are passed through the 2 m opening.
+// Collider: the same cuboid as the 20-ft container (world.js), so every part here stays inside that envelope.
+function buildPodRack(T) {
+  const r = new THREE.Group(); r.name = 'pod-rack';
+  const L = T.length, H = T.height, W = T.width, P = T.pods;
+  const frame = new THREE.MeshStandardMaterial({ color: 0x8f969d, metalness: 0.8, roughness: 0.4 });
+  const plate = new THREE.MeshStandardMaterial({ color: 0xcfd2cc, metalness: 0.15, roughness: 0.6, side: THREE.DoubleSide });
+  const at = (m, x, y, z) => { m.position.set(x, y, z); r.add(m); return m; };
+  at(box(L, 0.18, W, frame), 0, -H / 2 + 0.09, 0);                                    // deck
+  at(box(0.12, H, W, plate), L / 2 - 0.06, 0, 0);                                      // forward bulkhead (transfer ring side)
+  for (const sz of [-1, 1]) {
+    for (const x of [-L / 2 + 0.07, -L / 6, L / 6, L / 2 - 0.19]) at(box(0.14, H, 0.14, frame), x, 0, sz * (W / 2 - 0.07));   // posts
+    at(box(L, 0.14, 0.14, frame), 0, H / 2 - 0.07, sz * (W / 2 - 0.07));               // top rails
+    const d = Math.hypot(L / 3, H - 0.3);                                                // diagonal brace, aft bay
+    const br = at(box(d, 0.08, 0.08, frame), -L / 3, 0, sz * (W / 2 - 0.07)); br.rotation.z = Math.atan2(H - 0.3, L / 3);
+    const tagPlate = at(box(1.0, 1.0, 0.03, plate), -1.2, -0.3, sz * (W / 2 + 0.012)); tagPlate.castShadow = true;   // carries the side fiducial
+    if (sz > 0) at(box(3.8, 0.9, 0.03, plate), 0, 0.6, W / 2 + 0.002);                 // placard behind the id label
+  }
+  for (const x of [-L / 2 + 0.07, L / 2 - 0.19]) at(box(0.14, 0.14, W, frame), x, H / 2 - 0.07, 0);
+  const pitch = (H - 0.28) / P.tiers, y0 = -H / 2 + 0.18;
+  for (let k = 1; k < P.tiers; k++) at(box(L - 0.3, 0.04, W - 0.2, plate), -0.06, y0 + k * pitch, 0);   // shelves
+  // pods: one instanced capsule + one instanced colour band each
+  const n = P.along * P.across * P.tiers, rad = P.dia / 2 - 0.015;
+  const podM = new THREE.MeshStandardMaterial({ color: 0xf2f1ec, roughness: 0.45, metalness: 0.1 });
+  const bandM = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5, metalness: 0.3 });
+  const pods = new THREE.InstancedMesh(new THREE.CapsuleGeometry(rad, P.length - 2 * rad - 0.03, 8, 20), podM, n);
+  const bands = new THREE.InstancedMesh(new THREE.CylinderGeometry(rad + 0.008, rad + 0.008, 0.16, 20, 1, true), bandM, n);
+  const M = new THREE.Matrix4(), q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 2), one = new THREE.Vector3(1, 1, 1), col = new THREE.Color();
+  const gapX = (L - 0.5 - P.along * P.length) / Math.max(1, P.along - 1), stepZ = (W - 0.3) / P.across;
+  const tint = [0xd9661f, 0x2f7fd0, 0x3aa35a];                                           // one colour per tier: power, science, supplies
+  let i = 0;
+  for (let k = 0; k < P.tiers; k++) for (let a = 0; a < P.along; a++) for (let b = 0; b < P.across; b++) {
+    const x = -L / 2 + 0.2 + P.length / 2 + a * (P.length + Math.min(gapX, 0.14)), y = y0 + k * pitch + 0.03 + P.dia / 2, z = (b - (P.across - 1) / 2) * stepZ;
+    M.compose(new THREE.Vector3(x, y, z), q, one); pods.setMatrixAt(i, M); bands.setMatrixAt(i, M); bands.setColorAt(i, col.setHex(tint[k % tint.length])); i++;
+  }
+  pods.castShadow = pods.receiveShadow = bands.castShadow = true; r.add(pods, bands);
+  mergeStatic(r);
+  return r;
 }
 function corrugatedTexture() {
   const c = document.createElement('canvas'); c.width = 512; c.height = 64; const g = c.getContext('2d');

@@ -102,8 +102,11 @@ export function createScene(canvas) {
 
   // Cascaded shadow maps: crisp contact shadows near the rover AND long low-sun shadows to the horizon
   sun.castShadow = false; sun.visible = false;
-  const csm = new CSM({ camera, parent: scene, cascades: 4, maxFar: 1800, mode: 'practical', shadowMapSize: 2048, lightDirection: new THREE.Vector3(0, -1, 0), lightIntensity: 5.2, lightNear: 1, lightFar: 6000, lightMargin: 400, shadowBias: -0.00025 });
-  for (const l of csm.lights) { l.color.set(0xfff6ea); l.shadow.normalBias = 0.06; }
+  const csm = new CSM({ camera, parent: scene, cascades: 4, maxFar: 1800, mode: 'practical', shadowMapSize: 2048, lightDirection: new THREE.Vector3(0, -1, 0), lightIntensity: 5.2, lightNear: 1, lightFar: 6000, lightMargin: 400, shadowBias: -0.00005 });
+  // Depth bias is a fraction of the 6 km light range: -0.00025 was 1.5 m, so anything under ~1.5 m tall (SCOUT-1, small
+  // boulders, footpads) cast a shadow that started a body length away from it. -0.00005 is 0.3 m; no acne seen on the
+  // terrain or the rover at a 10 deg sun with the 2 cm normal offset.
+  for (const l of csm.lights) { l.color.set(0xfff6ea); l.shadow.normalBias = 0.02; }
   const csmDone = new WeakSet();
   function csmRegister(root) {
     root.traverse((o) => {

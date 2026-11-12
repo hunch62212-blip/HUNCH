@@ -25,6 +25,16 @@ run(4); st('settle');
 // 1. static load balance: wheel loads carry the rover's lunar weight (5 % tolerance for strut settling)
 const wsum = R.wheels.reduce((a, w) => a + w.load, 0), wexp = R.mass * MOON.g;
 within('static wheel load / lunar weight', wsum / wexp, 0.95, 1.05);
+// 1b. parked stillness, brakes set since power-up: the rover must not creep, turn or report slip while it stands.
+// (Before the contact point was taken from the wheel geometry instead of the cast's witness point it crept ~1 cm and
+// turned ~0.1 deg in 20 s, with the six brakes fighting each other: CHANGES.md §25.)
+{ const p0 = R.pose(); let maxSlip = 0;
+  for (let i = 0; i < 20 * 120; i++) { sim.stepOnce(); for (const w of R.wheels) maxSlip = Math.max(maxSlip, Math.abs(w.slip)); }
+  const p1 = R.pose();
+  atMost('parked 20 s: position creep', Math.hypot(p1.x - p0.x, p1.z - p0.z) * 1000, 3, ' mm', 2);
+  atMost('parked 20 s: heading creep', dyaw(p0.yaw, p1.yaw), 0.02, ' deg', 4);
+  atMost('parked 20 s: reported wheel slip', maxSlip, 0.001, '', 4);
+}
 equal6();
 function equal6() { check('wheel count matches config corners', R.wheels.length === ROVER.corners.length, `${R.wheels.length} wheels, ${ROVER.corners.length} corners`); }
 

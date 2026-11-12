@@ -1,6 +1,6 @@
 // Simulation orchestrator: fixed-step physics, sensors, SLAM, autonomy, safety, faults.
 import * as THREE from 'three';
-import { PHYS, WORLD, ROVER } from './config.js';
+import { PHYS, WORLD, ROVER, DOCK } from './config.js';
 import { buildWorld, yawQuat, G_STRUCT } from './world.js';
 import { Rover } from './rover.js';
 import { Sensors } from './sensors.js';
@@ -90,8 +90,13 @@ export class Sim {
   emergencyStop(source = 'operator') {
     const R = this.rover;
     if (R.estop) return;
-    R.estop = true; R.brake = true; R.powered = false;
+    const lv = R.body.linvel();
+    const moving = Math.hypot(lv.x, lv.y, lv.z) > 0.04;
+    R.estop = true;
     R.cmd.vx = R.cmd.vz = R.cmd.wz = 0;
+    // Moving E-STOP enters Cat-1 tip-safe regenerative deceleration first (rover.js sets brake & powered=false once stopped).
+    if (!moving) { R.brake = true; R.powered = false; } else { R.brake = false; }
+    R.tilt.maxDeg = Math.max(R.tilt.maxDeg, Math.abs(R.tilt.roll * 180 / Math.PI), Math.abs(R.tilt.pitch * 180 / Math.PI));
     this.autonomy.paused = true; this.autonomy.mode = 'MANUAL';
     this.startup = null;
     if (this.scout && this.scout.enabled) { this.scout.enabled = false; this.scout.v = 0; this.scout.msg = 'halted by E-STOP (redeploy after restart)'; }
@@ -226,6 +231,7 @@ export class Sim {
         this.log('FAULT: cargo shifted 11 cm in cradle (detected by cradle load-cell asymmetry)', 'err');
         break;
       }
+      case 'seal': A.faults.seal = arg === 'hard' ? 'hard' : true; this.log(`FAULT: port seal fouled with regolith${arg === 'hard' ? ' (damaged: cleaning will not clear it)' : ''}`, 'err'); break;
       case 'port': { const n = arg ?? 1; A.faults.port[n] = true; this.log(`FAULT: PORT-${n} receiving location unavailable`, 'err'); break; }
       default:
         // the FDIR catalogue (src/sim/health.js): mc, seize, cool, enc, strut, bat, runaway, pdu, imd, fc, seu,
@@ -237,30 +243,25 @@ export class Sim {
   }
   clearFaults() {
     this.sensors.faults.lidar = this.sensors.faults.camera = false;
-    this.autonomy.faults.comms = false; this.autonomy.faults.port = {};
+    this.autonomy.faults.comms = false; this.autonomy.faults.port = {}; this.autonomy.faults.seal = false;
     for (const w of this.rover.wheels) w.fault = null;
     this.health.clearAll();
     this.log('All faults cleared', 'ok');
     this.emit('fault', 'clear');
   }
 
-  stepOnce() {
+  stepOnce(opts = {}) {
     const dt = PHYS.dt;
     this._startupTick();
     // operator link: release uplinked commands whose one-way light time has elapsed (commands.js, "comms")
     if (this.comms.queue.length) { const q = this.comms.queue; while (q.length && q[0].t <= this.time) q.shift().fn(); }
     for (const m of this.modules) {
+      if (opts.skipAutonomy && m === this.autonomy) { m._acc = 0; continue; }
       m._acc += dt;
       const period = 1 / (m.rate || 120);
       if (m._acc >= period - 1e-9) { m.update(m._acc); m._acc = 0; }
     }
-    // cargo shift recovery: the cradle's lateral re-centring actuator
-    const L = this.rover.lift;
-    if (L.shifted && L.base) {
-      if (!this._shiftT) { this._shiftT = this.time; this.log('Cradle re-centring cargo (lateral actuator)', 'warn'); }
-      L.base.z += Math.max(-0.01 * dt, Math.min(0.01 * dt, -L.base.z * 0.5));
-      if (Math.abs(L.base.z) < 0.01) { L.shifted = false; this._shiftT = 0; this.log('Cargo re-centred, load path nominal', 'ok'); }
-    }
+    this._stepShiftRecovery(dt);
     if (this.lunar.on) {
       const Ln = this.lunar; Ln.phase = (Ln.phase + dt / Ln.periodS) % 1; Ln._t -= dt;
       if (Ln._t <= 0) { Ln._t = 1; this.setSun((this.sunAz0 ?? 205) + Ln.phase * 360, 10 * Math.sin(Ln.phase * 2 * Math.PI) - 1); }
@@ -269,6 +270,7 @@ export class Sim {
     if (this._streamT <= 0) { this._streamT = 1.0; this.streamRocks([this.rover.pose()]); }
     this.rover.step(dt);
     this._precisionPre();
+    this._bellowsStep(dt);
     this.world.step(this.eventQueue);
     if (this.freshRocks.length) { for (const c of this.freshRocks.splice(0)) if (c.isEnabled()) c.setTranslation(c.translation()); }
     this._precisionPost(dt);
@@ -285,28 +287,63 @@ export class Sim {
         }
       }
     });
+    if (this._bellowsF) { // the coupling's push is a port contact force like the collar's
+      const { c, port, F } = this._bellowsF, rec = this.cargoForces.get(c) || { total: 0, port: 0, portRef: null };
+      rec.total += F; rec.port += F; rec.portRef = rec.portRef || port; this.cargoForces.set(c, rec);
+    }
     this.time += dt;
     this.stepCount++;
   }
 
+  // Port dust-exclusion coupling (DOCK.bellows): spring-damper between the held cargo's forward face and the port
+  // plane, acting along the port normal while the face is within the bellows' free length and over the opening.
+  _bellowsStep(dt) {
+    this._bellowsF = null;
+    const B = DOCK.bellows, c = this.rover.lift.cargo;
+    if (!B || !c || c.dockJoint) return;
+    const t = c.body.translation(), r = c.body.rotation();
+    const f = new THREE.Vector3(c.T.length / 2, 0, 0).applyQuaternion(new THREE.Quaternion(r.x, r.y, r.z, r.w)).add(new THREE.Vector3(t.x, t.y, t.z));
+    for (const p of this.ports) {
+      if (p.occupied) continue;
+      const dx = f.x - p.x, dz = f.z - p.z, gap = dx * p.nx + dz * p.nz;     // + = on the pad side of the port plane
+      if (gap >= B.free || gap < -0.05) continue;
+      if (Math.hypot(dx - gap * p.nx, dz - gap * p.nz, f.y - p.y) > DOCK.openingD / 2 + 0.6) continue;
+      const v = c.body.linvel(), vn = v.x * p.nx + v.z * p.nz;              // + = backing away
+      const F = Math.max(0, B.k * (B.free - gap) - B.c * vn);
+      if (F > 0) { c.body.applyImpulseAtPoint({ x: p.nx * F * dt, y: 0, z: p.nz * F * dt }, { x: f.x, y: f.y, z: f.z }, true); this._bellowsF = { c, port: p, F }; }
+      return;
+    }
+  }
+
   // ---------------- transit warp ----------------
+  _stepShiftRecovery(dt) {
+    const L = this.rover.lift;
+    if (L.shifted && L.base) {
+      if (!this._shiftT) { this._shiftT = this.time; this.log('Cradle re-centring cargo (lateral actuator)', 'warn'); }
+      L.base.z += Math.max(-0.01 * dt, Math.min(0.01 * dt, -L.base.z * 0.5));
+      if (Math.abs(L.base.z) < 0.01) { L.shifted = false; this._shiftT = 0; this.log('Cargo re-centred, load path nominal', 'ok'); }
+    }
+  }
   warpWanted() { return this.warp.enabled && this.timeScale >= this.warp.minScale && !this.paused; }
   // One kinematic step of H seconds. Returns the sim time advanced (0 if the autonomy declined the rails this tick:
   // the caller then runs physics steps, and the autonomy keeps driving them until the rails check passes again).
   warpStep(h = this.warp.H) {
     const A = this.autonomy, R = this.rover, S = this.sensors, W = this.warp;
+    if (this.comms.queue.length) return { dt: 0, autoRan: false }; // preserve delayed command execution in stepOnce
     if (!W.active) { W.active = true; R.railsBegin(); W.lastScanD = -1e9; W.lastStreamD = -1e9; }
     // camera at 1 Hz on rails: the fiducial beacons (habitat face, power dock, lander) must still be seen, or the SLAM
     // drift is never corrected on the warped approach to the base (the loaded rover then circled the lead-in point
     // 17-20 m off). Each frame is fused by this tick's autonomy update and then cleared, so it is never re-fused.
     S.detections = []; S.rockDetections = [];
     W.camT = (W.camT ?? 0) - h;
-    if (W.camT <= 0) { W.camT = 1; if (S.cameraOn && !S.faults.camera && R.powered) S._doCamera(); }
+    if (W.camT <= 0) { W.camT = 1; if (S.cameraOn && !S.faults.camera && R.powered && this.thermal?.ok.camera !== false) S._doCamera(); }
     this.warping = true; A._railsMoved = false;
     try { A.update(h); } finally { this.warping = false; S.detections = []; S.rockDetections = []; }
-    if (!A._railsMoved) return 0;
+    if (!A._railsMoved) return { dt: 0, autoRan: true };
     S.sunTick(h);
     this.slam.update(h);   // integrates the odometry the rails produced (est stays in its own SLAM frame)
+    if (this.scout.enabled) this.scout.update(h);
+    this._stepShiftRecovery(h);
     const d = S.odom.dist;
     if (d - W.lastStreamD > 30) { W.lastStreamD = d; this.streamRocks([R.pose()]); this.world.updateSceneQueries(); }
     if (d - W.lastScanD > 6) { W.lastScanD = d; S.warpScan(); }
@@ -314,7 +351,7 @@ export class Sim {
     this._startupTick();
     if (this.lunar.on) { const Ln = this.lunar; Ln.phase = (Ln.phase + h / Ln.periodS) % 1; this.setSun((this.sunAz0 ?? 205) + Ln.phase * 360, 10 * Math.sin(Ln.phase * 2 * Math.PI) - 1); }
     this.time += h; W.steps++; W.simS += h;
-    return h;
+    return { dt: h, autoRan: true };
   }
   endWarp() {
     if (!this.warp.active) return;
@@ -325,12 +362,14 @@ export class Sim {
   }
   // one step of whichever kind applies; returns the sim seconds advanced
   stepAuto() {
+    let skipAutonomy = false;
     if (this.warpWanted() && this.autonomy.railsOk) {
-      const h = this.warpStep();
-      if (h > 0) return h;
+      const r = this.warpStep();
+      if (r.dt > 0) return r.dt;
+      skipAutonomy = r.autoRan;
     }
     this.endWarp();
-    this.stepOnce();
+    this.stepOnce({ skipAutonomy });
     return PHYS.dt;
   }
 

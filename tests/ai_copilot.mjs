@@ -26,7 +26,7 @@ check('non-JSON answer becomes a plain reply', p3.reply === 'not json at all' &&
 const sim = new Sim(RAPIER);
 for (let i = 0; i < 60; i++) sim.stepOnce();
 const s = snapshot(sim), js = JSON.stringify(s);
-check('snapshot has drive, battery, cargo, alarms, log', s.drive && s.battery.soc_pct > 0 && s.cargo.length === 2 && Array.isArray(s.fdir_alarms) && s.recent_log.length > 0, `${js.length} chars`);
+check('snapshot has drive, battery, cargo, alarms, log', s.drive && s.battery.soc_pct > 0 && s.cargo.length === 3 && Array.isArray(s.fdir_alarms) && s.recent_log.length > 0, `${js.length} chars`);
 check('snapshot is compact (< 8 kB)', js.length < 8000, `${js.length} chars`);
 const sp = systemPrompt();
 check('system prompt lists console commands and missions', sp.includes('mission cycle') && sp.includes('repair <id>') && sp.includes('Only ONE'), `${sp.length} chars`);

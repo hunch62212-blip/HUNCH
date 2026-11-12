@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { POWER_DOCK } from '../sim/config.js';
 import { heightAt } from '../sim/terrain.js';
 import { MAT, labelTexture } from './props.js';
+import { mergeStatic } from './mergeStatic.js';
 
 const box = (w, h, d, m) => { const me = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); me.castShadow = me.receiveShadow = true; return me; };
 const cyl = (r1, r2, h, m, seg = 24) => { const me = new THREE.Mesh(new THREE.CylinderGeometry(r1, r2, h, seg), m); me.castShadow = me.receiveShadow = true; return me; };
@@ -97,14 +98,22 @@ export class PowerDockModel {
     for (let k = 0; k < 20; k++) { const s = box(0.05, 0.28, 0.42, segOff); s.position.set(b.d / 2 + 0.03, 1.0, -b.w / 2 + 2 + k * (b.w - 4) / 19); s.castShadow = false; vault.add(s); this.socSegs.push(s); }
     this.segMats = { segOn, segLow, segOff };
 
-    // ---- charge pad + rails
+    // ---- shuttered blind-mate charge coupler pedestal (replaces exposed bare floor copper rails)
     const gp = sim.powerDock.ground, P = L.pad;
     const padG = new THREE.Group(); padG.position.set(P.x, gp, P.z); padG.rotation.y = L.yaw; root.add(padG);
     const pad = new THREE.Mesh(new THREE.BoxGeometry(17, 0.18, 17), [MAT.dark, MAT.dark, new THREE.MeshStandardMaterial({ map: padTexture(), roughness: 0.92 }), MAT.dark, MAT.dark, MAT.dark]);
     pad.rotation.y = -Math.PI / 2; pad.position.y = 0.06; pad.receiveShadow = true; padG.add(pad);
+    const shroud = box(4.6, 0.14, 3.0, MAT.dark); shroud.position.y = 0.18; padG.add(shroud);
+    const housing = box(3.4, 0.16, 2.2, MAT.steel); housing.position.y = 0.25; padG.add(housing);
+    this.shutterMat = new THREE.MeshStandardMaterial({ color: 0x2a2f36, roughness: 0.55, metalness: 0.65 });
+    for (const s of [-1, 1]) {
+      const curb = box(5.4, 0.14, 0.22, MAT.yellow || MAT.dark); curb.position.set(0, 0.19, s * 1.45); padG.add(curb); // alignment wheel guide curb
+      const door = box(3.2, 0.04, 0.95, this.shutterMat); door.position.set(0, 0.34, s * 0.48); padG.add(door);          // spring-wiped sliding dust shutter
+    }
     this.railMat = new THREE.MeshStandardMaterial({ color: 0xb87333, roughness: 0.3, metalness: 1, emissive: 0x33ccff, emissiveIntensity: 0 });
-    for (const s of [-1, 1]) { const rail = box(5.5, 0.12, 0.35, this.railMat); rail.position.set(0, 0.2, s * 0.9); padG.add(rail); }
-    const cover = box(6.2, 0.06, 2.6, MAT.black); cover.position.y = 0.16; padG.add(cover);
+    for (const sx of [-0.7, 0.7]) for (const sz of [-0.45, 0.45]) {
+      const contact = cyl(0.14, 0.14, 0.08, this.railMat, 16); contact.position.set(sx, 0.31, sz); padG.add(contact);   // shielded spring-wiped blind-mate contact puck
+    }
     // ---- charger pedestal + cable to the vault
     const pe = L.pedestal, gpe = heightAt(T, pe.x, pe.z);
     const ped = new THREE.Group(); ped.position.set(pe.x, gpe, pe.z); ped.rotation.y = yaw; root.add(ped);
@@ -128,6 +137,9 @@ export class PowerDockModel {
       root.add(sp, sp.target); this.flood.push(sp);
     }
     this._t = 0;
+    // static parts merged per material; the sun-tracking heads turn and the charge-level segments swap materials
+    for (const h of this.heads) mergeStatic(h);
+    mergeStatic(root, (o) => this.heads.includes(o) || this.socSegs.includes(o));
   }
   update(dt) {
     const D = this.sim.powerDock, sun = this.sim.sunDir;

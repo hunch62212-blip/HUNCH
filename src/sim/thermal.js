@@ -108,7 +108,8 @@ export class Thermal {
       const s = this.n[k];
       let P = 0;
       // controller losses scale with the current the brain allows (REV DOWN cuts torque; a cool-down stop idles them)
-      if (k === 'mc') P = (powered ? N.Pint : 5) + N.lossFrac * (1 + (this.fx.mcLossK || 0)) * Math.max(0, R.power?.driveW || 0) + this.fx.mcExtraW * (this.cmd.hold ? 0.3 : this.cmd.torqueK);
+      // controller losses scale with the phase current (both driving and regen braking carry I^2*R)
+      if (k === 'mc') P = (powered ? N.Pint : 5) + N.lossFrac * (1 + (this.fx.mcLossK || 0)) * Math.abs(R.power?.driveW || 0) + this.fx.mcExtraW * (this.cmd.hold ? 0.3 : this.cmd.torqueK);
       else {
         const on = powered && this.ok[k] && (k === 'lidar' ? sim.sensors?.lidarOn : sim.sensors?.cameraOn) !== false;
         P = (on ? N.Pint : 0) + (k === 'lidar' ? 35 : 8) * this.fx.glint;
@@ -235,9 +236,16 @@ export class Thermal {
   // Fast thermal-only stepping (rover parked, no physics): health's vault / battery / hub model and these nodes. Used by
   // tests/thermal.mjs to run long scenarios in seconds, and by the "thermal soak" command to look ahead.
   soak(seconds, dt = 0.1) {
-    const sim = this.sim; this._fast = true;
-    try { for (let t = 0; t < seconds; t += dt) { sim.health?._thermal(dt); this.update(dt); sim.time += dt; } }
-    finally { this._fast = false; }
+    const sim = this.sim, R = sim.rover; this._fast = true;
+    const pose = R.pose();
+    try {
+      for (let t = 0; t < seconds; t += dt) {
+        sim.health?._thermal(dt);
+        this.update(dt);
+        R?._powerStep?.(dt, 0, pose.q, pose);
+        sim.time += dt;
+      }
+    } finally { this._fast = false; }
   }
 
   // one-line state for the console / AI copilot

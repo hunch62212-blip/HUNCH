@@ -8,10 +8,10 @@
 //    (real contact) and locked by the two ring clamps (module_carry.js)
 //  - battery power bus (charged at the AEGIS garage), motor thermal model
 import * as THREE from 'three';
-import { ROVER, K, MOON, REGOLITH, CARGO_TYPES, GROUPS, THERMAL } from './config.js';
+import { ROVER, K, MOON, REGOLITH, CARGO_TYPES, GROUPS, THERMAL, KEEPALIVE } from './config.js';
 export const VEHICLE = ROVER;
 import { wheelSoil, shearFactor } from './terramechanics.js';
-import { G_ROVER, G_CARGO, G_CARGO_HELD, Q_WHEEL, Q_TERRAIN, yawQuat } from './world.js';
+import { G_ROVER, G_CARGO, G_CARGO_HELD, Q_WHEEL, Q_TERRAIN, Q_SENSOR, yawQuat } from './world.js';
 import { heightAt, soilAt } from './terrain.js';
 
 const STRUCT_STAND_COS = Math.cos(40 * Math.PI / 180);
@@ -220,29 +220,45 @@ export class Rover {
     sv.pos.set(t.x, t.y, t.z); sv.Q.set(r.x, r.y, r.z, r.w);
     const lv = this.body.linvel(), av = this.body.angvel(), c = this.body.worldCom();
     sv.lin.set(lv.x, lv.y, lv.z); sv.ang.set(av.x, av.y, av.z); sv.com.set(c.x, c.y, c.z);
-    const Q = sv.Q, Yb = sv.Yb.set(0, 1, 0).applyQuaternion(Q), Xb = sv.Xb.set(1, 0, 0).applyQuaternion(Q);
+    const Q = sv.Q, Yb = sv.Yb.set(0, 1, 0).applyQuaternion(Q), Xb = sv.Xb.set(1, 0, 0).applyQuaternion(Q), Zb = sv.Zb.set(0, 0, 1).applyQuaternion(Q);
     const B = ROVER.bogie, Wp = ROVER.wheel, S = ROVER.susp, M = ROVER.motor;
     const g = MOON.g, mu = ROVER.unsprungMassPerBogie;
     const totalMass = this.mass + (this.loaded ? this.lift.cargo.T.mass : 0);
 
     // E-STOP is a category-1 stop: the drives decelerate the vehicle at the tip-safe rate, then the
     // spring brakes set and drive power is removed (an instant lock-up would tip a loaded AEGIS).
+    const arrayHold = this.sim.health && this.sim.health.array.state !== 'stowed';
     const speedNow = sv.lin.length();
     if (this.estop && !this._estopT0) this._estopT0 = this.sim.time;
     if (!this.estop) this._estopT0 = 0;
     const stopping = this.estop && this.powered && speedNow > 0.04 && this.sim.time - this._estopT0 < 12;
-    const halt = (this.estop && !stopping) || !this.powered;
-    if (halt || stopping) { this.cmd.vx = this.cmd.vz = this.cmd.wz = 0; }
+    if (this.estop && !stopping && this.powered) { this.powered = false; this.brake = true; }
+    const halt = (this.estop && !stopping) || !this.powered || arrayHold;
+    if ((this.estop && !stopping) || !this.powered || stopping) { this.cmd.vx = this.cmd.vz = this.cmd.wz = 0; }
     if (halt) this._cmdF = { vx: 0, wz: 0 };
-    this._allocate(dt, stopping);
+    this._allocate(dt, stopping || arrayHold);
     const f = this._cmdF;
-    const cmdZero = Math.abs(f.vx) + Math.abs(f.wz) < 1e-3 && Math.abs(this.cmd.vx) + Math.abs(this.cmd.wz) < 1e-4;
+    const cmdZero = Math.abs(f.vx) + Math.abs(f.wz) < 1e-3 && (arrayHold || Math.abs(this.cmd.vx) + Math.abs(this.cmd.wz) < 1e-6);
     const parkBrake = halt || this.brake || (cmdZero && speedNow < 0.03);
 
     const vel = V(), tmp = V(), tl = V(), tlat = V(), F = V(), hp = V(), wc = V(), dirW = V(), rel = V();
     let nContacts = 0;
     for (const b of this.bogies) for (const w of b.wheels) if (w.contact) nContacts++;
-    const mEff = 0.6 * totalMass / Math.max(1, nContacts);
+    let hCom = ROVER.comLocal.y, IxTot = ROVER.inertia.x, IzTot = ROVER.inertia.z;
+    if (this.loaded) {
+      const c = this.lift.cargo, mc = c.T.mass, ct = c.body.translation();
+      const hc = V().set(ct.x - sv.pos.x, ct.y - sv.pos.y, ct.z - sv.pos.z).dot(Yb);
+      const hr = ROVER.comLocal.y, m0 = this.mass;
+      hCom = (m0 * hr + mc * hc) / totalMass;
+      const rc = c.T.radius || (c.T.width / 2);
+      IxTot += m0 * (hr - hCom) ** 2 + mc * ((hc - hCom) ** 2 + 0.5 * rc * rc);
+      IzTot += m0 * (hr - hCom) ** 2 + mc * ((hc - hCom) ** 2 + (c.T.length * c.T.length) / 12);
+    }
+    const nC = Math.max(1, nContacts);
+    // Translational + roll/pitch rotational effective mass at the wheel ground patch: carrying high-CoM cargo
+    // lowers mEffLat well below totalMass, and exceeding 2*mEffLat caused 60 Hz lateral tire chatter.
+    const mEffLat = (this.loaded ? 0.55 * (1 / (1 / totalMass + (hCom * hCom) / IxTot)) : 0.6 * totalMass) / nC;
+    const mEffLon = (this.loaded ? 0.6 * (1 / (1 / totalMass + (hCom * hCom) / IzTot)) : 0.6 * totalMass) / nC;
     const Lstart = B.Lmin - 0.32;
     const maxCast = B.Lmax + B.halfSpan * Math.sin(B.maxBeamAngle) + 0.12 - Lstart;
     const gvec = tmp.set(0, -g, 0).clone();
@@ -354,6 +370,18 @@ export class Rover {
         if (hit.time_of_impact <= 1e-5 || n.lengthSq() < 0.5) n.copy(Yb);
         w.cp.set(hit.witness1.x, hit.witness1.y, hit.witness1.z);
         w.groundY = w.groundY == null ? w.cp.y : w.groundY + (w.cp.y - w.groundY) * Math.min(1, dt * 6);
+        // Contact point for the forces, the slip velocity and the parked-brake anchor: NOT the cast's witness point.
+        // The witness is one arbitrary point of the contact patch. Across the tyre it flips between the two edges
+        // (1.22 m apart); along the tyre it wanders +-1 cm, because 5 mm from the bottom of a 1.06 m radius tyre the
+        // surface is only 12 um higher, below float32 resolution 1 km from the origin (61 um). Forces applied there
+        // gave each wheel a +-1.3 kN m roll couple of random sign, and the brake anchor (300 kN/m) read the wander as
+        // +-3 kN of slip: a parked rover rocked (wheel loads 1.8-2.5 kN), its six brakes fought each other at their
+        // +-1.5 kN limit, it jittered +-0.004 rad/s in yaw and crept ~5 cm a minute.
+        // Use the geometric point instead: the cast cylinder's centre at impact, one radius down the contact normal,
+        // on the wheel's mid-plane. It depends only on the body pose, the cast distance and the facet normal.
+        w.cp.set(b.x + cs * w.off, B.hardpointY - Lstart - B.wheelBelowPivot, b.z - sn * w.off).applyQuaternion(Q).add(sv.pos)
+          .addScaledVector(Yb, -hit.time_of_impact).addScaledVector(n, -Wp.radius);
+        w.cp.addScaledVector(Zb, -(w.cp.x - hp.x) * Zb.x - (w.cp.y - hp.y) * Zb.y - (w.cp.z - hp.z) * Zb.z);
         w.airT = 0;
         w.cn.copy(n);
         tl.copy(dirW).addScaledVector(n, -dirW.dot(n)).normalize();
@@ -418,10 +446,10 @@ export class Rover {
         const mag = Math.hypot(Fx, Fy), cap = soil.Hmax * 1.02;
         if (mag > cap) { Fx *= cap / mag; Fy *= cap / mag; }
         // dead-beat guards (stability at very low speed): forces may stop, never reverse, motion
-        const latCap = mEff * Math.abs(vLat) / dt;
+        const latCap = mEffLat * Math.abs(vLat) / dt;
         if (Math.abs(Fy) > latCap) Fy = Math.sign(Fy) * latCap;
         if (Math.abs(w.omega) < 1e-6) {
-          const lonCap = mEff * Math.abs(vL) / dt;
+          const lonCap = mEffLon * Math.abs(vL) / dt;
           if (Math.abs(Fx) > lonCap) Fx = Math.sign(Fx) * lonCap;
         }
         // Static friction of a braked wheel (bristle / Dahl model): the locked tyre is anchored
@@ -438,6 +466,10 @@ export class Rover {
             w.anchor.copy(w.cp).addScaledVector(tl, bx / 300000).addScaledVector(tlat, by / 300000);
           }
           Fx = bx; Fy = by;
+          // a locked, anchored tyre is not slipping: report the force the brake actually holds. (The slip formula's
+          // 0.06 m/s floor turned millimetres per second of settling into "7-12 % slip", and the instruments showed
+          // 2-3 kN of drawbar pull and a 0.26 traction coefficient for a parked rover.)
+          w.slip = 0; w.H = bx; w.Rc = 0;
         } else w.anchor = null;
         w.Fx = Fx; w.Fy = Fy;
         F.copy(n).multiplyScalar(N).addScaledVector(tl, Fx).addScaledVector(tlat, Fy);
@@ -482,7 +514,7 @@ export class Rover {
     this._smartRpm(dt);
     this._liftStep(dt, Q, sv.pos);
     this._powerStep(dt, driveW, Q, sv.pos);
-    this._stability(Q, sv.com);
+    this._stability(Q, sv.com, dt);
     // odometer (true)
     if (this._prevPos) this.odo.dist += Math.hypot(sv.pos.x - this._prevPos.x, sv.pos.z - this._prevPos.z);
     this._prevPos = { x: sv.pos.x, z: sv.pos.z };
@@ -520,7 +552,7 @@ export class Rover {
     }
   }
 
-  _stability(Q, com) {
+  _stability(Q, com, dt = ROVER_DT) {
     // Static tip-over margin (force-angle style, gravity only): for each edge of the wheel
     // support polygon, the angle the CoM must rotate about that edge before it passes over it.
     // a bogie counts as support if a wheel touched within the last 0.3 s (walking-beam rock-over
@@ -545,11 +577,18 @@ export class Rover {
       const centre = any.clone().addScaledVector(Zb, b.z - any.clone().sub(tp).dot(Zb));
       pts.push(centre.clone().addScaledVector(Zb, -halfW), centre.addScaledVector(Zb, halfW));
     }
-    const c = V().copy(com);
+    // Combined centre of mass: sprung body (Rapier CoM) + the six unsprung corners at their axles + the held cargo at
+    // ITS centre of mass. (Was: the whole 8,000 kg at the sprung CoM, 2.25 m up, although 1,800 kg of it is wheels and
+    // hubs at axle height 1.06 m; and the cargo at its body origin, although the 20-ft sled's CoM is 0.3 m aft of it.)
+    const c = V().copy(com).multiplyScalar(ROVER.sprungMass);
+    let mSum = ROVER.sprungMass;
+    { const B = ROVER.bogie, mu = ROVER.unsprungMassPerBogie;
+      for (const b of this.bogies) { c.add(V().set(b.x, B.hardpointY - b.L - B.wheelBelowPivot, b.z).applyQuaternion(Q).add(tp).multiplyScalar(mu)); mSum += mu; } }
     if (this.loaded) {
-      const ct = this.lift.cargo.body.translation(), m1 = this.mass, m2 = this.lift.cargo.T.mass;
-      c.multiplyScalar(m1).add(V().set(ct.x, ct.y, ct.z).multiplyScalar(m2)).divideScalar(m1 + m2);
+      const cc = this.lift.cargo.body.worldCom(), m2 = this.lift.cargo.T.mass;
+      c.add(V().set(cc.x, cc.y, cc.z).multiplyScalar(m2)); mSum += m2;
     }
+    c.divideScalar(mSum);
     this.comWorld = c.clone();
     // support polygon = convex hull of the wheel contacts (horizontal plane)
     const poly = convexHullXZ(pts.filter(Boolean));
@@ -572,7 +611,7 @@ export class Rover {
     this.tilt.margin = minAng * 180 / Math.PI;
     this.tilt.poly = poly; this.tilt.crit = crit; // for the engineering overlay / stability display
     // filtered margin (tau ~0.8 s) for the speed governor; raw value for display/stats
-    this.tilt.marginF = this.tilt.marginF == null ? this.tilt.margin : this.tilt.marginF + (this.tilt.margin - this.tilt.marginF) * Math.min(1, ROVER_DT / 0.8);
+    this.tilt.marginF = this.tilt.marginF == null ? this.tilt.margin : this.tilt.marginF + (this.tilt.margin - this.tilt.marginF) * Math.min(1, dt / 0.8);
     // ignore the settling transient after spawn/teleport (wheels not yet on the ground)
     if (this.sim.time - (this._spawnT || 0) > 3 && this.wheels.filter((w) => w.contact).length >= 6) this.stats.minMargin = Math.min(this.stats.minMargin, this.tilt.margin);
   }
@@ -649,8 +688,7 @@ export class Rover {
   clampOpen(force = false) {
     const L = this.lift;
     if (L.clamp === 'open' || L.clamp === 'opening') return { ok: true };
-    const v = this.body.linvel();
-    if (L.cargo && !force && Math.hypot(v.x, v.z) > 0.05 && !this.cargoSupported()) { L.msg = 'RELEASE INHIBITED: vehicle moving with an unsupported load'; return { ok: false, why: L.msg }; }
+    if (L.cargo && !force && !this.cargoSupported()) { L.msg = 'RELEASE INHIBITED: cargo unsupported (set down on stands or docking jacks first)'; return { ok: false, why: L.msg }; }
     this._detach();
     L.clamp = 'opening';
     L.msg = 'Ring jaws opening (the saddles still carry the module until the rover kneels)';
@@ -696,6 +734,10 @@ export class Rover {
       if (L.clampT <= 0) { L.clamp = 'open'; L.msg = 'Ring jaws open'; }
     }
     if (this.estop) return; // air valves closed: ride held
+    if (this.sim.health?.isStrutKneelInhibited?.() && L.target < this.rideOffset) {
+      L.target = this.rideOffset;
+      L.msg = 'KNEEL INHIBITED: roller-screw strut < 65% response';
+    }
     L.target = Math.max(ROVER.ride.kneel, Math.min(ROVER.ride.max, L.target));
     const prev = this.rideOffset;
     this.rideOffset += Math.max(-LC.rate * dt, Math.min(LC.rate * dt, L.target - this.rideOffset));
@@ -718,38 +760,55 @@ export class Rover {
     this._shadowT -= dt;
     if (this._shadowT <= 0) {
       this._shadowT = 1.0;
-      const o = V().set(-1.2, 5.4, -2.75).applyQuaternion(Q).add(pos).addScaledVector(sun, 3);
+      const deployed = this.sim.health?.array?.state === 'deployed';
+      const { x: kx, z: kz } = KEEPALIVE.corner;
+      const o = (deployed ? V().set(kx, KEEPALIVE.mastH, kz) : V().set(-1.2, 5.4, -2.75)).applyQuaternion(Q).add(pos).addScaledVector(sun, 0.5);
       const ray = new this.RAPIER.Ray({ x: o.x, y: o.y, z: o.z }, { x: sun.x, y: sun.y, z: sun.z });
-      const hit = this.sim.world.castRay(ray, 3000, true, undefined, Q_TERRAIN);
+      const hit = this.sim.world.castRay(ray, 3000, true, undefined, Q_SENSOR, undefined, this.body);
       P.sunlit = hit ? 0 : 1;
     }
     const cosI = Math.max(0, nrm.dot(sun));
-    P.solarW = SOL.panels * SOL.panelArea * SOL.efficiency * 1361 * cosI * P.sunlit * (sun.y > -0.01 ? 1 : 0);
+    P.solarW = SOL.panels * SOL.panelArea * SOL.efficiency * MOON.solarConstant * cosI * P.sunlit * (sun.y > -0.01 ? 1 : 0);
     // heaters: thermostatic demand from the vault / battery thermal model (health.js); ROVER.heaterW only if absent
     const heaterW = this.sim.health ? this.sim.health.heaterW : ROVER.heaterW;
     let hotel = ROVER.avionicsW + ROVER.lidarW + ROVER.cameraW + ROVER.commsW + (this.lights ? 180 : 0);
     if (!this.powered) hotel = 60; // survival: one flight computer at minimum, beacon, BMS
     hotel += heaterW;
     hotel += this.sim.thermal ? this.sim.thermal.powerW : 0; // instrument heaters / TECs and stator heating (thermal.js)
-    const lifting = (this.mass + (this.lift.cargo ? this.lift.cargo.T.mass : 0)) * MOON.g * Math.max(0, this.lift.rateNow || 0) / ROVER.susp.eff; // roller-screw actuators (was an air pump, eta 0.25: suspension.js; CHANGES.md §17)
+    // include seated un-clamped cargo lifted on the saddles before clampClose locks it
+    let cargoMass = this.lift.cargo ? this.lift.cargo.T.mass : 0;
+    if (!cargoMass && (this.lift.rateNow || 0) > 0) {
+      const u = this.findCargoUnder();
+      if (u && Math.abs(u.rel.x - (u.c.T.carryX || 0)) < 0.8 && Math.abs(u.rel.z) < 0.6) {
+        const half = u.c.T.adapterR || u.c.T.radius;
+        if (u.rel.y <= ROVER.seatY + half + 0.12) cargoMass = u.c.T.mass;
+      }
+    }
+    const lifting = (this.mass + cargoMass) * MOON.g * Math.max(0, this.lift.rateNow || 0) / ROVER.susp.eff; // roller-screw actuators (was an air pump, eta 0.25: suspension.js; CHANGES.md §17)
     const clampW = (this.lift.clamp === 'closing' || this.lift.clamp === 'opening') ? 450 : 0;
-    const steerW = this.bogies.reduce((a, b) => a + (Math.abs(b.steerTarget - b.steer) > 0.002 ? 120 : 8), 0);
+    // (a 48 W "steering actuator" load was booked here every step, left over from SPAN-40: AEGIS-V1 has fixed wheels
+    // and no steering actuators, so it was a phantom drain, a fifth of the survival-night budget)
     P.driveW = driveW;
-    P.loadW = hotel + driveW + lifting + clampW + steerW;
+    P.loadW = hotel + driveW + lifting + clampW;
     // auxSolarW: emergency keep-alive array (health.js); capK: fraction of battery strings on line (health.js)
     const gen = P.solarW + (P.auxSolarW || 0) + (P.dockW || 0);
-    const cap = Math.max(1, BAT.capacityWh * (P.capK ?? 1)); // >= 1 Wh: all four strings out would otherwise divide by zero (NaN SoC)
+    const capK = Math.max(0, P.capK ?? 1);
+    const cap = BAT.capacityWh * capK;
     P.netW = gen - P.loadW;
     const dWh = P.netW * dt / 3600;
-    P.wh = Math.max(0, Math.min(cap, P.wh + dWh));
-    if (P.netW < 0) P.energyUsedWh += -dWh; else P.energyGenWh += dWh;
+    if (cap <= 0) { P.wh = 0; P.soc = 0; }
+    else { P.wh = Math.max(0, Math.min(cap, P.wh + dWh)); P.soc = P.wh / cap; }
+    // consumption and generation are booked separately. (Was: the NET flow went to one counter or the other, so on the
+    // dock at 60 kW the rover's own 2 kW load vanished from "energy used" and "generated" read 58 kW.) Regenerated
+    // drive energy (negative loadW) counts as generation.
+    P.energyUsedWh += Math.max(0, P.loadW) * dt / 3600;
+    P.energyGenWh += (gen + Math.max(0, -P.loadW)) * dt / 3600;
     if (driveW < 0) P.regenWh += -driveW * dt / 3600;
-    P.soc = P.wh / cap; // state of charge of the strings on line
-    // internal resistance rises in the cold (THERMAL.coldRperK per K below coldRrefC); health.js uses the same value for I^2 R
+    // internal resistance rises in the cold (THERMAL.coldRperK per K below coldRrefC) and scales inversely with healthy strings
     { const Tb = this.sim.health ? this.sim.health.th.Tb : THERMAL.coldRrefC;
-      P.internalR = BAT.internalR * (1 + THERMAL.coldRperK * Math.max(0, THERMAL.coldRrefC - Tb)); }
-    P.voltage = BAT.nominalV * (0.9 + 0.15 * P.soc) - (P.loadW - gen) / BAT.nominalV * P.internalR;
-    if (P.soc <= 0.005 && this.powered) { this.powered = false; this.sim.log('BATTERY DEPLETED - safe mode', 'err'); }
+      P.internalR = capK > 0 ? BAT.internalR / capK * (1 + THERMAL.coldRperK * Math.max(0, THERMAL.coldRrefC - Tb)) : Infinity; }
+    P.voltage = capK > 0 ? BAT.nominalV * (0.9 + 0.15 * P.soc) - (P.loadW - gen) / BAT.nominalV * P.internalR : 0;
+    if ((capK <= 0 || P.soc <= 0.005) && this.powered) { this.powered = false; this.sim.log('BATTERY DEPLETED - safe mode', 'err'); }
   }
 
   telemetry() {
@@ -821,7 +880,7 @@ export class Rover {
     const right = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
     this.tilt.pitch = Math.asin(Math.max(-1, Math.min(1, fwd.y))); this.tilt.roll = Math.asin(Math.max(-1, Math.min(1, right.y)));
     const cl = ROVER.comLocal;
-    this._stability(q, new THREE.Vector3(cl.x, cl.y, cl.z).applyQuaternion(q).add(pos));
+    this._stability(q, new THREE.Vector3(cl.x, cl.y, cl.z).applyQuaternion(q).add(pos), h);
     // drive power: rolling resistance + grade, through the motor efficiency (regen at 60 % downhill)
     const Fdrive = mTot * MOON.g * (0.09 * Math.sqrt(Math.max(0, 1 - fwd.y * fwd.y)) + fwd.y);
     const P = Fdrive * v;
@@ -849,7 +908,9 @@ export class Rover {
     this.body.setRotation(yawQuat(yaw), true);
     this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
     this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
-    for (const b of this.bogies) { b.L = ROVER.bogie.Lnom; b.Ldot = 0; b.hpVelPrev = null; for (const w of b.wheels) { w.omega = 0; w.integ = 0; w.groundY = null; w.anchor = null; } }
+    for (const b of this.bogies) { b.L = ROVER.bogie.Lnom; b.Ldot = 0; b.hpVelPrev = null; for (const w of b.wheels) { w.omega = 0; w.integ = 0; w.groundY = null; w.anchor = null; w.deltaPrev = null; w.sink = 0; } }
+    this._cmdF = { vx: 0, wz: 0 }; // a teleport while moving kept the rate-limited command and drove on from the new spot
+    this.tilt.marginF = null;
     this._prevPos = null;
     this._spawnT = this.sim.time;
   }

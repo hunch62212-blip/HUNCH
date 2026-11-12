@@ -21,30 +21,30 @@
   // (estimate: true) for printed / machined parts. pos = centre of mass in the rover frame (x fwd, y up from
   // ground, z port), m. Six identical items on symmetric corners sit at their common centroid.
   var PARTS = [
-    { id: 'chassis', name: 'Belly tub + deck (6061 extrusion rails, PETG panels)', count: 1, spare: 0, massKg: 1.45, heatW: 0, size: [0.58, 0.14, 0.52], pos: [0.0, 0.160, 0], estimate: true, onVehicle: true },
-    { id: 'wheel', name: '130 x 75 mm sand tyre (woven steel hoop, 20 chevron cleats, flotation flares, PETG hub)', count: 6, spare: 1, massKg: 0.125, heatW: 0, size: [0.13, 0.075, 0.13], pos: [0, 0.065, 0], estimate: true, onVehicle: true },
-    // v6 rocker-bogie (js/rocker_bogie.js): link masses are estimates for printed PETG, geometry is a placeholder
-    { id: 'rocker', name: 'Rocker link, printed PETG, bent (front wheel + bogie pivot)', count: 2, spare: 1, massKg: 0.085, heatW: 0, size: [0.33, 0.018, 0.012], pos: [0.03, 0.150, 0], estimate: true, onVehicle: true },
-    { id: 'bogie', name: 'Bogie link, printed PETG (middle + rear wheel)', count: 2, spare: 1, massKg: 0.045, heatW: 0, size: [0.255, 0.018, 0.012], pos: [-0.12, 0.105, 0], estimate: true, onVehicle: true },
-    { id: 'pivot', name: 'Pivot pins, flanged bearings and axle stubs (2 rocker, 2 bogie, 6 axles)', count: 1, spare: 0, massKg: 0.12, heatW: 0, size: [0.05, 0.05, 0.40], pos: [-0.03, 0.120, 0], estimate: true, onVehicle: true },
+    { id: 'chassis', name: 'Belly tub + deck (7075-T6 / 6061-T6 Al extrusion & PEEK-CF30 panels, cryo-rated)', count: 1, spare: 0, massKg: 1.55, heatW: 0, size: [0.58, 0.14, 0.52], pos: [0.0, 0.160, 0], estimate: true, onVehicle: true },
+    { id: 'wheel', name: '130 x 75 mm lunar wheel (NiTi superelastic mesh hoop, 20 Ti-6Al-4V grousers, 7075-T6 hub)', count: 6, spare: 1, massKg: 0.135, heatW: 0, size: [0.13, 0.075, 0.13], pos: [0, 0.065, 0], estimate: true, onVehicle: true },
+    // v6 rocker-bogie (js/rocker_bogie.js): machined 7075-T6 / Ti-6Al-4V lunar links
+    { id: 'rocker', name: 'Rocker link, machined 7075-T6 Al, bent (front wheel + bogie pivot)', count: 2, spare: 1, massKg: 0.115, heatW: 0, size: [0.33, 0.018, 0.012], pos: [0.03, 0.150, 0], estimate: true, onVehicle: true },
+    { id: 'bogie', name: 'Bogie link, machined 7075-T6 Al (middle + rear wheel)', count: 2, spare: 1, massKg: 0.062, heatW: 0, size: [0.255, 0.018, 0.012], pos: [-0.12, 0.105, 0], estimate: true, onVehicle: true },
+    { id: 'pivot', name: 'Pivot pins, Ti-6Al-4V shafts, MoS2 dry-lubed bearings and axle stubs', count: 1, spare: 0, massKg: 0.12, heatW: 0, size: [0.05, 0.05, 0.40], pos: [-0.03, 0.120, 0], estimate: true, onVehicle: true },
     { id: 'diff', name: 'Bevel-gear differential + transverse pivot shaft (body pitch = mean of the rockers)', count: 1, spare: 0, massKg: 0.16, heatW: 0, size: [0.03, 0.03, 0.36], pos: [0, 0.194, 0], estimate: true, onVehicle: true },
-    { id: 'motor', name: '12V 300 RPM high-torque gearmotor, one per wheel (datasheet TBC)', count: 6, spare: 0, massKg: 0.200, heatW: 0, size: [0.074, 0.037, 0.037], pos: [0, 0.065, 0], onVehicle: true },
-    { id: 'battery', name: '12.8V 10Ah LiFePO4 pack (hot-swap; 1.6 kg per Power Sonic PSL-SC-12110, 155 x 100 x 100 per Green Cell CUBE listing: confirm part)', count: 1, spare: 1, massKg: 1.60, heatW: 0.45, size: [0.155, 0.100, 0.100], pos: [-0.056, 0.130, 0.000], onVehicle: true, wh: 128, dimsMm: [155, 100, 100] },
+    { id: 'motor', name: 'Hermetically sealed brushless hub actuator x6 (resolver + harmonic drive, space-rated)', count: 6, spare: 0, massKg: 0.210, heatW: 0, size: [0.074, 0.037, 0.037], pos: [0, 0.065, 0], onVehicle: true },
+    { id: 'battery', name: '12.8V 10Ah MLI-insulated pack w/ kapton film heaters + belly blind-mate bus', count: 1, spare: 1, massKg: 1.65, heatW: 0.45, size: [0.155, 0.100, 0.100], pos: [-0.056, 0.130, 0.000], onVehicle: true, wh: 128, dimsMm: [155, 100, 100] },
     { id: 'imu', name: 'IMU tip sensor (BNO085)', count: 1, spare: 0, massKg: 0.003, heatW: 0.05, size: [0.025, 0.004, 0.020], pos: [0.0, 0.17, 0.0], onVehicle: true },
-    { id: 'pi5', name: 'Raspberry Pi 5 (4 GB) + active cooler', count: 1, spare: 0, massKg: 0.060, heatW: 7.0, size: [0.085, 0.020, 0.056], piBoardSize: [0.085, 0.006, 0.056], pos: [0.165, 0.155, 0.07], onVehicle: true, dimsMm: [85, 56, 20] },
+    { id: 'pi5', name: 'Raspberry Pi 5 (4 GB) + Cu heat-pipe cold plate (vacuum conductive strap to OSR)', count: 1, spare: 0, massKg: 0.075, heatW: 7.0, size: [0.085, 0.020, 0.056], piBoardSize: [0.085, 0.006, 0.056], pos: [0.165, 0.155, 0.07], onVehicle: true, dimsMm: [85, 56, 20] },
     { id: 'uno', name: 'Arduino Mega 2560 (6 drive + 4 clamp channels, encoders)', count: 1, spare: 0, massKg: 0.037, heatW: 0.5, size: [0.101, 0.015, 0.053], pos: [0.165, 0.155, -0.07], onVehicle: true },
     { id: 'buck', name: 'YRDZXG 12V to 5V 5A buck', count: 1, spare: 0, massKg: 0.055, heatW: 1.5, size: [0.066, 0.018, 0.036], pos: [0.11, 0.15, 0.105], onVehicle: true },
-    { id: 'driver', name: 'Cytron MDD10A dual 10 A driver', count: 3, spare: 0, massKg: 0.050, heatW: 3.0, size: [0.095, 0.022, 0.065], pos: [0.205, 0.095, 0.0], onVehicle: true },
-    { id: 'fan', name: '30 mm 3007 fan', count: 2, spare: 2, massKg: 0.008, heatW: 0.15, size: [0.030, 0.030, 0.007], pos: [0.10, 0.13, 0], onVehicle: true },
-    { id: 'camera', name: 'Arducam OV5647 (stereo pair on the pod nose)', count: 2, spare: 0, massKg: 0.004, heatW: 0.25, size: [0.025, 0.024, 0.017], pos: [0.270, 0.275, 0], onVehicle: true },
-    { id: 'lidar', name: 'YDLIDAR X2L (Φ60.5 x 50 mm), one on each of two opposite deck corners (v13: fixed, under the module; replaces the v12 mast)', count: 2, spare: 0, massKg: 0.19, heatW: 2.0, size: [0.0605, 0.050, 0.0605], pos: [0, 0.262, 0], onVehicle: true },   // front port + rear starboard: the pair is centred on the rover
-    { id: 'ring', name: 'Ring clamp (fixed 120 deg saddle on three posts, two 60 deg jaws on a circular track, worm gearmotors, rubber pads, rollers) for the 0.488 m module', count: 2, spare: 0, massKg: 0.40, heatW: 0, size: [0.05, 0.42, 0.56], pos: [0, 0.31, 0], estimate: true, onVehicle: true },
-    { id: 'lift', name: 'Pickup valve block (high-flow kneel / rise valve, six per-strut levelling valves); the air struts do the lifting', count: 1, spare: 0, massKg: 0.06, heatW: 0, size: [0.06, 0.03, 0.04], pos: [-0.05, 0.15, 0], estimate: true, onVehicle: true },
+    { id: 'driver', name: 'Space-derated 3-phase FET bridge driver', count: 3, spare: 0, massKg: 0.055, heatW: 3.0, size: [0.095, 0.022, 0.065], pos: [0.205, 0.095, 0.0], onVehicle: true },
+    { id: 'fan', name: 'Zenith Z-93 OSR radiator panel + bimetal louver vane + Cu heat pipe (vacuum-rated, 0 W fan)', count: 1, spare: 0, massKg: 0.045, heatW: 0.0, size: [0.155, 0.012, 0.180], pos: [0.18, 0.285, 0], onVehicle: true },
+    { id: 'camera', name: 'Arducam OV5647 (stereo pair on the pod nose, Au/SiO2 shield + ITO heater)', count: 2, spare: 0, massKg: 0.006, heatW: 0.25, size: [0.025, 0.024, 0.017], pos: [0.270, 0.275, 0], onVehicle: true },
+    { id: 'lidar', name: 'YDLIDAR X2L (Phi60.5 x 50 mm), front deck corners, dry-lubed & ITO-heated sapphire window', count: 2, spare: 0, massKg: 0.19, heatW: 2.0, size: [0.0605, 0.050, 0.0605], pos: [0, 0.262, 0], onVehicle: true },   // front port + front starboard
+    { id: 'ring', name: 'Ring clamp (120 deg Al-7075 saddle, dual 60 deg jaws, +/-3.4 mm delta-CTE slide, Vespel SP-21 flexure pads)', count: 2, spare: 0, massKg: 0.44, heatW: 0, size: [0.05, 0.42, 0.56], pos: [0, 0.31, 0], estimate: true, onVehicle: true },
+    { id: 'lift', name: 'Roller-screw jacking suspension actuator block + welded 321SS bellows (vacuum-rated, no air bag)', count: 1, spare: 0, massKg: 0.09, heatW: 0, size: [0.06, 0.03, 0.04], pos: [-0.05, 0.15, 0], estimate: true, onVehicle: true },
     { id: 'clampdrv', name: 'Cytron MD13S motor driver (jaws, 4 channels)', count: 2, spare: 0, massKg: 0.03, heatW: 0.4, size: [0.062, 0.015, 0.045], pos: [0.11, 0.15, -0.105], estimate: true, onVehicle: true },
-    { id: 'avionics', name: 'Avionics pod + dock charge pad', count: 1, spare: 0, massKg: 0.14, heatW: 0, size: [0.155, 0.060, 0.20], pos: [0.19, 0.26, 0], estimate: true, onVehicle: true },
-    { id: 'harness', name: 'Fasteners and wire', count: 1, spare: 0, massKg: 0.20, heatW: 0, size: [0.10, 0.02, 0.05], pos: [0.05, 0.15, 0], estimate: true, onVehicle: true },
+    { id: 'avionics', name: 'Avionics warm vault (MLI + OSR lid; belly shuttered dock charge receptacle at x 0, y 0.058)', count: 1, spare: 0, massKg: 0.16, heatW: 0, size: [0.155, 0.060, 0.20], pos: [0.19, 0.26, 0], estimate: true, onVehicle: true },
+    { id: 'harness', name: 'Kapton/FEP harness, Ti-6Al-4V fasteners & carbon-bronze ESD grounding sweepers', count: 1, spare: 0, massKg: 0.21, heatW: 0, size: [0.10, 0.02, 0.05], pos: [0.05, 0.15, 0], estimate: true, onVehicle: true },
     { id: 'solar', name: 'HQST 100W 12V panel', count: 1, spare: 0, massKg: 6.5, heatW: 0, size: [0.808, 0.030, 0.698], pos: null, onVehicle: false, powerW: 100 },
-    { id: 'petg_spool', name: 'Polymaker PETG spool', count: 1, spare: 0, massKg: 1.0, heatW: 0, size: [0.20, 0.07, 0.20], pos: null, onVehicle: false, estimate: true }
+    { id: 'kapton_peek_kit', name: 'PEEK-CF30 / Kapton MLI repair kit (flight cryo-safe)', count: 1, spare: 0, massKg: 0.8, heatW: 0, size: [0.20, 0.07, 0.20], pos: null, onVehicle: false, estimate: true }
   ];
 
   var BAY_HEAT_IDS = { pi5: 1, uno: 1, buck: 1, driver: 1, fan: 1 };
@@ -350,7 +350,7 @@
     var wUno = (uno && uno.heatW) ? uno.heatW + 0.05 : 0.45;
     var wCam = state.visionActive || state.armMoving ? mode.camActiveW : mode.camSleepW;
     var wLidar = (moving || state.navActive ? mode.lidarMovingW : mode.lidarIdleW) * byId('lidar').count;   // per scanner, two fitted
-    var wFans = (fan ? fan.heatW * fan.count : 0.6) * Math.max(0.15, fanFrac);
+    var wFans = 0.0; // vacuum conductive heat-pipe + passive bimetal OSR louver (replaces 3007 fans)
     var wBuck = 0.85 + wPi * 0.13;
     var wBms = (bat && bat.heatW) ? bat.heatW + 0.15 : 0.45;
     var avionicsW = wPi + wUno + wCam + wLidar + wFans + wBuck + wBms;
@@ -466,48 +466,49 @@
   // =========================================================================
   // HIGH-SENSITIVITY AGGRESSIVE THERMAL PHYSICS ENGINE
   // =========================================================================
-  var air = { ambientC: 22.0, rho: 1.2, cp: 1007, cfmEach: 1.35, intakeCount: 2 };
+  // Radiative + conductive vacuum thermal model (lunar sink 95 K night / 245 K polar sun, epsilon = 0.88 OSR)
+  var air = { ambientC: -28.0, sinkK: 180.0, epsilon: 0.88, radiatorAreaM2: 0.048, rho: 0, cp: 0, cfmEach: 0, intakeCount: 0 };
 
   var thermal = {
-    ambientC: 22.0,
-    fanRpm: 4500,
+    ambientC: -28.0,
+    fanRpm: 0,
     fanNominalRpm: 4500,
-    fanSpinRad: 24,
-    intakeC: 22.0,
-    exhaustC: 25.4,
-    flowLs: 2.15,
+    fanSpinRad: 0,
+    intakeC: -28.0,
+    exhaustC: 24.0,
+    flowLs: 0.0,
     heatW: 9.8,
 
     // Core Component Temperatures in °C
-    // BCM2711 SoC die idle baseline in 22°C ambient with active fan is ~50-53°C (die junction resistance floor)
-    piChipC: 52.5,     // Raspberry Pi 4 4GB BCM2711 SoC
-    chamberC: 24.5,    // Internal avionics chamber air
-    driverC: 28.0,     // Cytron MDD10A dual H-bridge driver
-    buckC: 26.5,       // 12V -> 5V 5A buck regulator
-    batteryC: 23.5,    // LiFePO4 12V 5Ah pack (aft tray, outside avionics duct)
+    piChipC: 48.0,     // Raspberry Pi SoC on Cu/heat-pipe cold plate
+    chamberC: 18.0,    // MLI-insulated avionics warm box
+    driverC: 25.0,     // 3-phase motor bridge on cold plate
+    buckC: 23.0,       // 12V -> 5V buck regulator
+    batteryC: 16.0,    // LiFePO4 pack (MLI + Kapton heater, belly bay)
 
-    // 6 Wheel Motors (Greartisan 12V 100 RPM)
+    // 6 Sealed Hub Actuators
     motorNames: ['FL', 'FR', 'ML', 'MR', 'BL', 'BR'],
-    motorsC: [24.0, 24.0, 24.0, 24.0, 24.0, 24.0],
-    hottestMotor: { index: 0, name: 'FL', tempC: 24.0 },
+    motorsC: [18.0, 18.0, 18.0, 18.0, 18.0, 18.0],
+    hottestMotor: { index: 0, name: 'FL', tempC: 18.0 },
 
     status: 'NOMINAL', // NOMINAL, WARM, HOT, THROTTLING
     throttling: false,
     throttleFactor: 1.0,
-    note: 'Authentic silicon junction thermal physics · Pi idle ~50-53°C · Throttle at 80°C.'
+    note: 'Lunar vacuum heat-pipe + zenith Z-93 OSR radiator physics (no airflow in vacuum).'
   };
 
   var airState = {
-    intakeC: 22.0,
-    exhaustC: 25.4,
-    flowLs: 2.15,
+    intakeC: -28.0,
+    exhaustC: 24.0,
+    flowLs: 0.0,
     heatW: 9.8,
-    riseC: 3.4,
-    spinRad: 24,
-    note: 'Earth air ducting · 4x 3007 fans.'
+    riseC: 0.0,
+    spinRad: 0,
+    note: 'Vacuum conductive strap + zenith OSR louvers (0 airflow).'
   };
 
   function setFanRPM(rpm) {
+    // Compatibility shim: maps louver/radiator command (0 in vacuum) cleanly
     rpm = Math.max(0, Math.min(8000, Number(rpm) || 0));
     thermal.fanRpm = rpm;
     return rpm;
@@ -524,16 +525,12 @@
     var visionActive = !!vehicleState.visionActive;
     var armMoving = !!vehicleState.armMoving;
 
-    // Fan airflow scaling proportional to RPM
-    var rpmFrac = thermal.fanRpm / thermal.fanNominalRpm; // 1.0 at 4500 RPM, 0.0 at 0 RPM, 1.78 at 8000 RPM
-    var cfmEach = 1.35 * rpmFrac;
-    var qM3s = air.intakeCount * cfmEach * 0.000471947;
-    thermal.flowLs = qM3s * 1000;
-    // Visual rotor spin speed for 3D fan meshes
-    thermal.fanSpinRad = (thermal.fanRpm / 60) * Math.PI * 0.45;
+    // Lunar vacuum: zero convective airflow; rejection is via Stefan-Boltzmann zenith OSR radiation + frame conduction
+    var rpmFrac = thermal.fanRpm > 0 ? Math.min(1.5, thermal.fanRpm / thermal.fanNominalRpm) : 1.0;
+    thermal.flowLs = 0.0;
+    thermal.fanSpinRad = 0;
 
     // 1. Internal Avionics Chamber Heat Generation
-    // Pi 4 4GB BCM2711 SoC: 4.8W base idle, +3.2W neural ONNX inference, +1.8W CV grabber cam, +1.6W motor control/PWM
     var qPi = 4.8 + (neuralOn ? 3.2 : 0.5) + (visionActive ? 1.8 : 0.3) + throttle * 1.6;
     var qDriver = 1.0 + 5.5 * Math.pow(throttle, 1.8) + (slip ? 4.5 : 0);
     var qBuck = 1.2 + qPi * 0.15;
@@ -541,48 +538,42 @@
     var totalBayHeat = qPi + qDriver + qBuck + (armMoving ? 2.5 : 0);
     thermal.heatW = totalBayHeat;
 
-    // 4x 3007 chassis fans forced air convection
-    var cAir = (qM3s * 2) * air.rho * air.cp; // 4 fans total (2 intakes + 2 exhaust blowers)
-    var kChassis = 0.40; // Chassis wall conductive loss
-    var tChamberTarget = thermal.ambientC + totalBayHeat / (cAir + kChassis + 0.12);
-    // Chamber air dynamic step (tau ~ 4.5s)
-    thermal.chamberC += (tChamberTarget - thermal.chamberC) * (1 - Math.exp(-dt / 4.5));
-    thermal.chamberC = Math.max(thermal.ambientC, thermal.chamberC);
+    // Stefan-Boltzmann radiation + chassis conduction (G_rad linearized around ~300 K + bimodal louver opening 0.15..1.0)
+    var louverFrac = thermal.chamberC < 5 ? 0.15 : (thermal.chamberC > 25 ? 1.0 : 0.15 + 0.85 * (thermal.chamberC - 5) / 20);
+    var SIGMA = 5.67037e-8, TchamK = thermal.chamberC + 273.15, TsinkK = air.sinkK;
+    var gRad = Math.max(0.12, 4 * SIGMA * air.epsilon * air.radiatorAreaM2 * louverFrac * Math.pow((TchamK + TsinkK) * 0.5, 3));
+    var kChassis = 0.38;
+    var tSinkC = TsinkK - 273.15;
+    var tChamberTarget = Math.max(0, tSinkC + totalBayHeat / (gRad + kChassis));
+    thermal.chamberC += (tChamberTarget - thermal.chamberC) * (1 - Math.exp(-dt / 8.0));
 
-    // Exhaust temperature calculation
-    var deltaExhaust = qM3s > 0.0001 ? (totalBayHeat * 0.75 / (qM3s * 2 * air.rho * air.cp)) : (thermal.chamberC - thermal.ambientC);
-    thermal.exhaustC = thermal.ambientC + Math.max(0, deltaExhaust);
+    // Radiator cold-plate surface estimate (no air exhaust)
+    thermal.exhaustC = thermal.chamberC - Math.min(6, totalBayHeat * 0.25);
 
-    // 2. Raspberry Pi 4 4GB BCM2711 SoC Die Junction Temperature
-    // Die junction + TIM thermal resistance: theta_die = 2.6 °C/W (physical packaging floor!)
+    // 2. SoC Junction Temperature via Cu Heat Pipe to Cold Plate
     var thetaDie = 2.6;
-    // Heatsink convective resistance: drops with fan RPM
-    var thetaHs = 1.2 + 4.2 / (0.7 + 2.6 * Math.pow(rpmFrac, 0.85));
-    var thetaTotalPi = thetaDie + thetaHs;
-    var tPiTarget = thermal.chamberC + qPi * thetaTotalPi;
-    // Fast silicon junction response (tau ~ 2.2s)
+    var thetaHeatPipe = 1.4 + 0.8 / Math.max(0.5, rpmFrac);
+    var tPiTarget = thermal.chamberC + qPi * (thetaDie + thetaHeatPipe);
     thermal.piChipC += (tPiTarget - thermal.piChipC) * (1 - Math.exp(-dt / 2.2));
-    // Physical floor: Pi 4 running Linux never drops below ~46.5°C in a 22°C room even at max fan
-    thermal.piChipC = Math.max(thermal.chamberC + 22.0, thermal.piChipC);
+    thermal.piChipC = Math.max(thermal.chamberC + 16.0, thermal.piChipC);
 
-    // 3. Cytron MDD10A Motor Driver
-    var thetaDriver = 0.8 + 2.2 / (0.5 + 1.8 * Math.pow(rpmFrac, 0.85));
+    // 3. Space-rated 3-Phase Motor Driver
+    var thetaDriver = 1.1 + 1.0 / Math.max(0.5, rpmFrac);
     var tDriverTarget = thermal.chamberC + qDriver * thetaDriver;
     thermal.driverC += (tDriverTarget - thermal.driverC) * (1 - Math.exp(-dt / 2.5));
-    thermal.driverC = Math.max(thermal.ambientC, thermal.driverC);
+    thermal.driverC = Math.max(thermal.chamberC, thermal.driverC);
 
-    // 4. 6 Wheel Motors (Greartisan 12V 100RPM DC Gearmotors)
+    // 4. 6 Wheel Motors (conduction through Ti-6Al-4V spokes + radiation to regolith sink, no vacuum air cooling)
     var maxMotTemp = -999;
     var maxMotIdx = 0;
     for (var mi = 0; mi < 6; mi++) {
-      var isCorner = (mi === 0 || mi === 1 || mi === 4 || mi === 5); // FL, FR, BL, BR
+      var isCorner = (mi === 0 || mi === 1 || mi === 4 || mi === 5);
       var isFront = (mi === 0 || mi === 1);
       var loadFactor = throttle * (isFront ? 1.15 : 1.0) + (isCorner ? steer * 0.75 : 0) + (slip ? 1.2 : 0);
       var qMotor = 0.5 + 11.0 * Math.pow(loadFactor, 1.8);
-      var hMotor = 0.36 + 0.14 * (vel * 0.8);
-      var tMotorTarget = thermal.ambientC + qMotor / hMotor;
-      thermal.motorsC[mi] += (tMotorTarget - thermal.motorsC[mi]) * (1 - Math.exp(-dt / 2.8));
-      thermal.motorsC[mi] = Math.max(thermal.ambientC, thermal.motorsC[mi]);
+      var gMotorCond = 0.34 + 0.06 * Math.min(2, vel); // conductive wheel/strut sinking into regolith
+      var tMotorTarget = Math.max(thermal.ambientC, tSinkC + qMotor / gMotorCond);
+      thermal.motorsC[mi] += (tMotorTarget - thermal.motorsC[mi]) * (1 - Math.exp(-dt / 4.0));
       if (thermal.motorsC[mi] > maxMotTemp) {
         maxMotTemp = thermal.motorsC[mi];
         maxMotIdx = mi;

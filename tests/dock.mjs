@@ -5,7 +5,7 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';
 import { Sim } from '../src/sim/sim.js';
 import { ROVER } from '../src/sim/config.js';
-import { check, equal, atMost } from './lib/check.mjs';
+import { check, equal, atMost, within } from './lib/check.mjs';
 await RAPIER.init();
 const sim = new Sim(RAPIER);
 const A = sim.autonomy, R = sim.rover, c = sim.cargo[Number(process.argv[2] || 0)];
@@ -39,6 +39,7 @@ sim.streamRocks([{ x: tx, z: tz }]);
 // height reference off by the bounce (~0.35 m), and every later scan maps the ground that far off
 for (let i = 0; i < 1800; i++) { sim.stepOnce(); const v = R.body.linvel(), w = R.body.angvel(); if (i >= 240 && Math.abs(v.y) < 0.01 && Math.hypot(v.x, v.z) < 0.02 && Math.hypot(w.x, w.z) < 0.003) break; }
 sim.slam.clear(); sim.slam.relocalize(R.pose());
+let hatchT = null; sim.on('hatch', () => { hatchT = sim.time; });
 A.start('M5 test', A.missionDeliver(c.dest));
 let last = 0;
 while (A.gen && sim.time < 2400) { sim.stepOnce(); if (sim.time - last > 15) { last = sim.time; console.log(`   ${A.phase} | ${A.detail.slice(0, 110)}`); } }
@@ -51,9 +52,11 @@ const acc = A.metrics.accuracy[A.metrics.accuracy.length - 1];
 if (acc) {
   atMost('soft capture lateral error', Math.abs(acc.lateralMm), 5, ' mm', 1);
   atMost('soft capture vertical error', Math.abs(acc.verticalMm), 5, ' mm', 1);
-  // < 3 kN is the cyl40 target; the box20 sled strikes the port rim-first (0.8 deg yaw at hand-over) and its peak is reported only
-  if (Number(process.argv[2] || 0) === 0) atMost('peak port contact force (CHANGES.md §17)', acc.peakN, 3000, ' N', 0);
-  else console.log(`peak port contact force (box20, not gated): ${acc.peakN.toFixed(0)} N`);
+  // < 3 kN (CHANGES.md §17) for every cargo type: the module pushes on the port's bellows coupling (DOCK.bellows), not a rigid wall
+  atMost('peak port contact force (CHANGES.md §17)', acc.peakN, 3000, ' N', 0);
   check('soft capture on attempt 1', acc.attempts === 1, `attempt ${acc.attempts}`);
   atMost('soft capture yaw error', Math.abs(acc.yawDeg), 1, ' deg', 2);
 } else check('soft capture accuracy recorded', false, 'no accuracy record');
+// pressure boundary before hatch (LLASO-P2 constraint): the hatch opens only after the leak check has passed and the vestibule is at cabin pressure
+check('hatch opened only after the leak check passed', hatchT != null && A.lastBerth && A.lastBerth.leakPassT != null && A.lastBerth.leakPassT < hatchT, `leak PASS at ${A.lastBerth?.leakPassT?.toFixed(0)} s, hatch at ${hatchT?.toFixed(0)} s`);
+within('vestibule pressure when the hatch opened', A.lastBerth ? A.lastBerth.pressure : NaN, 69, 72, ' kPa', 1);

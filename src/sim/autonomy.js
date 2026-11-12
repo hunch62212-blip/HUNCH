@@ -28,13 +28,14 @@ export class Autonomy {
     this.goal = null;
     this.speedSetting = 99;    // autonomy cruise ceiling (m/s); 99 = automatic (smart-rpm tier decides)
     this.paused = false;
-    this.faults = { comms: false, port: {} };
+    this.faults = { comms: false, port: {}, seal: false };
     this.reserveSoc = 0.2;
+    this.frozenS = 0;
     this.metrics = this._newMetrics();
     this.history = [];
     this.cargoEst = new Map();     // cargo id -> {x,z,y,yaw,t,src}
     this.portEst = new Map();
-    this.manifest = sim.cargo.map((c, i) => ({ id: c.id, cargo: c, port: c.dest, category: i === 0 ? 'life-support' : 'habitat-supplies', priority: i === 0 ? 5 : 3, status: 'waiting' }));
+    this.manifest = sim.cargo.map((c, i) => ({ id: c.id, cargo: c, port: c.dest, category: c.category || (i === 0 ? 'life-support' : 'habitat-supplies'), priority: i === 0 ? 5 : 3, status: 'waiting' }));
     this.docking = null;
     this.lastTick = 0;
   }
@@ -63,9 +64,9 @@ export class Autonomy {
   }
   site(x, z) {
     const P = WORLD.pad, H = WORLD.habitat, S = this.sim.terrain.pad.staging;
+    if (Math.hypot(x - S.x, z - S.z) < 60) return 'STAGING';
     if (Math.hypot(x - P.x, z - P.z) < 160) return 'PAD';
     if (Math.hypot(x - H.x, z - H.z) < 160) return 'HAB';
-    if (Math.hypot(x - S.x, z - S.z) < 60) return 'STAGING';
     return `WP(${Math.round(x)},${Math.round(z)})`;
   }
   // convert a camera detection (true-frame measurement) into the rover's estimated map frame
@@ -119,11 +120,15 @@ export class Autonomy {
     // one accumulator per fiducial: a mean over different tags mixes their survey / mounting errors
     const FX = this._fixes || (this._fixes = new Map());
     let F = FX.get(d.id);
-    if (!F || now - F.tLast > 3) { F = { tLast: now, sx: 0, sz: 0, w: 0, n: 0, sy: 0, syy: 0, ny: 0 }; FX.set(d.id, F); }
-    F.sx += (d.known.x - m.x) * w; F.sz += (d.known.z - m.z) * w; F.w += w; F.n++; F.tLast = now;
+    if (!F || now - F.tLast > 3) { F = { tLast: now, sx: 0, sz: 0, sdy: 0, wy: 0, nyY: 0, w: 0, n: 0, sy: 0, syy: 0, ny: 0 }; FX.set(d.id, F); }
+    F.sx += (d.known.x - m.x) * w; F.sz += (d.known.z - m.z) * w;
+    // Vertical camera error grows sharply at long range (e.g. 88 m rays swing >2 m); restrict Y fixes to <= 45 m
+    if (d.known.y != null && d.range <= 45) { F.sdy += (d.known.y - m.y) * w; F.wy += w; F.nyY++; }
+    F.w += w; F.n++; F.tLast = now;
     // heading error from the tag's surveyed normal (CHANGES.md §17: the pose graph spreads it back along the drive)
     if (d.range < (d.size >= 1.0 ? 80 : 45) && d.known.nx != null) { const dy = wrap(Math.atan2(-d.known.nz, d.known.nx) - (this.dirToEst(d.normal) + d.yawNoise)); F.sy += dy; F.syy += dy * dy; F.ny++; }
     const dx = F.sx / F.w, dz = F.sz / F.w, off = Math.hypot(dx, dz);
+    const dyH = F.nyY >= 12 ? F.sdy / F.wy : 0, seY = F.nyY >= 12 ? 1 / Math.sqrt(F.wy) : 0;
     // accept only a well-averaged mean: >= 15 sightings of this tag and a standard error under
     // max(0.3 m, 3 % of the offset). A large drift is fixed coarsely first and later sightings refine it.
     // The offset must also be significant: more than 3 standard errors (and 0.5 m). The old test applied any mean over
@@ -132,8 +137,8 @@ export class Autonomy {
     // 0.5-1.6 m by camera noise every few seconds (tests/out/dock_cyl40.log). At 3 standard errors it is ~1 %.
     const se = 1 / Math.sqrt(F.w);
     if (F.n < 15 || se > Math.max(0.3, 0.03 * off)) return;
-    if (off < Math.max(0.5, 3 * se)) {
-      if (se <= 0.5 / 3) FX.delete(d.id);   // averaged as far as it is useful and still no significant offset: no drift, start over
+    if (off < Math.max(0.5, 3 * se) && Math.abs(dyH) < Math.max(0.35, 3 * seY)) {
+      if (se <= 0.5 / 3) { FX.delete(d.id); this.slam.lastFixCheck = { t: now, id: d.id, off }; } // verified negligible drift
       return;                               // otherwise keep averaging this tag
     }
     this._fixes = null;
@@ -143,17 +148,23 @@ export class Autonomy {
     const A = this.slam._fixAnchor || { d: 0 };
     const limit = 5 + 0.08 * (this.sensors.odom.dist - A.d);
     if (off > limit) { this.log(`Fiducial ${d.id}: offset ${off.toFixed(1)} m exceeds plausible drift (${limit.toFixed(1)} m), ignored`, 'info'); return; }
-    const r = this.applyFrameShift(dx, dz, dyaw);
-    this.log(`SLAM fiducial fix (${d.id}): position corrected by ${off.toFixed(1)} m${dyaw ? ` / heading ${(dyaw / DEG).toFixed(2)} deg` : ''}, ${r.cells} map cells re-placed (${r.nodes}-node graph, ${r.iters} sweeps)`, 'ok');
+    const dyFix = F.nyY >= 12 && Math.abs(dyH) > Math.max(0.26, 1.5 * seY) ? dyH : 0;
+    const r = this.applyFrameShift(dx, dz, dyaw, dyFix);
+    this.log(`SLAM fiducial fix (${d.id}): position corrected by ${off.toFixed(1)} m${dyFix ? ` / vert ${dyFix.toFixed(2)} m` : ''}${dyaw ? ` / heading ${(dyaw / DEG).toFixed(2)} deg` : ''}, ${r.cells} map cells re-placed (${r.nodes}-node graph, ${r.iters} sweeps)`, 'ok');
   }
 
   // Move the estimate, the map, routes and all plan state by one correction (pose graph: Slam.shiftFrame), then replan
-  applyFrameShift(dx, dz, dyaw = 0) {
-    const r = this.slam.shiftFrame(dx, dz, dyaw);
+  applyFrameShift(dx, dz, dyaw = 0, dy = 0) {
+    const anchorT = this.slam._fixAnchor?.t ?? -1;
+    const r = this.slam.shiftFrame(dx, dz, dyaw, dy);
+    this.slam.est.yaw = wrap(this.slam.est.yaw);
+    if (this._stuckPosRef) r.apply(this._stuckPosRef);
     // plan state lives in the same frame: move it with the correction at the current pose and replan
-    for (const p of this.path || []) r.apply(p);
+    // (remembered-route waypoints from at/before anchorT live in unshifted map tiles and must stay aligned with them)
+    for (const p of this.path || []) if (!(p.t <= anchorT)) r.apply(p);
     for (const b of this.planner.blocked) if (!b.fault) r.apply(b);
     for (const p of this.portEst.values()) { r.apply(p); p.nYaw = wrap(p.nYaw + r.dyawEnd); }
+    for (const g of this.cargoEst.values()) if (g.src && g.src !== 'manifest') { r.apply(g); g.yaw = wrap(g.yaw + r.dyawEnd); }
     this._replanNow = true;
     return r;
   }
@@ -165,30 +176,37 @@ export class Autonomy {
     if (!M.on || !this.dem || dist - M.dLast < 40) return;
     M.dLast = dist;
     if (this.slam.lcSuspended || /Final approach|Dock |pre-dock|Pick|Clamp|Lift/.test(this.phase)) return;
-    if (this.sim.time - (this.slam.lastFix?.t ?? -1e9) < 30) return;   // a fiducial fix just did this job
+    const epochT = Math.max(this.slam.lastFix?.t ?? -1e9, this.slam.lastLoop?.t ?? -1e9);
+    if (this.sim.time - epochT < 30) return;   // a fiducial fix or loop closure just aligned the frame
     const e = this.est();
+    // Skip patches dominated by already-anchored cells (t0 <= _fixAnchor.t): shiftFrame leaves those tiles
+    // and remembered routes unmoved, so shifting est to DEM against them breaks local map/route consistency.
+    if (this.slam.anchoredFraction(e.x, e.z, 45) > 0.35) { M.buf = []; return; }
     const m = matchToDEM(this.slam, this.dem, e.x, e.z);
     M.last = { t: this.sim.time, ...m };
     if (!m.ok) return;
     // One match is good to ~1.2-1.5 m (DEM noise and 4 m posting), and drift grows ~0.2 m per 40 m, so single matches
     // are averaged like the fiducial sightings: the 3 most recent agreeing matches (spread < 1.8 m) since the last frame
     // shift and within 400 m, applied only when the mean is clearly non-zero (> 1.5 m and > 2.5 standard errors).
-    const fixT = this.slam.lastFix?.t ?? -1;
+    const fixT = Math.max(this.slam.lastFix?.t ?? -1, this.slam.lastLoop?.t ?? -1);
     M.buf = (M.buf || []).filter((q) => q.fixT === fixT && dist - q.d < 400);
-    M.buf.push({ dx: m.dx, dz: m.dz, d: dist, fixT });
+    M.buf.push({ dx: m.dx, dz: m.dz, dy: m.dy || 0, d: dist, fixT });
     // the 3 most recent only: drift keeps growing, and older matches describe an older, smaller error
     if (M.buf.length > 3) M.buf = M.buf.slice(-3);
     const B = M.buf, k = B.length;
     if (k < 3) return;
-    const mx = B.reduce((a, q) => a + q.dx, 0) / k, mz = B.reduce((a, q) => a + q.dz, 0) / k;
+    const mx = B.reduce((a, q) => a + q.dx, 0) / k, mz = B.reduce((a, q) => a + q.dz, 0) / k, my = B.reduce((a, q) => a + q.dy, 0) / k;
     const sd = Math.sqrt(B.reduce((a, q) => a + (q.dx - mx) ** 2 + (q.dz - mz) ** 2, 0) / (k - 1));
     const off = Math.hypot(mx, mz), se = sd / Math.sqrt(k);
-    if (sd > 1.8 || off < Math.max(1.5, 2.5 * se)) return;
+    const applyXZ = off >= Math.max(1.5, 2.5 * se);
+    const applyY = Math.abs(my) >= 0.4;
+    if (sd > 1.8 || (!applyXZ && !applyY)) return;
     const A = this.slam._fixAnchor || { d: 0 };
     if (off > 5 + 0.08 * (dist - A.d)) { M.buf = []; return; }
-    const r = this.applyFrameShift(mx, mz, 0);
+    const r = this.applyFrameShift(applyXZ ? mx : 0, applyXZ ? mz : 0, 0, applyY ? my : 0);
     M.fixes++; M.tLast = this.sim.time; M.buf = [];
-    this.log(`SLAM orbital-map fix: local terrain matched the orbital elevation map (${k} agreeing matches, spread ${sd.toFixed(1)} m): position corrected by ${off.toFixed(1)} m, ${r.cells} map cells re-placed`, 'ok');
+    const desc = [applyXZ ? `position corrected by ${off.toFixed(1)} m` : '', applyY ? `vert ${my.toFixed(2)} m` : ''].filter(Boolean).join(' / ');
+    this.log(`SLAM orbital-map fix: local terrain matched the orbital elevation map (${k} agreeing matches, spread ${sd.toFixed(1)} m): ${desc}, ${r.cells} map cells re-placed`, 'ok');
   }
 
   updateEstimates() {
@@ -199,7 +217,8 @@ export class Autonomy {
         const nYaw = this.dirToEst(d.normal) + d.yawNoise;
         let axisYaw, center;
         const ax = (y) => ({ x: Math.cos(y), z: -Math.sin(y) });
-        if (d.id.endsWith('/AFT')) { axisYaw = wrap(nYaw + Math.PI); const a = ax(axisYaw); center = { x: p.x + a.x * T.length / 2, z: p.z + a.z * T.length / 2 }; }
+        const aftLever = T.shape === 'cylinder' ? T.length / 2 : (T.adapterLen || T.length) / 2 - (T.adapterX || 0);
+        if (d.id.endsWith('/AFT')) { axisYaw = wrap(nYaw + Math.PI); const a = ax(axisYaw); center = { x: p.x + a.x * aftLever, z: p.z + a.z * aftLever }; }
         else if (d.id.endsWith('/FWD')) { axisYaw = nYaw; const a = ax(axisYaw); center = { x: p.x - a.x * T.length / 2, z: p.z - a.z * T.length / 2 }; }
         else {
           const half = T.shape === 'cylinder' ? T.radius : T.width / 2;
@@ -209,7 +228,7 @@ export class Autonomy {
         }
         // inverse-variance fusion (a static object: many sightings average the per-frame noise down)
         const sp = 0.004 + 0.0009 * d.range * d.range / d.size, sy = (0.2 + 0.05 * d.range) * DEG;
-        const lever = d.id.endsWith('/AFT') || d.id.endsWith('/FWD') ? T.length / 2 : 1.2;
+        const lever = d.id.endsWith('/AFT') ? aftLever : d.id.endsWith('/FWD') ? T.length / 2 : 1.2;
         const varP = sp * sp + (sy * lever) ** 2, varY = sy * sy;
         const prev = this.cargoEst.get(c.id);
         // innovation gate: a sighting far outside the combined uncertainty is not fused. If the sightings keep
@@ -226,7 +245,7 @@ export class Autonomy {
         }
         if (fresh) this.cargoEst.set(c.id, { ...center, yaw: axisYaw, t: this.sim.time, src: d.id, range: d.range, varP, varY, miss: 0 });
         else {
-          prev.varP = (prev.varP ?? 1) + 1e-5; prev.varY = (prev.varY ?? 1) + 1e-8; // process noise: est-frame drift
+          prev.varP = (prev.varP ?? 1) + 3e-4; prev.varY = (prev.varY ?? 1) + 5e-7; // process noise: est-frame drift
           const wp = prev.varP / (prev.varP + varP), wy = prev.varY / (prev.varY + varY);
           prev.x += (center.x - prev.x) * wp; prev.z += (center.z - prev.z) * wp;
           prev.yaw = wrap(prev.yaw + wrap(axisYaw - prev.yaw) * wy);
@@ -239,10 +258,27 @@ export class Autonomy {
         this.beaconFix(d);
         const p = this.toEst(d.pos);
         const nYaw = this.dirToEst(d.normal) + d.yawNoise;
+        const sp = 0.004 + 0.0009 * d.range * d.range / d.size, sy = (0.2 + 0.05 * d.range) * DEG;
+        const varP = sp * sp, varY = sy * sy;
         const prev = this.portEst.get(d.obj.id);
-        const est = { x: p.x, z: p.z, y: p.y + 1.5, nYaw, t: this.sim.time, range: d.range };
-        if (!prev) this.portEst.set(d.obj.id, est);
-        else { const w = 0.35; prev.x += (est.x - prev.x) * w; prev.z += (est.z - prev.z) * w; prev.y += (est.y - prev.y) * w; prev.nYaw = wrap(prev.nYaw + wrap(nYaw - prev.nYaw) * w); prev.t = est.t; prev.range = est.range; }
+        let fresh = !prev;
+        if (!fresh) {
+          const innov = Math.hypot(p.x - prev.x, p.z - prev.z), gate = 4 * Math.sqrt((prev.varP ?? 1) + varP) + 0.5;
+          if (innov > gate) {
+            prev.miss = (prev.miss || 0) + 1;
+            if (prev.miss < 10) continue;
+            fresh = true;
+          } else prev.miss = 0;
+        }
+        if (fresh) this.portEst.set(d.obj.id, { x: p.x, z: p.z, y: p.y + 1.5, nYaw, t: this.sim.time, range: d.range, varP, varY, miss: 0 });
+        else {
+          prev.varP = (prev.varP ?? 1) + 1e-5; prev.varY = (prev.varY ?? 1) + 1e-8;
+          const wp = prev.varP / (prev.varP + varP), wy = prev.varY / (prev.varY + varY);
+          prev.x += (p.x - prev.x) * wp; prev.z += (p.z - prev.z) * wp; prev.y += (p.y + 1.5 - prev.y) * wp;
+          prev.nYaw = wrap(prev.nYaw + wrap(nYaw - prev.nYaw) * wy);
+          prev.varP *= 1 - wp; prev.varY *= 1 - wy;
+          prev.t = this.sim.time; prev.range = d.range;
+        }
       }
     }
   }
@@ -280,12 +316,14 @@ export class Autonomy {
     this.updateEstimates();
     this.orbitalFix();
     const R = this.sim.rover;
-    if (R.estop || !R.powered) { if (this.gen && !this.paused) { this.paused = true; this.mode = 'MANUAL'; } return; }
-    if (this.mode !== 'AUTO' || !this.gen || this.paused) return;
+    // frozenS: seconds a running mission has spent not executing (paused, powered down, FDIR hold). navTo takes it off
+    // its watchdog clocks, so a hold or a survival-mode pause is not read as "no progress" when the mission picks up.
+    if (R.estop || !R.powered) { if (this.gen && !this.paused) { this.paused = true; this.mode = 'MANUAL'; } if (this.gen) this.frozenS += dt; return; }
+    if (this.mode !== 'AUTO' || !this.gen || this.paused) { if (this.gen) this.frozenS += dt; return; }
     // FDIR hold (health.js): computer switch-over, SEU reset, declutch, battery isolation, repair, array stow.
     // The executive is frozen (motor controllers see a zero command) and resumes where it was.
     if (this.holdUntil > this.sim.time) {
-      R.cmd.vx = R.cmd.vz = R.cmd.wz = 0;
+      R.cmd.vx = R.cmd.vz = R.cmd.wz = 0; this.frozenS += dt;
       if (this._holdLog !== this.holdWhy) { this._holdLog = this.holdWhy; this.detail = `FDIR hold: ${this.holdWhy}`; }
       return;
     }
@@ -370,7 +408,7 @@ export class Autonomy {
     const off = () => ({ x: 0, z: 0 });
     this.phase = 'Power dock: approach';
     let o = off();
-    let r = yield* this.navTo({ x: L.entry.x + o.x, z: L.entry.z + o.z, name: 'power dock entry', tol: 2.0, yaw: L.yaw, yawTol: 3 * DEG });
+    let r = yield* this.navTo({ x: L.entry.x + o.x, z: L.entry.z + o.z, name: 'power dock entry', tol: 2.0, yaw: L.yaw, yawTol: 3 * DEG, toCharger: true });
     if (r && r.ok === false) return r;
     this.phase = 'Power dock: line up';
     yield* this.alignYaw(Math.atan2(-((L.pad.z + o.z) - this.est().z), (L.pad.x + o.x) - this.est().x), 1.5 * DEG);
@@ -438,8 +476,9 @@ export class Autonomy {
       this.detail = `pivot turn: heading error ${(err / DEG).toFixed(1)} deg`;
       // stall: steering is set but the gyro sees no rotation -> something is blocking the sweep
       const steerDone = R.bogies.every((b) => Math.abs(b.steerTarget - b.steer) < 0.02);
-      if (steerDone && Math.abs(w) > 0.02 && Math.abs(this.sensors.imu.yawRate) < 0.002) noRate += this.dt; else noRate = 0;
-      if (noRate > 6) { this.log('PIVOT STALL: commanded yaw rate but gyro reads ~0 (sweep blocked)', 'err'); ok = false; break; }
+      const rate = Math.abs(this.sensors.imu.yawRate);
+      if (steerDone && Math.abs(w) > 0.02 && rate < 0.004) noRate += this.dt; else noRate = 0;
+      if (noRate > 6) { this.log(`PIVOT STALL: commanded yaw ${w.toFixed(3)} rad/s, gyro ${(this.sensors.imu.yawRate).toFixed(4)} rad/s (sweep blocked)`, 'err'); ok = false; break; }
       if (this.sim.time - t0 > 150) { this.log('Pivot timeout', 'warn'); ok = false; break; }
       yield;
     }
@@ -482,37 +521,46 @@ export class Autonomy {
       }
     }
     let res = P.plan(e.x, e.z, goal.x, goal.z);
-    if (!res) {
-      const n = P.blocked.length; P.blocked = P.blocked.filter((b) => b.fault);
-      if (n !== P.blocked.length) { P.buildCostmap(routes); res = P.plan(e.x, e.z, goal.x, goal.z); }
-    }
+    if (!res) res = P.plan(e.x, e.z, goal.x, goal.z, { escape: 35 });
     if (!res) {
       const inf = P.inflate; P.inflate = 5.0; P.buildCostmap(routes);
-      res = P.plan(e.x, e.z, goal.x, goal.z, { escape: 20 });
+      res = P.plan(e.x, e.z, goal.x, goal.z, { escape: 35 });
       P.inflate = inf;
       if (res && !quiet) this.log('Planner: path found only with reduced obstacle margin (5.0 m) - proceeding slowly', 'warn');
       if (res) res.tight = true;
     }
+    if (!res) {
+      const nowB = this.sim.time, n = P.blocked.length;
+      P.blocked = P.blocked.filter((b) => b.fault || (b.t != null && nowB - b.t < 180));
+      if (P.blocked.length !== n) { P.buildCostmap(routes); res = P.plan(e.x, e.z, goal.x, goal.z, { escape: 35 }); }
+    }
+    if (!res) {
+      const n = P.blocked.length; P.blocked = P.blocked.filter((b) => b.fault);
+      if (n !== P.blocked.length) { P.buildCostmap(routes); res = P.plan(e.x, e.z, goal.x, goal.z, { escape: 35 }); }
+    }
     if (!res) { if (!quiet) this.log(`Planner: no path to ${goal.name || 'goal'} (${reason})`, 'warn'); return false; }
     // plan hysteresis: on routine replans keep the current path unless it is blocked or the new
     // one is clearly (>15 %) cheaper - otherwise near-equal detours make the rover thrash
-    if (reason === 'periodic' && this.path && this.path.length > 2 && this.goal === goal) {
-      const e2 = this.est(), i0 = this.nearestOnPath(e2);
-      const cur = P.pathCost([{ x: e2.x, z: e2.z }, ...this.path.slice(i0)]);
-      const neu = P.pathCost(res.pts);
-      // commitment (v1.5.0): for 20 s after a switch, a routine replan only replaces a path that has become blocked;
-      // after that the new one must be >15 % AND > 12 m of typical ground cheaper (tiny relative gains on a 2 km route
-      // used to flip the plan every few seconds)
-      if (Number.isFinite(cur) && this.sim.time - (this._pathSwitchT ?? -1e9) < 20) return true;
-      if (Number.isFinite(cur) && (neu > cur * 0.85 || cur - neu < 12 * P.unkEff)) return true;
-      // reversal guard: a routine replan that turns the rover back the way it came needs to be clearly (40 %)
-      // cheaper. Newly mapped ground keeps raising the cost of the route ahead while the unmapped alternative
-      // behind still looks cheap, and the loaded rover (no point turns) thrashed east-west for minutes (CHANGES.md §14)
-      const dir = (pts, i) => { const a = pts[i] || pts[0], b = pts[Math.min(pts.length - 1, i + 15)]; return Math.atan2(b.z - a.z, b.x - a.x); };
-      const dTurn = Math.abs(wrap(dir(res.pts, 0) - dir(this.path, i0)));
-      if (Number.isFinite(cur) && dTurn > 100 * DEG && neu > cur * 0.6) return true;
-      // a plan that swings the rover > 60 deg off its present line costs a long arc (or a stop and pivot): 30 % cheaper
-      if (Number.isFinite(cur) && dTurn > 60 * DEG && neu > cur * 0.7) return true;
+    if ((reason === 'periodic' || reason === 'local squeeze') && this.path && this.path.length > 2 && this.goal === goal) {
+      const e2 = this.est(), i0 = this.nearestOnPath(e2), tail = this.path[this.path.length - 1];
+      const offPath = Math.hypot(this.path[i0].x - e2.x, this.path[i0].z - e2.z) > 4.0;
+      if (!offPath && Math.hypot(tail.x - goal.x, tail.z - goal.z) <= 1.5) {
+        const cur = P.pathCost([{ x: e2.x, z: e2.z }, ...this.path.slice(i0)]);
+        const neu = P.pathCost(res.pts);
+        // commitment (v1.5.0): for 20 s after a switch, a routine replan only replaces a path that has become blocked;
+        // after that the new one must be >15 % AND > 12 m of typical ground cheaper (tiny relative gains on a 2 km route
+        // used to flip the plan every few seconds)
+        if (reason !== 'local squeeze' && Number.isFinite(cur) && this.sim.time - (this._pathSwitchT ?? -1e9) < 20) return true;
+        if (Number.isFinite(cur) && (neu > cur * 0.85 || cur - neu < 12 * P.unkEff)) return true;
+        // reversal guard: a routine replan that turns the rover back the way it came needs to be clearly (40 %)
+        // cheaper. Newly mapped ground keeps raising the cost of the route ahead while the unmapped alternative
+        // behind still looks cheap, and the loaded rover (no point turns) thrashed east-west for minutes (CHANGES.md §14)
+        const dir = (pts, i) => { const a = pts[i] || pts[0], b = pts[Math.min(pts.length - 1, i + 15)]; return Math.atan2(b.z - a.z, b.x - a.x); };
+        const dTurn = Math.abs(wrap(dir(res.pts, 0) - dir(this.path, i0)));
+        if (Number.isFinite(cur) && dTurn > 100 * DEG && neu > cur * 0.6) return true;
+        // a plan that swings the rover > 60 deg off its present line costs a long arc (or a stop and pivot): 30 % cheaper
+        if (Number.isFinite(cur) && dTurn > 60 * DEG && neu > cur * 0.7) return true;
+      }
     }
     if (this.path !== res.pts) this._pathSwitchT = this.sim.time;
     this.path = res.pts; this.pathIdx = 0;
@@ -527,7 +575,7 @@ export class Autonomy {
   // near-goal (either direction), joined to the exact start/goal with short A* stubs.
   routeFromMemory(goal) {
     const e = this.est();
-    let best = null;
+    const cands = [];
     for (const r of this.slam.routes) {
       if (!r.ok || r.pts.length < 20) continue;
       let i0 = -1, d0 = Infinity, i1 = -1, d1 = Infinity;
@@ -538,18 +586,62 @@ export class Autonomy {
       d0 = Math.sqrt(d0); d1 = Math.sqrt(d1);
       if (d0 > 150 || d1 > 150 || Math.abs(i1 - i0) < 25) continue;
       const seg = i0 < i1 ? r.pts.slice(i0, i1 + 1) : r.pts.slice(i1, i0 + 1).reverse();
-      const score = d0 + d1;
-      if (!best || score < best.score) best = { r, seg, d0, d1, score };
+      const loadedNeed = this.sim.rover.loaded || !!this.surveyLimits;
+      cands.push({ r, seg, d0, d1, score: (loadedNeed && !r.loadedOk ? 2000 : 0) + seg.length + 2 * (d0 + d1) });
     }
-    if (!best) return null;
-    const P = this.planner;
-    P.buildCostmap(this.slam.routes.filter((x) => x.ok));
-    if (P.pathBlocked(best.seg, 0, best.seg.length) >= 0) return { rejected: best.r };
-    const stubA = best.d0 > 6 ? P.plan(e.x, e.z, best.seg[0].x, best.seg[0].z) : { pts: [{ x: e.x, z: e.z }] };
-    const last = best.seg[best.seg.length - 1];
-    const stubB = best.d1 > 6 ? P.plan(last.x, last.z, goal.x, goal.z) : { pts: [last, { x: goal.x, z: goal.z }] };
-    if (!stubA || !stubB) return { rejected: best.r };
-    return { route: best.r, pts: P.resample([...stubA.pts, ...best.seg, ...stubB.pts], 1.0), d0: best.d0, d1: best.d1 };
+    if (!cands.length) return null;
+    cands.sort((a, b) => a.score - b.score);
+    const P = this.planner, okRoutes = this.slam.routes.filter((x) => x.ok);
+    const repairSeg = (seg) => {
+      let cur = seg, repairs = 0;
+      for (let bi; (bi = P.pathBlocked(cur, 0, cur.length)) >= 0;) {
+        if (++repairs > 10) return null;
+        let pre = Math.max(0, bi - 8);
+        while (pre > 0 && P.pathBlocked(cur, pre, 1) >= 0 && bi - pre < 60) pre--;
+        let post = Math.min(cur.length - 1, bi + 8);
+        while (post < cur.length - 1 && post - bi < 120 && P.pathBlocked(cur, post, Math.min(6, cur.length - post)) >= 0) post++;
+        if (P.pathBlocked(cur, pre, 1) >= 0) {
+          if (pre === 0 && P.pathBlocked(cur, post, 1) < 0 && Math.hypot(cur[post].x - e.x, cur[post].z - e.z) <= 220) { cur = cur.slice(post); continue; }
+          return null;
+        }
+        if (P.pathBlocked(cur, post, 1) >= 0) {
+          if (post === cur.length - 1 && Math.hypot(cur[pre].x - goal.x, cur[pre].z - goal.z) <= 220) { cur = cur.slice(0, pre + 1); continue; }
+          return null;
+        }
+        const detour = P.plan(cur[pre].x, cur[pre].z, cur[post].x, cur[post].z, { maxExpand: 120000 });
+        if (!detour || detour.pts.length < 2 || detour.pts.length > 320 || P.pathBlocked(detour.pts, 0, detour.pts.length) >= 0) return null;
+        cur = [...cur.slice(0, pre), ...detour.pts, ...cur.slice(post + 1)];
+      }
+      return cur.length >= 15 ? cur : null;
+    };
+    const tryAttach = (seg) => {
+      const first = seg[0], last = seg[seg.length - 1];
+      const d0 = Math.hypot(first.x - e.x, first.z - e.z), d1 = Math.hypot(goal.x - last.x, goal.z - last.z);
+      const stubA = d0 > 6 ? (P.plan(e.x, e.z, first.x, first.z) || P.plan(e.x, e.z, first.x, first.z, { escape: 35 })) : { pts: [{ x: e.x, z: e.z }] };
+      const stubB = d1 > 6 ? (P.plan(last.x, last.z, goal.x, goal.z) || P.plan(last.x, last.z, goal.x, goal.z, { escape: 35 })) : { pts: [last, { x: goal.x, z: goal.z }] };
+      return stubA && stubB ? { pts: P.resample([...stubA.pts, ...seg, ...stubB.pts], 1.0), d0, d1 } : null;
+    };
+    P.buildCostmap(okRoutes);
+    const repaired = [];
+    for (const c of cands) {
+      const seg = repairSeg(c.seg);
+      if (!seg) continue;
+      repaired.push({ c, seg });
+      const res = tryAttach(seg);
+      if (res) return { route: c.r, ...res };
+    }
+    if (repaired.length) {
+      const inf = P.inflate;
+      P.inflate = Math.min(inf, 5.0);
+      try {
+        P.buildCostmap(okRoutes);
+        for (const { c, seg } of repaired) {
+          const res = tryAttach(seg);
+          if (res) return { route: c.r, ...res };
+        }
+      } finally { P.inflate = inf; }
+    }
+    return { rejected: cands[0].r };
   }
 
   // navigate to a goal using the global/local planners and route memory
@@ -558,7 +650,10 @@ export class Autonomy {
     const tol = goal.tol ?? 2.0;
     const from = this.site(this.est().x, this.est().z), to = goal.site || this.site(goal.x, goal.z);
     this.goal = goal;
-    yield* this.checkPower(goal.name);
+    this.local.last = null;
+    // goal.toCharger: this leg IS the drive to the charger (chargeAtDock). Checking the reserve again here sent it to
+    // chargeAtDock -> navTo -> checkPower without end: below the reserve, any unloaded leg died with a stack overflow.
+    if (!goal.toCharger) yield* this.checkPower(goal.name);
     this.phase = `Navigate to ${goal.name || to}`;
     this.slam.setPayload(R.loaded || !!this.surveyLimits); // the first plan already needs this leg's limits
     let usingRoute = false;
@@ -575,45 +670,139 @@ export class Autonomy {
       if (!this.replan(goal, 'retry')) return { ok: false, why: 'no path to goal (check geofences / goal location)' };
     }
     if (from !== to) this.slam.beginRecord(from, to);
-    let lastReplan = this.sim.time, stuckT = this.sim.time, stuckPos = this.est();
-    let blockedT = 0, episodes = 0, unwinds = 0, pivotFails = 0, backoffs = 0, bestD = Infinity, bestT = this.sim.time, lastPivotPos = null, bestTiles = this.slam.tiles.size, t00 = this.sim.time;
-    const fail = (why) => { if (this.slam.recording) this.slam.endRecord(false); this.stop(); return { ok: false, why }; };
+    let lastReplan = this.sim.time, lastSpliceT = -1e9, lastLoopSeen = this.slam.lastLoop?.t ?? -1e9, stuckT = this.sim.time, stuckPos = this.est();
+    this._stuckPosRef = stuckPos;
+    let blockedT = 0, episodes = 0, unwinds = 0, unwindBestD = Infinity, pivotFails = 0, backoffs = 0, bestD = Infinity, bestT = this.sim.time, lastPivotPos = null, bestTiles = this.slam.tiles.size, t00 = this.sim.time;
+    let remRef = null, remCum = null, bestRouteRem = Infinity;
+    const pathRemAt = (idx) => {
+      if (!this.path || !this.path.length) return Infinity;
+      if (this.path !== remRef) {
+        remRef = this.path;
+        remCum = new Float64Array(remRef.length);
+        for (let i = remRef.length - 2; i >= 0; i--) {
+          remCum[i] = remCum[i + 1] + Math.hypot(remRef[i + 1].x - remRef[i].x, remRef[i + 1].z - remRef[i].z);
+        }
+      }
+      return remCum[Math.min(idx, remCum.length - 1)];
+    };
+    if (usingRoute) bestRouteRem = pathRemAt(0);
+    const fail = (why) => {
+      this._stuckPosRef = null;
+      if (this.slam.recording) this.slam.endRecord(false);
+      this.planner.blocked = this.planner.blocked.filter((b) => b.fault);
+      this.stop();
+      return { ok: false, why };
+    };
+    let frozen0 = this.frozenS;
     while (true) {
+      // time the executive was frozen does not count against the progress / stuck watchdogs
+      if (this.frozenS > frozen0) { const f = this.frozenS - frozen0; frozen0 = this.frozenS; stuckT += f; bestT += f; t00 += f; lastReplan += f; }
       const e = this.est();
       const dGoal = Math.hypot(goal.x - e.x, goal.z - e.z);
       if (dGoal < tol) break;
+      this.pathIdx = this.nearestOnPath(e);
+      if (usingRoute && !this.pathSource.startsWith('REPEAT')) usingRoute = false;
       // overall progress watchdog: 4 minutes without getting 5 m closer => ask for help
-      if (dGoal < bestD - 5) { bestD = dGoal; bestT = this.sim.time; episodes = 0; }
+      if (dGoal < bestD - 5) {
+        bestD = dGoal; bestT = this.sim.time; episodes = 0;
+        if (unwinds > 0 && dGoal < unwindBestD - 300) { unwinds--; unwindBestD = dGoal; }
+      }
       // a detour around a keep-out zone / crater field moves away from the goal while it maps new ground: that is progress,
       // but only while it stays a detour. (v1.5.0: unbounded, this let a rover that could no longer steer drive 1.3 km
       // away from PORT-1 "mapping new ground" without the watchdog ever firing)
-      else if (this.slam.tiles.size > bestTiles + 6 && this.sim.time - t00 < 3600 && dGoal < bestD + Math.max(60, 0.1 * bestD)) { bestTiles = this.slam.tiles.size; bestT = this.sim.time; }
+      else if (this.slam.tiles.size > bestTiles + 6 && this.sim.time - t00 < 3600 && dGoal < bestD + Math.max(120, 0.18 * bestD)) { bestTiles = this.slam.tiles.size; bestT = this.sim.time; }
+      else if (usingRoute) {
+        const rem = pathRemAt(this.pathIdx);
+        if (rem < bestRouteRem - 10 && dGoal < bestD + Math.max(180, 0.18 * bestD)) { bestRouteRem = rem; bestT = this.sim.time; }
+      }
       if (this.sim.time - bestT > 240) return fail(`no progress toward ${goal.name || 'goal'} for 4 min: operator assistance required`);
-      if (Number.isFinite(bestD) && dGoal > bestD + Math.max(150, 0.25 * bestD)) return fail(`moving away from ${goal.name || 'goal'} (${dGoal.toFixed(0)} m, was ${bestD.toFixed(0)} m): stopped, operator assistance required`);
+      const awayLim = this.path && !this._noSteerT ? Math.max(240, 0.4 * bestD) : Math.max(150, 0.25 * bestD);
+      if (Number.isFinite(bestD) && dGoal > bestD + awayLim) return fail(`moving away from ${goal.name || 'goal'} (${dGoal.toFixed(0)} m, was ${bestD.toFixed(0)} m): stopped, operator assistance required`);
       // steering-authority check: moving, asked to turn, and the gyro says the body is not turning
       { const f = R._cmdF, yr = Math.abs(this.sensors.imu.yawRate || 0);
         if (f && !(this.sim.warping && this.railsOk) && Math.abs(f.vx) > 0.5 && Math.abs(f.wz) > 0.04 && yr < 0.25 * Math.abs(f.wz)) this._noSteerT = (this._noSteerT || 0) + this.dt;
         else this._noSteerT = Math.max(0, (this._noSteerT || 0) - 2 * this.dt);
         if (this._noSteerT > 15) { this._noSteerT = 0; return fail('vehicle is not responding to steering (yaw rate < 25 % of command for 15 s): stopped, operator assistance required'); } }
-      this.pathIdx = this.nearestOnPath(e);
-      if (this._replanNow) { this._replanNow = false; lastReplan = -1e9; bestD = Infinity; stuckPos = e; }
+      const forceReplan = this._replanNow;
+      if (this._replanNow) { this._replanNow = false; lastReplan = -1e9; bestD = Infinity; }
+      if ((this.slam.lastLoop?.t ?? -1e9) > lastLoopSeen) {
+        lastLoopSeen = this.slam.lastLoop.t;
+        this.local.prevK = 0;
+        lastReplan = -1e9;
+      }
       // (in transit warp the map changes per metre, not per second: replanning every 5 sim-s would cost ~10 plans per wall second)
-      if (this.sim.time - lastReplan > (this.sim.warp.active ? 20 : usingRoute ? 8 : 5)) {
+      const freeNow = this.local.last?.freeDist ?? 99;
+      const closeObs = !this.sim.warp.active && freeNow < 14;
+      if (this.sim.time - lastReplan > (this.sim.warp.active ? (freeNow < 14 ? 4 : 20) : closeObs ? 0.8 : usingRoute ? 8 : 5)) {
         lastReplan = this.sim.time;
         if (usingRoute) {
           this.planner.buildCostmap(this.slam.routes.filter((r) => r.ok));
-          if (this.planner.pathBlocked(this.path, this.pathIdx, 150) >= 0) {
-            this.log('Remembered route blocked by a new obstacle: replanning around it', 'warn');
-            usingRoute = false;
-            if (!this.replan(goal, 'route blocked')) { this.stop(); yield* this.wait(2, 'waiting for map / path'); }
+          const tail = this.path?.[this.path.length - 1];
+          if (tail && Math.hypot(tail.x - goal.x, tail.z - goal.z) > 1.5) {
+            if (dGoal < 40) {
+              usingRoute = false;
+              this.replan(goal, 'frame shift approach', true);
+            } else {
+              // Frame shift moved un-timestamped stubB away from surveyed goal: re-anchor tail to goal.
+              let cut = -1;
+              for (let i = this.path.length - 1; i >= this.pathIdx; i--) if (this.path[i].t != null) { cut = i; break; }
+              if (cut >= 0) {
+                const a = this.path[cut];
+                const tp = Math.hypot(goal.x - a.x, goal.z - a.z) > 6 ? this.planner.plan(a.x, a.z, goal.x, goal.z) : { pts: [a, { x: goal.x, z: goal.z }] };
+                if (tp) { this.path = [...this.path.slice(0, cut + 1), ...this.planner.resample(tp.pts, 1.0)]; this.pathIdx = Math.min(this.pathIdx, this.path.length - 1); this.sim.emit('path'); }
+                else { usingRoute = false; this.replan(goal, 'route tail blocked', true); }
+              } else { usingRoute = false; this.replan(goal, 'frame shift approach', true); }
+            }
           }
-        } else this.replan(goal, 'periodic', true);
+          const blk = usingRoute ? this.planner.pathBlocked(this.path, this.pathIdx, 150) >= 0 : false;
+          const squeeze = usingRoute && !blk && freeNow < 11 && this.pathIdx > 25 && dGoal > 60;
+          if (usingRoute && (blk || squeeze)) {
+            let spliced = false;
+            if (blk && dGoal > 120) {
+              let jJoin = Math.min(this.path.length - 1, this.pathIdx + 65);
+              while (jJoin < this.path.length - 40 && this.planner.pathBlocked(this.path, jJoin, 20) >= 0) jJoin += 15;
+              if (jJoin > this.pathIdx + 12 && this.planner.pathBlocked(this.path, jJoin, 40) < 0) {
+                const jp = this.path[jJoin], jDet = this.planner.plan(e.x, e.z, jp.x, jp.z, { maxExpand: 60000 });
+                if (jDet && jDet.pts.length >= 2 && jDet.pts.length <= 200) {
+                  this.path = [...this.planner.resample(jDet.pts, 1.0), ...this.path.slice(jJoin + 1)];
+                  this.pathIdx = 0; this.sim.emit('path'); spliced = true;
+                  this.log('Remembered route obstructed ahead: splicing local detour', 'info');
+                }
+              }
+            }
+            if (!spliced) {
+              this.log(blk ? 'Remembered route obstructed ahead: replanning around it' : 'Close obstacle along remembered route: replanning detour', 'info');
+              usingRoute = false;
+              if (!this.replan(goal, blk ? 'route blocked' : 'route clearance', true)) {
+                this.log('Remembered route blocked and no detour found yet', 'warn');
+                this.stop(); yield* this.wait(2, 'waiting for map / path');
+              }
+            }
+          }
+        } else {
+          let rWhy = forceReplan ? 'forced' : 'periodic';
+          if (!forceReplan && closeObs) {
+            this.planner.buildCostmap(this.slam.routes.filter((r) => r.ok));
+            if (this.planner.pathBlocked(this.path, this.pathIdx, 30) >= 0) rWhy = 'obstacle ahead';
+            else if ((this.local.last?.freeDist ?? 99) < 10) rWhy = 'local squeeze';
+          }
+          this.replan(goal, rWhy, true);
+        }
       }
       // lookahead target on the path
       let li = this.pathIdx;
-      const look = clamp(7 + R.telemetry().speed * 4, 8, 25);
+      const cross = Math.hypot(this.path[li].x - e.x, this.path[li].z - e.z);
+      let look = usingRoute ? clamp(5 + R.telemetry().speed * 2.5, 6, 18) : clamp(7 + R.telemetry().speed * 4, 8, 25);
+      if (cross > 2.5) look = Math.min(look, Math.max(5.5, 11 - cross));
       let acc = 0;
       while (li < this.path.length - 1 && acc < look) { acc += Math.hypot(this.path[li + 1].x - this.path[li].x, this.path[li + 1].z - this.path[li].z); li++; }
+      // On sharp detours / U-turns around obstacles, don't look 20 m across a bend into the hazard: use the 8 m near tangent.
+      if (look > 8.5) {
+        let liS = this.pathIdx, accS = 0;
+        while (liS < this.path.length - 1 && accS < 8) { accS += Math.hypot(this.path[liS + 1].x - this.path[liS].x, this.path[liS + 1].z - this.path[liS].z); liS++; }
+        const pS = this.path[liS];
+        if (Math.hypot(pS.x - e.x, pS.z - e.z) > 4 && Math.abs(wrap(Math.atan2(-(pS.z - e.z), pS.x - e.x) - e.yaw)) > 75 * DEG) li = liS;
+      }
       const tgt = this.path[li];
       const rel = this.relBody(tgt, e);
       const headErr = Math.atan2(-rel.r, rel.f);
@@ -621,10 +810,13 @@ export class Autonomy {
       // for the turn below), so the rover no longer stops and spins for every bend. A point turn is kept only for a
       // target essentially behind it (> 115 deg; > 150 deg within 6 m of the last one), or when no forward arc is free.
       const sinceTurn = Math.hypot(e.x - (lastPivotPos?.x ?? 1e9), e.z - (lastPivotPos?.z ?? 1e9));
-      if (!R.loaded && Math.abs(headErr) > (sinceTurn < 6 ? 150 : 115) * DEG && dGoal > tol + 3 && Math.hypot(rel.f, rel.r) > 5) { // a loaded rover never point-turns: wheels would dig ruts and the CoM is 6.8 m up
+      const closeTurn = (this.local.last?.freeDist ?? 99) < 11 && sinceTurn >= 8;
+      const pivotLim = sinceTurn < (usingRoute ? 15 : 6) ? 150 : usingRoute ? 60 : closeTurn ? 65 : 115;
+      if (!R.loaded && Math.abs(headErr) > pivotLim * DEG && dGoal > tol + 0.8 && Math.hypot(rel.f, rel.r) > tol + 0.8) { // a loaded rover never point-turns: wheels would dig ruts and the CoM is 6.8 m up
         if (this.local.pivotSafe(e)) {
           lastPivotPos = { x: e.x, z: e.z };
-          this.stop(); for (let i = 0; i < 5; i++) yield;
+          const tStop = this.sim.time;
+          for (let i = 0; i < 5 || (R.telemetry().speed > 0.2 && this.sim.time - tStop < 4); i++) { this.stop(); yield; }
           const ok = yield* this.alignYaw(Math.atan2(-(tgt.z - e.z), tgt.x - e.x), 8 * DEG, { rails: true });
           if (!ok) { pivotFails++; if (pivotFails >= 3) return fail('vehicle stalled during pivot: operator assistance required'); yield* this.recover(goal, 'pivot stall'); }
           stuckT = this.sim.time; stuckPos = this.est();
@@ -670,6 +862,8 @@ export class Autonomy {
         if (!this._shiftWarned) { this._shiftWarned = true; this.log('Cargo shift detected: speed derated 50% until the cradle re-centres the module', 'warn'); }
       } else if (this._shiftWarned) { this._shiftWarned = false; this.log('Cargo re-centred: speed derate lifted', 'ok'); }
       if (this.pathTight) v = Math.min(v, 0.6);
+      // Tighten corners when tracking a proven route so sharp bends don't swing wide into unmapped terrain.
+      if (usingRoute && !loaded && Math.abs(headErr) > 35 * DEG) v = Math.min(v, 1.0);
       v = Math.min(v, Math.max(0.3, Math.sqrt(2 * 0.12 * Math.max(0, dGoal - tol))));
       if (v <= 0) { this.stop(); this.detail = 'LiDAR failed off-route: holding for operator'; yield; continue; }
       // transit warp (>= 50x): a long cruise leg whose next 30 m are mapped and clear runs on rails (Sim.warpStep)
@@ -686,6 +880,7 @@ export class Autonomy {
       // set at walking pace before declaring a block (v1.5.0: without this, the gentler arcs turned squeezes into
       // 25 m reverse "unwinds")
       if (!lp.ok) { const lp2 = this.local.evaluate(e, tgt, Math.min(v, 0.5), loaded, { kmax: loaded ? 0.11 : 0.2 }); if (lp2.ok) { lp = lp2; v = Math.min(v, 0.5); } }
+      if (!lp.ok) { const lp3 = this.local.evaluate(e, tgt, Math.min(v, 0.35), loaded, { horizon: 6, kmax: loaded ? 0.13 : 0.25 }); if (lp3.ok) { lp = lp3; v = Math.min(v, 0.35); } }
       if (!lp.ok) {
         this.stop();
         const firstBlock = !blockedT;
@@ -712,9 +907,25 @@ export class Autonomy {
           if (episodes >= 2) {
             // boxed in: a replan alone cannot get out (or reverse arc is blocked), so back out along the way in
             if (++unwinds > 4) return fail('boxed in again after 4 reverse recoveries: operator assistance required');
+            unwindBestD = Math.min(unwindBestD, dGoal);
             yield* this.unwindPath(25);
             episodes = 0; bestD = Infinity; bestT = this.sim.time; stuckT = this.sim.time; stuckPos = this.est(); usingRoute = false;
-          } else if (!this.replan(goal, 'local block', true)) yield* this.recover(goal, 'blocked');
+          } else {
+            const okPlan = this.replan(goal, 'local block', true);
+            let moved = false;
+            if (okPlan && !R.loaded && this.local.pivotSafe(e)) {
+              let ri = this.pathIdx, rAcc = 0;
+              while (ri < this.path.length - 1 && rAcc < 12) { rAcc += Math.hypot(this.path[ri + 1].x - this.path[ri].x, this.path[ri + 1].z - this.path[ri].z); ri++; }
+              const rp = this.path[ri];
+              const rYaw = Math.atan2(-(rp.z - e.z), rp.x - e.x);
+              if (Math.abs(wrap(rYaw - e.yaw)) > 35 * DEG) {
+                this.stop(); for (let i = 0; i < 5; i++) yield;
+                yield* this.alignYaw(rYaw, 10 * DEG, { rails: true });
+                episodes = 0; moved = true;
+              }
+            }
+            if (!moved) yield* this.recover(goal, 'blocked');
+          }
           lastReplan = this.sim.time;
         }
         yield; continue;
@@ -747,6 +958,7 @@ export class Autonomy {
       this.cmd(vCmd, 0, vCmd * lp.k);
       this.detail = `${R.rpm.proto.toFixed(0)} rpm ${R.rpm.tier} | ${this.pathSource} | ${dGoal.toFixed(0)} m to go | v ${vCmd.toFixed(2)} m/s${lp.knownDist < 6 ? ' (creeping: unmapped ground ahead)' : ''} | ${Math.abs(lp.k) < 0.004 ? "straight" : `turn ${lp.k > 0 ? "L" : "R"} R=${Math.abs(1 / lp.k).toFixed(0)} m`}`;
       // stuck detection (embedding / slip / hidden obstacle)
+      this._stuckPosRef = stuckPos;
       if (this.sim.time - stuckT > 20) {
         const moved = Math.hypot(e.x - stuckPos.x, e.z - stuckPos.z);
         if (moved < 1.0) {
@@ -758,6 +970,7 @@ export class Autonomy {
       }
       yield;
     }
+    this._stuckPosRef = null;
     this.stop();
     if (this.slam.recording) {
       const r = this.slam.endRecord(true);
@@ -786,10 +999,18 @@ export class Autonomy {
     let acc = Math.hypot(P[this.pathIdx].x - e.x, P[this.pathIdx].z - e.z);
     if (acc > 6) return 0; // off the path (recovering, or the plan just changed): let the tracker rejoin it
     const half = Math.abs(ROVER.corners[0][1]);
+    let kapMax = 0;
     for (let i = this.pathIdx; i < P.length - 1 && acc < 30; i++) {
       const a = P[i], b = P[i + 1], L = Math.hypot(b.x - a.x, b.z - a.z);
       if (L < 1e-6) continue;
       const s = -(b.z - a.z) / L, c = (b.x - a.x) / L; // right vector of the segment = (sin yaw, cos yaw)
+      if (i > this.pathIdx) {
+        const p0 = P[i - 1], L0 = Math.hypot(a.x - p0.x, a.z - p0.z);
+        if (L0 > 1e-4) {
+          const dth = Math.abs(wrap(Math.atan2(-(b.z - a.z), b.x - a.x) - Math.atan2(-(a.z - p0.z), a.x - p0.x)));
+          kapMax = Math.max(kapMax, dth / Math.max(0.5, 0.5 * (L + L0)));
+        }
+      }
       for (const off of [0, -half, half]) {
         const wh = this.slam.wheelHazard(a.x + s * off, a.z + c * off);
         if (!wh) { if (acc < 12 && !this.slam.pinhole(a.x + s * off, a.z + c * off)) return 0; continue; }
@@ -797,7 +1018,9 @@ export class Autonomy {
       }
       acc += L;
     }
-    return clamp(v, 0, loaded ? 2.4 : 5.0); // (empty was 3.4; v is already capped by speedCap and the governors)
+    const ssf = loaded ? 0.52 : 1.50;
+    const vCurve = kapMax > 1e-4 ? Math.sqrt(MOON.g * 0.45 * ssf / kapMax) : 99;
+    return clamp(v, 0, Math.min(loaded ? 2.4 : 4.2, vCurve));
   }
   // Move the estimate along the path by v*h and the true body by the same body-frame motion (so the SLAM frame
   // offset is preserved), feeding the odometry the SLAM filter integrates in Sim.warpStep.
@@ -875,9 +1098,19 @@ export class Autonomy {
     this.phase = phase0 + ' (unwind)';
     this.unwindCount = (this.unwindCount || 0) + 1;
     const e0 = this.est(), TTL = 1200, now0 = this.sim.time;
-    // 1. the blocking corridor: the hit points the arcs ran into, and a 4.5 m wide strip along the heading
+    const repeatPocket = !!(this._lastUnwind && now0 - this._lastUnwind.t < 600 && Math.hypot(e0.x - this._lastUnwind.x, e0.z - this._lastUnwind.z) < 45);
+    this._lastUnwind = { x: e0.x, z: e0.z, t: now0 };
+    if (repeatPocket) distance = Math.max(distance, 35);
+    // 1. the blocking corridor: the hit points the arcs ran into, plus a wide pocket around e0 and strip ahead
     for (const h of (this.local.last?.hits || []).slice(0, 30)) P.blocked.push({ x: h.x, z: h.z, r: 1.6, t: now0, ttl: TTL });
-    for (let f = 3; f <= 30; f += 3) P.blocked.push({ x: e0.x + Math.cos(e0.yaw) * f, z: e0.z - Math.sin(e0.yaw) * f, r: 4.5, t: now0, ttl: TTL });
+    const farGoal = !goal || Math.hypot(goal.x - e0.x, goal.z - e0.z) > 15;
+    if (farGoal) {
+      P.blocked.push({ x: e0.x, z: e0.z, r: repeatPocket ? 16.0 : 11.5, t: now0, ttl: TTL });
+      if (repeatPocket) P.blocked.push({ x: e0.x - Math.cos(e0.yaw) * 10, z: e0.z + Math.sin(e0.yaw) * 10, r: 14.0, t: now0, ttl: TTL });
+      for (let f = 4; f <= 30; f += 4) P.blocked.push({ x: e0.x + Math.cos(e0.yaw) * f, z: e0.z - Math.sin(e0.yaw) * f, r: 7.0, t: now0, ttl: TTL });
+    } else {
+      for (let f = 3; f <= 30; f += 3) P.blocked.push({ x: e0.x + Math.cos(e0.yaw) * f, z: e0.z - Math.sin(e0.yaw) * f, r: 4.5, t: now0, ttl: TTL });
+    }
     // 2. the way in: breadcrumbs from the newest backwards until `distance` m of path (only recent ones: older ones
     // may belong to another leg)
     const trace = [{ x: e0.x, z: e0.z }];
@@ -897,9 +1130,39 @@ export class Autonomy {
     const vU = R.loaded ? 0.15 : 0.4;
     const t0 = this.sim.time, tMax = Math.min(distance, len) / vU * 1.6 + 20;
     let ti = 1;
+    const sampleElev = () => {
+      const sc = this.sensors.scan; if (!sc || !sc.n) return [];
+      const pts = [], st = Math.max(1, Math.floor(sc.n / 180));
+      for (let i = 0; i < sc.n; i += st) {
+        const bx = sc.body[i * 3], by = sc.body[i * 3 + 1], bz = sc.body[i * 3 + 2];
+        const r = Math.hypot(bx, bz);
+        if (by > -0.2 && r > 2 && r < 35) pts.push(bx, bz);
+      }
+      return pts;
+    };
+    let stallRef = { t: t0, e: e0, pts: sampleElev(), id: this.sensors.scanId };
     while (ok && moved < Math.min(distance, len) - 1 && this.sim.time - t0 < tMax) {
       const e = this.est();
       moved = Math.hypot(e.x - e0.x, e.z - e0.z);
+      if (this.sim.time - stallRef.t > 18 && this.sensors.scanId !== stallRef.id) {
+        const odomMove = Math.hypot(e.x - stallRef.e.x, e.z - stallRef.e.z);
+        const curPts = sampleElev();
+        if (odomMove > 1.8 && stallRef.pts.length >= 30 && curPts.length >= 30) {
+          let hit = 0, tot = stallRef.pts.length / 2;
+          for (let i = 0; i < stallRef.pts.length; i += 2) {
+            const px = stallRef.pts[i], pz = stallRef.pts[i + 1];
+            for (let j = 0; j < curPts.length; j += 2) {
+              const dx = curPts[j] - px, dz = curPts[j + 1] - pz;
+              if (dx * dx + dz * dz < 0.04) { hit++; break; }
+            }
+          }
+          if (hit >= 15 && hit / tot >= 0.75) {
+            this.log('Unwind: vehicle stationary against obstacle despite wheel rotation, stopping reverse', 'warn');
+            break;
+          }
+        }
+        stallRef = { t: this.sim.time, e, pts: curPts, id: this.sensors.scanId };
+      }
       // trace point to steer to: nearest one ahead of the progress so far, 5 m further back along the trace
       while (ti < trace.length - 1 && Math.hypot(trace[ti].x - e.x, trace[ti].z - e.z) < 5) ti++;
       const lp = this.local.evaluate(e, trace[ti], vU, R.loaded, { dir: -1, horizon: 8, kmax: 0.12, relaxed: true });
@@ -921,8 +1184,30 @@ export class Autonomy {
     }
     this.stop();
     for (let i = 0; i < 8; i++) yield;
+    if (this.slam.recording) {
+      const pts = this.slam.recording.pts, eu = this.est();
+      let bestJ = -1, bestD = 12;
+      for (let j = pts.length - 1; j >= 0; j--) {
+        if (pts[j].t >= now0 - 2) continue;
+        if (now0 - pts[j].t > 90 && bestJ >= 0) break;
+        const d = Math.hypot(pts[j].x - eu.x, pts[j].z - eu.z);
+        if (d < bestD) { bestD = d; bestJ = j; if (d < 4) break; }
+      }
+      if (bestJ >= 0) { pts.length = bestJ + 1; pts.push({ x: eu.x, z: eu.z, t: this.sim.time }); }
+    }
     this._replanNow = true;
-    if (goal) this.replan(goal, 'unwind', true);
+    if (goal) {
+      this.replan(goal, 'unwind', true);
+      if (!R.loaded && this.path?.length > 3) {
+        const eu = this.est();
+        if (this.local.pivotSafe(eu)) {
+          let ri = 0, rAcc = 0;
+          while (ri < this.path.length - 1 && rAcc < 12) { rAcc += Math.hypot(this.path[ri + 1].x - this.path[ri].x, this.path[ri + 1].z - this.path[ri].z); ri++; }
+          const rp = this.path[ri], rYaw = Math.atan2(-(rp.z - eu.z), rp.x - eu.x);
+          if (Math.abs(wrap(rYaw - eu.yaw)) > 25 * DEG) yield* this.alignYaw(rYaw, 10 * DEG, { rails: true });
+        }
+      }
+    }
     this.phase = phase0;
   }
 
@@ -960,7 +1245,7 @@ export class Autonomy {
 
   *acquire(c, opts = {}) {
     const R = this.sim.rover, T = c.T;
-    try { return yield* this._acquire(c, opts); } finally { this.slam.lcSuspended = false; }
+    try { return yield* this._acquire(c, opts); } finally { this.slam.lcSuspended = false; this.slam.matchSuspended = false; this.slam.mapping = true; }
   }
   // AEGIS-V1 pickup (module_carry.js): kneel, drive along the module axis under it until the clamp bands are
   // over the rings, RISE so the V-saddles lift it off the stand's lug notches, then close the ring jaws.
@@ -974,7 +1259,15 @@ export class Autonomy {
       while (Math.abs(R.lift.pos - target) > 0.01) { self.stop(); self.detail = `${label}: ride ${R.lift.pos.toFixed(2)} -> ${target.toFixed(2)} m`; yield; }
       for (let i = 0; i < 20; i++) { self.stop(); yield; }
     };
+    const backOut = function* (self) {
+      const gc = self.cargoGuess(c);
+      // clear overhead module returns from the 2.5D ground map (within +-4.38 m, leaving the +-5.63 m stand legs mapped)
+      self.slam.clearFootprint(gc.x, gc.z, gc.yaw, -aft + 0.6, (T.adapterR || T.radius) + 0.4);
+      yield* self.backUp(-aft + ROVER.frame.halfLen + 4);
+    };
     for (let attempt = 1; attempt <= 3; attempt++) {
+      this.slam.lcSuspended = false; this.slam.matchSuspended = false; this.slam.mapping = true;
+      if (attempt > 1 && Math.abs(R.lift.pos - RD.cruise) > 0.02) yield* waitRide(this, RD.cruise, 'raising');
       let g = this.cargoGuess(c);
       // stand-off point on the module axis behind its aft end (rover front 14 m short of it)
       const pre = (gg, gap) => { const back = -aft + ROVER.frame.halfLen + gap - carry; return { x: gg.x - Math.cos(gg.yaw) * back, z: gg.z + Math.sin(gg.yaw) * back }; };
@@ -982,6 +1275,7 @@ export class Autonomy {
       const r = yield* this.navTo({ ...pre(g, 16), name: `pre-grasp ${c.id}`, tol: 2.0, site: 'PAD' });
       if (r && r.ok === false) return r;
       this.slam.lcSuspended = true; // the scene around the cargo is about to change (we move it)
+      this.slam.matchSuspended = true; // avoid scan-to-map pulling pose onto shifted PAD/cargo cells during approach
       this.phase = `M2 Locate ${c.id} (fiducials)`;
       let t0 = this.sim.time;
       while (this.sim.time - t0 < 1.5) { this.stop(); this.detail = `cargo estimate from ${this.cargoGuess(c).src}`; yield; }
@@ -1006,12 +1300,13 @@ export class Autonomy {
       }
       this.phase = `M2 Square up to ${c.id}`;
       yield* this.alignYaw(this.cargoGuess(c).yaw, 0.6 * DEG);
-      // kneel so the deck and saddles pass under the module on its stand
+      // kneel so the deck and saddles pass under the module on its stand (pause 2.5D mapping so the overhang doesn't paint a wall)
       this.phase = `M2 Kneel (${(RD.kneel).toFixed(2)} m)`;
+      this.slam.mapping = false;
       yield* waitRide(this, RD.kneel, 'kneeling');
       // drive under: fiducials, then the saddle rangefinders + band-edge sensors
       this.phase = `M2 Drive under ${c.id}`;
-      let ok = false; t0 = this.sim.time; let axF = null;
+      let ok = false; t0 = this.sim.time; let axF = null, cassLatF = null, cassYawF = null; this._wzI = 0;
       while (this.sim.time - t0 < 400) {
         g = this.cargoGuess(c);
         const e = this.est();
@@ -1022,22 +1317,25 @@ export class Autonomy {
         let lat = rel.f * Math.sin(yawErr) + rel.r * Math.cos(yawErr), along = rel.f * Math.cos(yawErr) - rel.r * Math.sin(yawErr) - carry;
         const cass = this.sensors.cass;
         if (cass && cass.valid) {
-          lat = cass.lateral; yawErr = -cass.yaw; src = 'saddle rangefinders';
+          const ac = clamp(this.dt / 0.4, 0, 1);
+          cassLatF = cassLatF == null ? cass.lateral : cassLatF + (cass.lateral - cassLatF) * ac;
+          cassYawF = cassYawF == null ? -cass.yaw : cassYawF + (-cass.yaw - cassYawF) * ac;
+          lat = cassLatF; yawErr = cassYawF; src = 'saddle rangefinders';
           if (cass.cargoX != null) { axF = axF == null ? cass.cargoX : axF + (cass.cargoX - axF) * 0.3; along = axF - carry; src += ' + band sensors'; }
         }
-        if (Math.abs(along) < 0.12 && Math.abs(lat) < 0.15 && Math.abs(yawErr) < 1.5 * DEG) {
+        if (Math.abs(along) < 0.12 && Math.abs(lat) < 0.15 && Math.abs(yawErr) < 0.35 * DEG) {
           ok = true; break;
         }
         if (along < -0.5) break; // overshoot
         if (!(cass && cass.valid) && along < -aft + ROVER.frame.halfLen - carry + 0.5 && Math.abs(lat) > 0.25) { this.log(`${c.id}: lateral ${lat.toFixed(2)} m at the module end (tyre-to-post clearance ~0.9 m)`, 'warn'); break; }
         // (steering is curvature, i.e. per metre, so speed doesn't change the line the deck follows; the creep only
         // needs to be slow over the last ~0.5 m where the band sensors stop it inside +-0.12 m)
-        const v = Math.min(along > 8 ? 1.5 : along > 2 ? 0.7 : clamp(along * 0.35, 0.06, 0.4), Math.abs(lat) > 0.12 ? 0.35 : 9); // slow while correcting lateral
-        // skid-steer line following: head toward the axis, then along it
-        // curvature steering (yaw rate scales with speed, so a skid-steer creep never scrubs in place)
-        // intercept the axis at no more than ~8 deg so a large offset can't swing the deck into a stand post
-        const kap = clamp(0.35 * (yawErr - clamp(Math.atan(0.6 * lat), -0.14, 0.14)), -1 / 6, 1 / 6);
-        this.cmd(v, 0, v * kap);
+        const v = Math.min(along > 8 ? 1.5 : along > 2 ? 0.7 : clamp(along * 0.35, 0.06, 0.4), Math.abs(lat) > 0.12 ? 0.35 : 9, (cass && cass.valid && along < 1.5 && Math.abs(yawErr) > 0.35 * DEG) ? 0.12 : 9);
+        // square the module cleanly on the V-saddles before clamping: once inside +-6 cm laterally and 2.2 m from
+        // the band target, prioritize yaw alignment so saddle skew stays < 0.35 deg instead of twisting to chase cm
+        const latTerm = (along < 2.2 && Math.abs(lat) < 0.06) ? 0.06 * lat : clamp(Math.atan(0.50 * lat), -0.14, 0.14);
+        const kap = clamp(1.3 * yawErr - latTerm, -1 / 6, 1 / 6);
+        this.cmdCurv(v, kap);
         this.detail = `[${src}] along ${along.toFixed(2)} m  lat ${(lat * 100).toFixed(1)} cm  yaw ${(yawErr / DEG).toFixed(2)} deg`;
         yield;
       }
@@ -1045,7 +1343,7 @@ export class Autonomy {
       for (let i = 0; i < 15; i++) yield;
       if (!ok) {
         this.log(`${c.id}: not centred under the module (attempt ${attempt}), backing out to retry`, 'warn');
-        yield* this.backUp(-aft + ROVER.frame.halfLen + 4);
+        yield* backOut(this);
         continue;
       }
       if (opts.approachOnly) { this.log(`${c.id}: rover centred under the module, ready to lift`, 'ok'); return { ok: true }; }
@@ -1054,19 +1352,21 @@ export class Autonomy {
       const y0 = c.body.translation().y;
       yield* waitRide(this, RD.carry, 'rising (roller-screw struts)');
       const lifted = c.body.translation().y - y0;
-      if (lifted < 0.3) { this.log(`${c.id}: module did not lift off the stand (${lifted.toFixed(2)} m)`, 'warn'); yield* waitRide(this, RD.kneel, 'kneeling'); yield* this.backUp(-aft + ROVER.frame.halfLen + 4); continue; }
+      if (lifted < 0.3) { this.log(`${c.id}: module did not lift off the stand (${lifted.toFixed(2)} m)`, 'warn'); yield* waitRide(this, RD.kneel, 'kneeling'); yield* backOut(this); continue; }
       this.phase = `M3 Clamp ${c.id}`;
       const res = R.clampClose();
-      if (!res.ok) { this.log(`Clamp attempt ${attempt} refused: ${res.why}`, 'warn'); yield* waitRide(this, RD.kneel, 'kneeling'); yield* this.backUp(-aft + ROVER.frame.halfLen + 4); continue; }
+      if (!res.ok) { this.log(`Clamp attempt ${attempt} refused: ${res.why}`, 'warn'); yield* waitRide(this, RD.kneel, 'kneeling'); yield* backOut(this); continue; }
       while (R.lift.clamp === 'closing') { this.detail = `ring jaws closing ${(R.lift.clampT * 100).toFixed(0)}%  (lugs ${lifted.toFixed(2)} m above the notches)`; yield; }
       // (was: retried straight away with the module still riding unclamped on the raised saddles, so the next attempt's
       // approach drive carried it off its stand. Set it back down and back out first, like the other failure paths.)
-      if (R.lift.clamp !== 'closed') { this.log(`Clamp attempt ${attempt} failed: ${R.lift.msg}`, 'warn'); while (R.lift.clamp === 'opening') yield; yield* waitRide(this, RD.kneel, 'kneeling'); yield* this.backUp(-aft + ROVER.frame.halfLen + 4); continue; }
+      if (R.lift.clamp !== 'closed') { this.log(`Clamp attempt ${attempt} failed: ${R.lift.msg}`, 'warn'); while (R.lift.clamp === 'opening') yield; yield* waitRide(this, RD.kneel, 'kneeling'); yield* backOut(this); continue; }
       yield* this.wait(0.5, 'verifying load path');
       c.state = 'held';
       // the module is now part of the vehicle: forget its footprint in the terrain map
-      { const e2 = this.est(); const half = (T.adapterR || T.radius) + 0.4;
-        this.slam.clearFootprint(e2.x + Math.cos(e2.yaw) * carry, e2.z - Math.sin(e2.yaw) * carry, e2.yaw, -aft + 0.6, half); }
+      { const e2 = this.est(); const half = (T.adapterR || T.radius) + 0.5;
+        this.slam.clearFootprint(e2.x + Math.cos(e2.yaw) * carry, e2.z - Math.sin(e2.yaw) * carry, e2.yaw, -aft + 2.2, half);
+        this.slam.mapping = true;
+        this._needStandExit = { x: e2.x, z: e2.z, yaw: e2.yaw, dist: 12.0 }; }
       const st = this.manifest.find((m) => m.cargo === c); if (st) st.status = 'in transit';
       this.log(`${c.id} lifted ${lifted.toFixed(2)} m off its stand and clamped (${(T.mass * MOON.g / 1000).toFixed(1)} kN on the saddles)`, 'ok');
       return { ok: true };
@@ -1110,19 +1410,38 @@ export class Autonomy {
   }
 
   *deliver(portId) {
-    try { return yield* this._deliver(portId); } finally { this.slam.lcSuspended = false; }
+    try { return yield* this._deliver(portId); } finally { this.slam.lcSuspended = false; this.slam.matchSuspended = false; this.slam.mapping = true; }
   }
   *_deliver(portId) {
     const R = this.sim.rover;
     const port = this.sim.ports.find((p) => p.id === portId);
     if (!R.loaded) return { ok: false, why: 'no cargo held' };
     const c = R.lift.cargo, T = c.T;
+    if (this._needStandExit) {
+      const ex = this._needStandExit; this._needStandExit = null;
+      const e0 = this.est();
+      const prog = () => (this.est().x - ex.x) * Math.cos(ex.yaw) - (this.est().z - ex.z) * Math.sin(ex.yaw);
+      if (Math.hypot(e0.x - ex.x, e0.z - ex.z) < ex.dist + 2 && prog() < ex.dist) {
+        this.phase = `Exit ${c.id} stand`;
+        this.slam.lcSuspended = true;
+        try {
+          const t0 = this.sim.time;
+          while (prog() < ex.dist && this.sim.time - t0 < 40) {
+            const e = this.est(), d = prog();
+            this.cmdCurv(0.5, clamp(0.8 * wrap(ex.yaw - e.yaw), -0.05, 0.05));
+            this.detail = `exiting stand (${Math.max(0, d).toFixed(1)} / ${ex.dist.toFixed(1)} m)`;
+            yield;
+          }
+          this.stop();
+        } finally { this.slam.lcSuspended = false; }
+      }
+    }
     if (this.faults.port[portId]) {
       this.log(`${port.name} reported UNAVAILABLE - holding at staging and requesting operator decision`, 'warn');
       const H = this.sim.terrain.hab;
       yield* this.navTo({ x: port.x + H.nx * 45, z: port.z + H.nz * 45, name: 'hab holding point', tol: 3 });
       this.phase = 'HOLD: receiving port unavailable';
-      while (this.faults.port[portId] && c.dest === portId) { this.detail = `waiting: "clear port ${portId}" or "reroute ${c.id.includes('40') ? 'A' : 'B'} <port>"`; this.stop(); yield; }
+      while (this.faults.port[portId] && c.dest === portId) { this.detail = `waiting: "clear port ${portId}" or "reroute ${c.id.slice(-1)} <port>"`; this.stop(); yield; }
       // operator redirected the module to another port while we held
       if (c.dest !== portId) { this.log(`${c.id} rerouted by operator: PORT-${portId} -> PORT-${c.dest}`, 'ok'); return yield* this._deliver(c.dest); }
     }
@@ -1165,15 +1484,16 @@ export class Autonomy {
       } else this.log(`${port.name} fiducial not seen yet: approaching on the base map`, 'warn');
     }
     // final approach: skid-steer line following on the port axis (port fiducial, then the docking-ring
-    // camera inside 10 m). Lateral error is removed by heading while there is still distance to do it.
+    // camera inside 12 m). Lateral error is removed by heading while there is still distance to do it.
     this.slam.lcSuspended = true; // docking area changes as modules are berthed
+    this.slam.matchSuspended = true; // avoid scan-to-map pulling pose onto shifted HAB/module cells during docking
     const RD = ROVER.ride;
     let captured = false, contactF = 0;
     this._dockPeakN = 0;
     for (let attempt = 1; attempt <= 3 && !captured; attempt++) {
       this._dockAttempts = attempt;
       this.phase = `M5 Final approach ${port.name}`;
-      let t0 = this.sim.time, bad = false, vAppF = null, latA = null; this._wzI = 0;
+      let t0 = this.sim.time, bad = false, vAppF = null, latA = null, lastSrc = null; this._wzI = 0;
       while (this.sim.time - t0 < 400) {
         const g = this.portGuess(port);
         const e = this.est();
@@ -1182,7 +1502,7 @@ export class Autonomy {
         const target = { x: g.x + nn.x * frontOff(), z: g.z + nn.z * frontOff() };
         const rel = this.relBody(target, e);
         let lat = rel.r, along = rel.f, yawErr = wrap(wrap(g.nYaw + Math.PI) - e.yaw), src = 'port fiducial';
-        if (ring && ring.port === port && ring.along < 10) {
+        if (ring && ring.port === port && ring.along < 12) {
           along = ring.along; src = 'docking-ring camera';
           if (ring.yaw != null) yawErr = ring.yaw; // module axis vs port axis, measured on the ring itself
           // ring.lateral is the port centre's offset in the MODULE frame (a bearing): it includes along*sin(yaw).
@@ -1191,35 +1511,29 @@ export class Autonomy {
           lat = ring.lateral * Math.cos(yawErr) + ring.along * Math.sin(yawErr);
           // ride trim toward the ring height: filtered (~1 s) and slow (0.25 /s). Adding 8 % of the raw reading
           // every tick swung the ride 0.57-0.98 m, and the tilting module showed up as lateral drift at the nose
-          vAppF = vAppF == null ? ring.vertical : vAppF + (ring.vertical - vAppF) * clamp(this.dt / 1.0, 0, 1);
-          if (Math.abs(vAppF) > 0.003) R.lift.target = clamp(R.lift.target + vAppF * 0.25 * this.dt, RD.carry - 0.4, RD.max);
+          vAppF = vAppF == null ? ring.vertical : vAppF + (ring.vertical - vAppF) * clamp(this.dt / 0.8, 0, 1);
+          if (Math.abs(vAppF) > 0.002) R.lift.target = clamp(R.lift.target + vAppF * 0.45 * this.dt, RD.carry - 0.4, RD.max);
         }
+        if (src !== lastSrc) { this._wzI = 0; latA = null; lastSrc = src; }
         // cone check on a ~1 s filtered lateral: the loaded module rocks (box20: +-0.6 deg pitch) and single
         // samples spiked past 6 cm while the mean sat within 2 cm, aborting every attempt
         latA = latA == null ? lat : latA + (lat - latA) * clamp(this.dt / 1.0, 0, 1);
         if (along < 1.2 && Math.abs(latA) > 0.06) { bad = true; break; }
-        if (along < 0.35) break;
-        const vx = along > 10 ? 1.2 : clamp((along - 0.3) * 0.25, 0.06, 0.8);
-        // Inside the ring camera's range: lat is the nose's offset from the port axis, L = frontOff ahead of the
-        // turning centre. Per metre  d lat/ds = -yaw + L*kap,  d yaw/ds = -kap, so the turning-centre offset
-        // yc = lat + L*yaw obeys d yc/ds = -yaw and  kap = 2p*yaw - p^2*yc  puts both poles at -p per metre
-        // (yc, yaw -> 0 means the nose arrives on the axis AND square). Unlike a nose-point law this stays stable
-        // for any assumed control point at or ahead of the turning centre, so an error in L can't destabilise it.
-        // p = 0.6: ~1.7 % of the hand-over error left after the 10 m camera leg.
-        const near = src === 'docking-ring camera', P = 0.6;
-        // far field (port fiducial + SLAM pose): the same law on the rover centre's offset from the port axis line
-        // (a bearing-pursuit law here handed over at 2-4 deg / ~0.4 m off-axis and the near leg couldn't absorb it);
-        // gentler p = 0.3 per metre over the ~14 m before the camera takes over
+        if (along < 0.22) break;
+        const vx = along > 10 ? 1.2 : clamp((along - 0.15) * 0.25, 0.025, 0.8);
+        // Inside the ring camera's range: lat is the nose's offset from the port axis (L = frontOff ahead of the
+        // turning centre). Since d lat/ds = -(yaw + delta) + L*kap (delta = module-to-rover saddle skew) and
+        // d yaw/ds = -kap, kap = -k*lat gives characteristic eq lambda^2 + k*L*lambda + k = 0 with critical
+        // damping near k = (2/L)^2 (~0.10 /m^2, zeta ~ 0.92) AND zero steady-state lateral error regardless of delta.
+        const near = src === 'docking-ring camera', Pfar = 0.25, L = frontOff(), pNear = Math.min(0.34, 2.6 / Math.max(L, 1));
         const hd = wrap(g.nYaw + Math.PI), ycFar = (target.x - e.x) * Math.sin(hd) + (target.z - e.z) * Math.cos(hd);
-        const kap = near ? clamp(2 * P * yawErr - P * P * (lat + frontOff() * yawErr), -1 / 12, 1 / 12)
-          : clamp(2 * 0.3 * yawErr - 0.09 * ycFar, -1 / 12, 1 / 12);
+        const kap = near ? clamp(-pNear * pNear * (lat + L * yawErr) + 2 * 0.85 * pNear * yawErr, -1 / 12, 1 / 12)
+          : clamp(2 * Pfar * yawErr - Pfar * Pfar * ycFar, -1 / 12, 1 / 12);
         this.cmdCurv(vx, kap);
         this.detail = `[${src}] range ${along.toFixed(2)} m  lat ${(lat * 100).toFixed(1)} cm  yaw ${(yawErr / DEG).toFixed(2)} deg  ride ${R.lift.pos.toFixed(2)} m`;
         yield;
       }
-      this.stop();
-      for (let i = 0; i < 20; i++) yield;
-      if (bad) { this.log(`${port.name}: lateral error too large for the coupling cone (attempt ${attempt}), backing off`, 'warn'); yield* this.backUp(14); continue; }
+      if (bad) { this.stop(); for (let i = 0; i < 20; i++) yield; this.log(`${port.name}: lateral error too large for the coupling cone (attempt ${attempt}), backing off`, 'warn'); yield* this.backUp(14); continue; }
       // soft contact: creep at 1 cm/s with the ride trimmed to the ring until the coupling latches engage
       this.phase = `M5 Dock ${port.name}`;
       t0 = this.sim.time;
@@ -1233,8 +1547,8 @@ export class Autonomy {
       // so the module settles on Ft = 1200 N (between softCaptureN 900 and maxPushN 6000) instead of creeping at a fixed rate.
       // First contact (> 200 N) ramps the speed target to zero within 0.1 s, so the tyres' kinetic energy cannot overshoot
       // maxPushN; the latches fire only after the ride trim has held the ring inside +-5 mm for 1.5 s.
-      const IMP = { Ft: 1200, Kf: 0.00001, vMax: 0.015, vMin: -0.02, vTouch: 0.0008, touchN: 200, ramp: 0.1, tol: 0.005, dwell: 1.5 };
-      let touchT = null, alignedT = 0, peakN = 0, fF = 0, spiked = false;
+      const IMP = { Ft: 1100, Kf: 0.000006, vMax: 0.012, vMin: -0.006, vTouch: 0.0008, touchN: 180, ramp: 0.12, tol: 0.005, dwell: 1.5 };
+      let touchT = null, alignedT = 0, peakN = 0, fF = 0, spiked = false, pinT = 0, backoffUntil = 0;
       while (this.sim.time - t0 < 180) {
         const ring = this.sensors.cass?.ring;
         if (!ring) {
@@ -1244,56 +1558,77 @@ export class Autonomy {
           yield; continue;
         }
         lostT = 0;
-        const a = clamp(this.dt / 0.8, 0, 1);
+        const a = clamp(this.dt / 0.45, 0, 1);
         const yNow = ring.lateral * Math.cos(ring.yaw ?? 0) + ring.along * Math.sin(ring.yaw ?? 0); // nose offset from the port axis
         latF = latF == null ? yNow : latF + (yNow - latF) * a;
         vertF = vertF == null ? ring.vertical : vertF + (ring.vertical - vertF) * a;
         yawF = yawF == null ? (ring.yaw ?? 0) : yawF + ((ring.yaw ?? 0) - yawF) * a;
-        if (Math.abs(vertF) > 0.002) R.lift.target = clamp(R.lift.target + vertF * 0.3 * this.dt, RD.carry - 0.4, RD.max);
         const f = this.sim.cargoForces.get(c);
         contactF = f ? f.port : 0;
         peakN = Math.max(peakN, contactF); this._dockPeakN = Math.max(this._dockPeakN || 0, peakN);
-        fF += (contactF - fF) * clamp(this.dt / 0.1, 0, 1);   // 0.1 s low-pass: the controller sees the force, not the contact-solver spikes
+        fF += (contactF - fF) * clamp(this.dt / 0.25, 0, 1);   // 0.25 s low-pass (dt = 0.1 s would pass spikes unfiltered at tau = 0.1 s)
+        // Freeze fine lift trim once in contact when already inside capture tolerance so vertical actuation does not bind into the vestibule wall
+        if (Math.abs(vertF) > (fF > 150 ? 0.0048 : 0.002)) R.lift.target = clamp(R.lift.target + vertF * (fF > 150 ? 0.12 : 0.3) * this.dt, RD.carry - 0.4, RD.max);
         const now = this.sim.time;
         if (contactF > IMP.touchN && touchT == null) touchT = now;
         else if (touchT != null && fF < 0.5 * IMP.touchN) touchT = null;   // contact lost: the ramp re-arms for the next touch
-        // The loaded rover rocks in pitch (~0.2 deg, ~5 s period on the tyres), which bobs the module nose +-3 cm. Like a real
-        // soft-capture system the latches only fire with the ring sensors inside the capture envelope for a settling time.
         const aligned = Math.abs(vertF) < IMP.tol && Math.abs(latF) < IMP.tol;
-        let v;
-        if (ring.along > 0.1) v = 0.06;                                   // closing the gap, no contact possible
-        else {
-          // a rigid port face stops the 15 t module inside one 1/120 s physics step: the peak force is ~ m v 120, so the
-          // speed that reaches the face must be ~1 mm/s for the peak to stay < 3 kN. The impedance law's own 12 mm/s at zero
-          // force is therefore capped by the remaining gap until contact is registered (it is the cap, not the law, that
-          // sets the touch speed)
-          const vGap = Math.max(IMP.vTouch, Math.min(IMP.vMax, 0.5 * Math.max(0, ring.along - 0.01)));   // last 1 cm at the touch speed (0.5 x gap alone allowed 1.5 mm/s at the face)
-          v = clamp(IMP.Kf * (IMP.Ft - fF), IMP.vMin, vGap);
+        // If held off-center in sustained contact, back off a few cm to re-center free of wall friction
+        if (fF > 150 && (Math.abs(vertF) > 0.006 || Math.abs(latF) > 0.006 || (fF > 650 && !aligned))) pinT += this.dt; else pinT = Math.max(0, pinT - 2 * this.dt);
+        if (pinT > 3.5 && backoffUntil <= now) { backoffUntil = now + 3.5; pinT = 0; }
+        const rimR = c.T.shape === 'cylinder' ? c.T.radius : c.T.width / 2;
+        const rimGap = 0.022 + rimR * Math.sin(Math.abs(yawF || 0));
+        let v, vCap = 0.025;
+        if (backoffUntil > now && ring.along < 0.045) {
+          v = -0.012;
+          vCap = 0.025;
+        } else if (ring.along > Math.max(0.08, rimGap + 0.04)) {
+          // Smoothly taper below pitch-lunge speed so heavy payloads do not coast into the vestibule
+          v = clamp(0.12 * (ring.along - rimGap), 0.008, 0.025);
+        } else {
+          // Taper down before first rim touch, pause gently if still off-center before contact, then taper with load so rigid-wall contacts stay < 2.2 kN
+          const preAlign = ring.along > rimGap + 0.01 && fF < 80 && (Math.abs(latF) > 0.006 || Math.abs(vertF) > 0.006);
+          const vContact = fF > 150 ? clamp(0.0009 * (1 - fF / 1200), 0.00025, 0.0009) : (touchT != null || fF > 80 ? 0.0009 : IMP.vTouch);
+          const vGap = preAlign ? 0.002 : ring.along > rimGap ? Math.min(IMP.vMax, 0.22 * (ring.along - rimGap) + 0.0025) : vContact;
+          vCap = vGap;
+          const fCtl = Math.max(fF, 0.5 * contactF);
+          v = clamp(IMP.Kf * (IMP.Ft - fCtl), -0.002, vGap);
           if (touchT != null && now - touchT < IMP.ramp) v *= clamp(1 - (now - touchT) / IMP.ramp, 0, 1);
         }
-        if (contactF > DOCK.maxPushN) v = Math.min(v, IMP.vMin / 2);       // backstop: never keep pushing past the structural limit
-        // same nose-point law as the approach (see above), on the filtered ring readings
-        const P = 0.6, kap = clamp(2 * P * yawF - P * P * (latF + frontOff() * yawF), -1 / 12, 1 / 12);
-        // The law is per metre driven: at 1 mm/s it removes ~0.1 % of the error per second, so the last centimetres of lateral
-        // error never close. Inside 0.12 m, while the nose is still more than 4 mm off the port axis, advance at 0.8 mm/s
-        // (brakes off) and steer on a time basis, as if driving 2 cm/s (yaw rate <= 1.7 mrad/s, i.e. <= 10 mm/s of nose motion); from 0.40 m to 0.12 m it does so at 1 cm/s.
-        if (ring.along > -0.05 && ring.along <= 0.40 && Math.abs(latF) > 0.003 && fF < IMP.touchN) {
-          // capture needs the NOSE inside +-5 mm, so null the nose offset itself: with the drive near standstill d lat/dt = frontOff * yawRate,
-          // hence yawRate = -k lat / frontOff (first order, 10 s time constant). Steering the turning-centre offset instead (the law above)
-          // left the nose 14-28 mm off: a 0.05 deg yaw wander moves a nose 8 m ahead of the centre by 7 mm, and the old branch also stopped steering inside 3 cm.
-          const wDes = clamp(-0.1 * latF / frontOff(), -0.002, 0.002), err = wDes - this.sensors.imu.yawRate;
-          const vA = ring.along > 0.12 ? 0.01 : 0.0008;
-          this._wzI = clamp((this._wzI || 0) + 1.2 * err * this.dt, -0.003, 0.003);
-          this.cmd(vA, 0, wDes + clamp(2.0 * err + this._wzI, -0.003, 0.003));
+        if (contactF > 1600) v = Math.min(v, -0.001); // soft backstop well under the 3 kN limit without kicking off the port
+        const kap = clamp(-0.10 * latF, -1 / 12, 1 / 12);
+        if (ring.along > -0.05 && ring.along <= 0.40 && Math.abs(latF) > 0.0035 && (fF < IMP.touchN || (ring.along > 0.008 && fF < 550 && Math.abs(latF) > 0.0042))) {
+          const wMax = ring.along < 0.05 ? 0.0003 : 0.0006;
+          const wDes = clamp(-0.10 * latF / frontOff(), -wMax, wMax), err = wDes - this.sensors.imu.yawRate;
+          const vA = backoffUntil > now && ring.along < 0.045 ? v : (ring.along > 0.12 ? Math.min(vCap, 0.012) : Math.max(2e-5, Math.min(v, vCap)));
+          this._wzI = clamp((this._wzI || 0) * 0.992 + 0.3 * err * this.dt, -wMax, wMax);
+          this.cmd(vA, 0, clamp(wDes + 1.5 * err + this._wzI, -wMax, wMax));
           v = vA;
-        } else this.cmdCurv(v, Math.sign(v) * kap);
+        } else if ((fF >= 80 || backoffUntil > now || (ring.along > 0.025 && ring.along < 0.15)) && ring.along > 0.010 && Math.abs(yawF) > 0.22 * DEG && Math.abs(latF) <= 0.0042 && fF < 650) {
+          // Square yaw before rim-first impact or during light pinches with tight lateral margin so nose swing does not break alignment
+          const wMax = 0.0005;
+          const wDes = clamp(0.22 * yawF, -wMax, wMax), err = wDes - this.sensors.imu.yawRate;
+          this._wzI = clamp((this._wzI || 0) * 0.992 + 0.5 * err * this.dt, -wMax, wMax);
+          const vHold = Math.abs(v) < 2e-5 ? 2e-5 : v;
+          this.cmd(vHold, 0, clamp(wDes + 2.0 * err + this._wzI, -wMax, wMax));
+        } else {
+          const vHold = Math.abs(v) < 2e-5 ? 2e-5 : v;
+          // Inside 8 cm of contact, do not apply the long-distance tail-swing curvature (it steers opposite yawF at latF ~ 0 and twists the pinned nose off-axis)
+          if (ring.along < 0.08) this.cmd(vHold, 0, 0);
+          else this.cmdCurv(vHold, kap);
+        }
         this.detail = `gap ${ring.along.toFixed(3)} m | lat ${(latF * 1000).toFixed(1)} mm | vert ${(vertF * 1000).toFixed(1)} mm | yaw ${(yawF / DEG).toFixed(2)} deg | contact ${contactF.toFixed(0)} N (F ${fF.toFixed(0)} -> ${IMP.Ft}) v ${(v * 1000).toFixed(1)} mm/s`;
         // dwell: in contact at capture force and aligned, continuously
         if (contactF > 2500 && !spiked && (spiked = true)) this.log(`Dock contact spike ${contactF.toFixed(0)} N: gap ${ring.along.toFixed(3)} m, cmd ${(v * 1000).toFixed(1)} mm/s, filtered F ${fF.toFixed(0)} N, lat ${(latF * 1000).toFixed(1)} mm, wheel speed ${(R.telemetry().fwdSpeed * 1000).toFixed(1)} mm/s`, 'info');
         // (the 1.5 s count runs on the ring alignment alone: the contact force of a rigid port face bounces between 0 and the
         // target, and the latches then fire at the first sample above the soft-capture force once the dwell is over)
-        if (ring.along < 0.03 && aligned) alignedT += this.dt; else alignedT = 0;
-        if (alignedT >= IMP.dwell && ring.along < 0.015 && fF > DOCK.softCaptureN && Math.abs(ring.lateral) < IMP.tol && Math.abs(ring.vertical) < IMP.tol) { captured = true; break; } // the latching sample itself is inside the envelope too
+        // camera noise on the ring reading is ~3 mm: a single sample past the 5 mm limit used to restart the dwell, and with the
+        // luck of the noise stream the dwell never completed (3 failed attempts). Hold the timer inside 1.6x the limit.
+        const captureGapHold = (DOCK.captureGap ?? 0.015) + 0.01;
+        const nearAligned = Math.abs(vertF) < 1.6 * IMP.tol && Math.abs(latF) < 1.6 * IMP.tol;
+        const gapOk = ring.along < (DOCK.captureGap ?? 0.015);   // the bellows rests ~32 mm proud at the capture force, so a fixed 30 mm never held
+        if (gapOk && aligned) alignedT += this.dt; else if (!(ring.along < captureGapHold && nearAligned)) alignedT = 0;
+        if (alignedT >= IMP.dwell && ring.along < (DOCK.captureGap ?? 0.015) && fF > DOCK.softCaptureN && Math.abs(ring.lateral) < IMP.tol && Math.abs(ring.vertical) < IMP.tol) { captured = true; break; } // the latching sample itself is inside the envelope too
         yield;
       }
       this.stop(); R.brake = true;
@@ -1308,16 +1643,19 @@ export class Autonomy {
     this.sim.dockCapture(c, port);
     this.log(`SOFT CAPTURE ${port.name}: lateral ${acc.lateralMm.toFixed(1)} mm, vertical ${acc.verticalMm.toFixed(1)} mm, yaw ${acc.yawDeg.toFixed(2)} deg`, 'ok');
     // berthing sequence: pressure boundary sealed before the module hatch opens
+    // Order: the sealing faces are cleaned while they are still 30 mm apart (soft capture), THEN drawn together. (The
+    // dust-shield pulse and sweep used to come after the seal was compressed, which traps regolith in the seal.)
     const steps = [
-      ['Hard capture: latches retract, seal compressed 30 mm', 1.5],
-      ['Dust-exclusion coupling: spring-loaded metal bellows extending', 2],
-      ['Electrodynamic dust shield pulse + brush-seal sweep of interface', 2.5],
+      ['Electrodynamic dust shield pulse + brush sweep of both seal faces (30 mm apart)', 2.5],
+      ['Hard capture: latches draw the ring in, seal compressed 30 mm', 1.5],
+      ['Dust-exclusion coupling: metal bellows shroud closed around the interface', 2],
       ['Leak check: vestibule pressure-decay test', 3],
       ['Equalising vestibule to 70.3 kPa', 3],
       ['Receiving cradle jacks extending under module', 2.5],
       ['Module hatch opening', 2],
     ];
     this.docking = { port, cargo: c, step: 0, steps: steps.map((s) => s[0]), pressure: 0, leakRate: 0 };
+    let leakTries = 0;
     for (let i = 0; i < steps.length; i++) {
       this.docking.step = i;
       const t1 = this.sim.time;
@@ -1329,10 +1667,29 @@ export class Autonomy {
         this.phase = `M5 Berthing ${port.name}`; this.detail = `${i + 1}/${steps.length} ${steps[i][0]}`;
         this.stop(); yield;
       }
-      if (i === 3) this.log(`Leak check PASS: decay ${this.docking.leakRate.toFixed(4)} kPa/min (limit 0.01)`, 'ok');
+      if (i === 3) {
+        // The hatch interlock: no PASS, no equalisation and no hatch. A fouled seal (fault "seal") leaks; the response is
+        // to back the seal off, clean and re-seat once, and after a second failure to hold with the hatch closed.
+        if (this.faults.seal) this.docking.leakRate = 0.05;
+        if (this.docking.leakRate > 0.01) {
+          this.log(`Leak check FAIL: decay ${this.docking.leakRate.toFixed(4)} kPa/min (limit 0.01) - hatch stays closed`, 'err');
+          this.docking.pressure = 0; leakTries++;
+          if (leakTries >= 2) {
+            yield* this.pauseForOperator(`${port.name}: seal leak after ${leakTries} attempts - module latched, vestibule vented, hatch closed. "clear seal" after service, then "resume" to re-seat and test again`);
+            leakTries = 0;
+          } else {
+            this.log('Backing the seal off 30 mm: repeating the dust-shield pulse and sweep, then re-seating', 'warn');
+            if (this.faults.seal !== 'hard') this.faults.seal = false;   // the second clean clears ordinary dust fouling
+          }
+          i = -1; continue;
+        }
+        this.log(`Leak check PASS: decay ${this.docking.leakRate.toFixed(4)} kPa/min (limit 0.01)`, 'ok');
+        this.docking.leakPassT = this.sim.time;
+      }
     }
     this.sim.openHatch(port);
     this.docking.step = steps.length;
+    this.lastBerth = { port: port.name, cargo: c.id, leakPassT: this.docking.leakPassT, hatchT: this.sim.time, pressure: this.docking.pressure };
     // release and back out
     this.phase = `M5 Release ${c.id}`;
     const rel = R.clampOpen();
@@ -1342,13 +1699,19 @@ export class Autonomy {
     port.occupied = c;
     const ms = this.manifest.find((m) => m.cargo === c); if (ms) ms.status = 'delivered';
     this.metrics.deliveries++;
+    this.slam.setPayload(false);
+    // Pause 2.5D mapping while kneeling and backing out under the berthed module + receiving jacks
+    this.slam.mapping = false;
     this.phase = `M5 Kneel clear of ${c.id}`;
     R.lift.target = ROVER.ride.kneel;
     while (Math.abs(R.lift.pos - ROVER.ride.kneel) > 0.01) { this.stop(); this.detail = `kneeling: ride ${R.lift.pos.toFixed(2)} m (module on the receiving stand)`; yield; }
     R.brake = false;
     this.phase = 'Back out from dock';
     yield* this.backUp(frontOffSafe(T) + ROVER.frame.halfLen + 6);
+    this.phase = `M5 Clear of ${port.name}`;
     R.lift.target = 0; // back to driving ride height
+    while (Math.abs(R.lift.pos) > 0.02) { this.stop(); this.detail = `rising to drive height: ride ${R.lift.pos.toFixed(2)} m`; yield; }
+    this.slam.mapping = true; this.slam.matchSuspended = false; this.slam.lcSuspended = false;
     this.docking = null;
     this.log(`${c.id} DELIVERED to ${port.name}`, 'ok');
     return { ok: true };
@@ -1361,11 +1724,16 @@ export class Autonomy {
     const items = this.manifest.filter((m) => m.status === 'waiting' && m.cargo.state === 'staged');
     const H = WORLD.habitat, P = WORLD.pad;
     const route = Math.hypot(H.x - P.x, H.z - P.z) * 1.15;
+    const surveyNeed = (m) => {
+      const port = this.sim.ports.find((p) => p.id === m.cargo.dest);
+      return port && route >= 300 && !this.provenRoute(m.cargo.initial ?? e, port) ? (route * 2 * R.mass * MOON.g * 0.09 / 0.86 / 3600 + 1100 * (route * 2 / 2.5) / 3600) : 0;
+    };
     const plan = items.map((m) => {
       const v = ROVER.speedLimitLoaded * 0.8;
       const toCargo = Math.hypot(m.cargo.initial.x - e.x, m.cargo.initial.z - e.z) * 1.2;
+      const survWh = surveyNeed(m);
       const eta = (toCargo / 1.2 + route / v + 900) / 60;            // minutes incl. handling
-      const energy = (route * (m.cargo.T.mass + R.mass) * MOON.g * 0.09 / 0.86 + toCargo * R.mass * MOON.g * 0.09 / 0.86) / 3600 + 1.1 * eta * 60 / 3600 * 1000; // Wh
+      const energy = (route * (m.cargo.T.mass + R.mass) * MOON.g * 0.09 / 0.86 + toCargo * R.mass * MOON.g * 0.09 / 0.86) / 3600 + 1.1 * eta * 60 / 3600 * 1000 + survWh; // Wh
       const weight = PRIORITY[m.category] ?? m.priority;
       const score = weight * 100 - eta * 0.8 - energy / 500;
       return { ...m, eta, energy, score, feasible: energy < (R.power.wh - this.reserveSoc * ROVER.battery.capacityWh) };
@@ -1427,7 +1795,8 @@ export class Autonomy {
       // be well outside that: after a short hold it creeps toward the port (never inside the 25 m fix exclusion) until
       // a fix lands, 60 s at most.
       const fix0 = this.slam.lastFix?.t ?? -1, tH = this.sim.time;
-      while (this.sim.time - tH < 60 && (this.slam.lastFix?.t ?? -1) <= fix0) {
+      const fixDone = () => (this.slam.lastFix?.t ?? -1) > fix0 || ((this.slam.lastFixCheck?.t ?? -1) > tH && (this.slam.lastFix?.t ?? -1) > tH - 60);
+      while (this.sim.time - tH < 60 && !fixDone()) {
         const e = this.est(), g = this.portGuess(port), d = Math.hypot(g.x - e.x, g.z - e.z);
         if (this.sim.time - tH < 6 || d < 32) { this.stop(); this.detail = 'survey: holding on the port fiducials for a drift fix'; }
         else { this.cmd(0.6, 0, 0); this.detail = `survey: creeping toward ${port.name} to pick up its fiducials (${d.toFixed(0)} m)`; }
@@ -1448,12 +1817,13 @@ export class Autonomy {
   }
 
   *missionCycle() {
-    const plan = this.logisticsPlan();
-    if (!plan.length) return { ok: false, why: 'no cargo waiting at the pad' };
-    this.log(`Logistics manager order: ${plan.map((p) => `${p.id}[${p.category}]`).join(' -> ')}`, 'ok');
-    for (const item of plan) {
-      const m = this.manifest.find((x) => x.id === item.id);
-      if (m.status !== 'waiting') continue;
+    const plan0 = this.logisticsPlan();
+    if (!plan0.length) return { ok: false, why: 'no cargo waiting at the pad' };
+    this.log(`Logistics manager order: ${plan0.map((p) => `${p.id}[${p.category}]`).join(' -> ')}`, 'ok');
+    while (true) {
+      const plan = this.logisticsPlan();
+      if (!plan.length) break;
+      const item = plan[0];
       const legStart = { t: this.sim.time, d: this.sim.rover.odo.dist, e: this.sim.rover.power.energyUsedWh };
       // the plan's energy check: a leg it marks infeasible starts with a recharge (the dock can't charge a
       // loaded rover, so this is the last chance before the pick-up)
@@ -1467,6 +1837,13 @@ export class Autonomy {
       this.metrics.legs.push({ id: item.id, time: this.sim.time - legStart.t, dist: this.sim.rover.odo.dist - legStart.d, energyWh: this.sim.rover.power.energyUsedWh - legStart.e });
     }
     const S = this.sim.terrain.pad.staging;
+    if (!this.manifest.some((m) => m.status === 'waiting')) {
+      // nothing left to carry: self-park in the power dock (HUNCH "examples of excellence": returns to a garage and recharges)
+      this.phase = 'M6 Self-park at the power dock';
+      const rc = yield* this.chargeAtDock(0.95);
+      if (rc && rc.ok === false) this.log(`Self-park at the power dock failed: ${rc.why}`, 'warn');
+      return { ok: true };
+    }
     this.phase = 'M6 Return for next load';
     yield* this.navTo({ x: S.x, z: S.z, name: 'pad staging (ready for next load)', tol: 3, site: 'STAGING' });
     return { ok: true };
@@ -1480,7 +1857,8 @@ export class Autonomy {
       const habYaw = wrap(Math.atan2(H.nz, -H.nx));
       if (!this.sim.rover.loaded) yield* this.alignYaw(habYaw, 4 * DEG);
       const fix0 = this.slam.lastFix?.t ?? -1, tH = this.sim.time;
-      while (this.sim.time - tH < 60 && (this.slam.lastFix?.t ?? -1) <= fix0) {
+      const fixDone = () => (this.slam.lastFix?.t ?? -1) > fix0 || ((this.slam.lastFixCheck?.t ?? -1) > tH && (this.slam.lastFix?.t ?? -1) > tH - 60);
+      while (this.sim.time - tH < 60 && !fixDone()) {
         const e = this.est(), d = Math.hypot(WORLD.habitat.x - e.x, WORLD.habitat.z - e.z);
         if (this.sim.time - tH < 5 || d < 35) {
           this.stop(); this.detail = 'hab arrival: holding for fiducial fix';

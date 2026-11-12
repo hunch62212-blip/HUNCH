@@ -14,6 +14,7 @@
 // sensor blind, heater off...); 'annunciation' = the failure only changes its sensor channel and the alarm
 // (the physical consequence is not modelled). Listed in the catalogue so nothing is overstated.
 import { ROVER, THERMAL, KEEPALIVE, FAILURES, RADIATOR, MOON } from './config.js';
+import { NODES } from './thermal.js';
 
 const WN = ROVER.corners.map((c) => c[2]); // FL FR ML MR RL RR (wheel n = index n-1; odd n = port side)
 const KNEEL = ROVER.ride.kneel;
@@ -36,9 +37,9 @@ export const BAYS = {
   MCR: { name: 'Bay MC-R - starboard motor controllers', where: 'starboard tub wall, between the front and middle wheels', pos: [1.95, 1.9, 2.4], door: 'side door, 1.6 x 1.0 m, 4 quarter-turn fasteners' },
   BTL: { name: 'Bay BT-L - battery strings 1-2', where: 'port tub wall, between the middle and rear wheels', pos: [-1.95, 1.7, -2.4], door: 'side door; string drawers roll out on rails onto the dock exchange cart' },
   BTR: { name: 'Bay BT-R - battery strings 3-4', where: 'starboard tub wall, between the middle and rear wheels', pos: [-1.95, 1.7, 2.4], door: 'side door; string drawers roll out on rails onto the dock exchange cart' },
-  SNS: { name: 'Sensor bar', where: 'front of the avionics pod (LiDAR, camera, sun sensor heads)', pos: [4.2, 4.6, 0], workH: 1.6, door: 'the bar pivots forward and down on a service hinge (pin release, gas strut) to 1.6 m; heads on kinematic quick-release mounts, one connector each' },
-  RAD: { name: 'Radiators', where: 'vertical louvered panels on the port and starboard tub walls, under the deck overhang', pos: [0, RADIATOR.y, RADIATOR.z], workH: 2.0, door: 'louver actuator boxes at the lower front corner of each panel, 2 fasteners' },
-  CRD: { name: 'Cradle', where: 'ring-clamp jaw drives and load cells at the two V-saddles', pos: [0, 4.6, 0], workH: 1.5, door: 'module off: from the fold-out deck walkway (rear ladder); load cells sit in the saddle feet, jaw drives are dock-gantry work' },
+  SNS: { name: 'Sensor bar', where: 'front of the avionics pod (LiDAR, camera, sun sensor heads)', pos: [4.2, 4.6, 0], workH: 1.6, door: 'the bar pivots forward and down on a service hinge (titanium torsion spring + positive lock pin, no freezing gas struts) to 1.6 m; heads on kinematic quick-release mounts, one connector each' },
+  RAD: { name: 'Radiators', where: 'zenith-shielded / louvered panels paired with OSR & sunshades on the tub', pos: [0, RADIATOR.y, RADIATOR.z], workH: 2.0, door: 'louver actuator boxes at the lower front corner of each panel, 2 fasteners' },
+  CRD: { name: 'Cradle', where: 'ring-clamp jaw drives and load cells at the two V-saddles', pos: [0, 4.6, 0], workH: 1.5, door: 'module off on dock service gantry only (no 4.6 m open EVA ladder): load cells sit in the saddle feet, jaw drives are gantry-accessed' },
   WHL: { name: 'Wheel end', where: 'hub of each wheel (motor, gearbox, spring brake, resolver, declutch)', pos: [0, 1.06, 0], door: 'strut lifts the corner clear (3-legged stance); 12-bolt hub flange' },
   BLY: { name: 'Belly', where: 'dock charge coupler under the tub centre', pos: [0, 1.0, 0], door: 'reached from the dock service pit' },
 };
@@ -347,7 +348,7 @@ export const MODES = [
     detect: 'loaded: one cell reads < 40 % of the others for 2 s; unloaded: zero-offset BIT', persist: 2,
     response: 'cargo-shift detection and tip margin use the strut-pressure load estimate instead',
     operator: ['Swap the load cell with the cradle unloaded (field 20 min)'],
-    sig: (h, n) => { if (!h.active.has(`lcell:${n}`)) return null; return h.sim.rover.loaded ? `cell ${n} 0.0 kN vs others ${(h.sim.rover.lift.cargo.T.mass * MOON.g / 4000).toFixed(1)} kN` : h.bitNow ? `BIT: cell ${n} zero offset out of range` : null; },
+    sig: (h, n) => { if (!h.active.has(`lcell:${n}`)) return null; const kn = h.ch.loadCellKN(n); return h.sim.rover.loaded ? `cell ${n} ${kn.toFixed(1)} kN vs nominal ${(h.sim.rover.lift.cargo.T.mass * MOON.g / 4000).toFixed(1)} kN` : h.bitNow ? `BIT: cell ${n} zero offset out of range` : null; },
   },
   // ---- safety / dock ----
   {
@@ -417,6 +418,7 @@ export class Health {
     this.bitT = FAILURES.bitPeriodS; this.bitNow = false;
     this.lidarRange0 = sim.sensors.lidarCfg.range;
     this.outStrings = new Set();
+    this.degraded = new Set(); // failed primary heads/channels awaiting swap after cold-spare failover
     this.selected = null;
     this._holdTag = 0;
     const self = this;
@@ -428,6 +430,7 @@ export class Health {
       bemfW: (n) => (self.ch.mcAlive(n) ? W(self, n).omega + 0.02 * self.noise() : 0),
       windT: (n) => W(self, n).temp + 0.3 * self.noise(),
       strutRatio: (n) => { const f = self.active.get(`strut:${n}`); return (f ? f.p : 1) + 0.01 * self.noise(); },
+      loadCellKN: (n) => (self.active.has(`lcell:${n}`) ? 0 : (self.sim.rover.loaded ? self.sim.rover.lift.cargo.T.mass * MOON.g / 4000 : 0) + 0.05 * self.noise()),
       stringDev: (n) => (self.outStrings.has(n) && (self.active.has(`bat:${n}`)) ? -0.045 : 0.003 * self.noise()),
       insulationKOhm: () => (self.active.has('imd') ? 40 : 2500) * (1 + 0.02 * self.noise()),
       gyro: (x) => { const t = self.sim.sensors.imu.yawRate - (self.sim.sensors.gyroBias || 0) - (self.sim.sensors.imuFaultBias || 0); const bias = self.isFailed('imu', x) ? 0.012 : 0; return t + bias + (x === 'C' ? 0.0008 : 0.0003) * self.noise(); },
@@ -438,6 +441,7 @@ export class Health {
   key(id, n) { return n == null ? id : `${id}:${n}`; }
   isFailed(id, n) { return this.active.has(this.key(id, n)); }
   isOut(n) { return this.outStrings.has(n); }
+  isStrutKneelInhibited() { for (const f of this.active.values()) if (f.id === 'strut' && f.p < 0.65) return true; return false; }
   after(s, fn) { this.timers.push({ t: this.sim.time + s, fn }); }
   log(m, l = 'info') { this.sim.log(m, l); }
 
@@ -473,7 +477,7 @@ export class Health {
       const id = what === 'lidar' ? 'lidar' : 'cam';
       if (!this.alarms.has(id)) return;
       if (this.rngOut() < 0.5) { fix(); this.active.delete(id); this.alarms.delete(id); this.log(`FDIR: ${what} recovered after power cycle (latch-up cleared)`, 'ok'); }
-      else if (what === 'lidar' && this.sim.sensors.switchLidar()) { this.active.delete(id); this.alarms.delete(id); this.log('FDIR: LiDAR head A hard failure after power cycle - switched to the starboard head B (cold spare). Replace head A at the next service (field 10 min).', 'warn'); }
+      else if (what === 'lidar' && this.sim.sensors.switchLidar()) { this.active.delete(id); this.alarms.delete(id); this.degraded.add('LID:A'); this.history.push({ t: this.sim.time, ev: 'failover', k: id, unit: 'head A -> B' }); this.log('FDIR: LiDAR head A hard failure after power cycle - switched to the starboard head B (cold spare). Replace head A at the next service (field 10 min).', 'warn'); }
       else this.log(`FDIR: ${what} hard failure after power cycle - replace the head (field 10 min). Autonomy degraded.`, 'err');
     });
   }
@@ -526,7 +530,7 @@ export class Health {
     this.redund = { fc: 'A', imu: 'A', com: 'P', htr: 'A' };
     this.sim.sensors.imuFaultBias = 0; this.sim.sensors.faults.sun = false; this.sim.sensors.camRangeK = 1;
     this.sim.sensors.lidarCfg.range = this.lidarRange0;
-    this.outStrings.clear(); this.sim.rover.power.capK = 1;
+    this.outStrings.clear(); this.degraded.clear(); this.sim.rover.power.capK = 1;
     this.fx.coupler = this.fx.estopLoop = false; this.th.stuck = {};
     this.sim.rover.lift.clampSlow = 1;
     for (const w of this.sim.rover.wheels) { w.extraHeat = 0; w.declutched = false; }
@@ -611,7 +615,7 @@ export class Health {
     const n = g[2] == null ? m.inst[0] : typeof m.inst[0] === 'number' ? Number(g[2]) : g[2].toUpperCase();
     return this.key(m.id, n);
   }
-  atDock() { const PD = this.sim.powerDock, p = this.sim.rover.pose(), e = PD.layout.entry; return PD.roverOnPad() || Math.hypot(p.x - e.x, p.z - e.z) < 80; }
+  atDock() { const PD = this.sim.powerDock, p = this.sim.rover.pose(), pad = PD.layout.pad; return PD.roverOnPad() || Math.hypot(p.x - pad.x, p.z - pad.z) < 12; }
   _beginJob(k) {
     const a = this.alarms.get(k); if (!a) { this._next(); return; }
     const m = MODE[a.id], L = LRUS[m.lru];
@@ -639,8 +643,13 @@ export class Health {
     if (frac >= 1) {
       const m = MODE[j.id];
       if (j.src) this.spares[j.src][m.lru]--;
+      const k0 = R.power.capK ?? 1;
+      const socBefore = k0 > 0 ? Math.min(1, R.power.wh / (ROVER.battery.capacityWh * k0)) : 0.8;
       this._clearUnit(j.id, j.n);
       if (j.id === 'seize') { this._clearUnit('mc', j.n); }
+      if ((j.id === 'bat' || j.id === 'runaway') && (R.power.capK ?? 1) > k0) {
+        R.power.wh = Math.min(ROVER.battery.capacityWh * R.power.capK, R.power.wh + 0.25 * ROVER.battery.capacityWh * Math.max(0.75, socBefore));
+      }
       this.stats.repaired++;
       this.history.push({ t: this.sim.time, ev: 'repair', k: j.k });
       this.log(`REPAIR complete: ${unitLabel(m, j.n)} - BIT pass, alarm cleared${j.src ? ` (${j.src} ${m.lru} spares left: ${this.spares[j.src][m.lru]})` : ''}`, 'ok');
@@ -661,9 +670,16 @@ export class Health {
     const survival = !R.powered;
     const V = T.vault, B = T.battery;
     const htrOK = !this.isFailed('htr', this.redund.htr);
-    // vault
-    // thermal brain: SHED LOAD (avionics low-power), louver override (PRE-COOL open / CONSERVE closed); scenario heat
-    const qV = (R.powered ? ROVER.avionicsW + ROVER.lidarW + ROVER.cameraW + ROVER.commsW : 60) * (tc?.vaultLoadK ?? 1) + (TE?.fx.vaultExtraW || 0);
+    // vault: couple instrument TEC reject heat + mount conduction into the avionics cold plate
+    let mountQ = 0;
+    if (TE) {
+      for (const k of ['lidar', 'camera']) {
+        const s = TE.n[k], N = NODES[k];
+        if (!s || !N) continue;
+        mountQ += (s.tecQ > 0 ? s.tecQ * (1 + 1 / (N.cop || 0.6)) : 0) - N.G * (th.Tv - s.T);
+      }
+    }
+    const qV = (R.powered ? ROVER.avionicsW + ROVER.lidarW + ROVER.cameraW + ROVER.commsW : 60) * (tc?.vaultLoadK ?? 1) + (TE?.fx.vaultExtraW || 0) + mountQ;
     th.louverCmd = tc?.louver != null ? clamp(tc.louver, V.louverMin, 1) : clamp((th.Tv - V.louverOpenC) / (V.louverFullC - V.louverOpenC), V.louverMin, 1);
     let rej = 0;
     for (const s of ['L', 'R']) {
@@ -715,8 +731,9 @@ export class Health {
     const a = this.array, R = this.sim.rover, v = R.body.linvel();
     if (on) {
       if (Math.hypot(v.x, v.z) > 0.05) { this.log('Keep-alive array: deploy refused while moving', 'warn'); return; }
+      a.pending = false;
       if (a.state === 'stowed' || a.state === 'stowing') { a.state = 'deploying'; R.brake = true; this.log(`Keep-alive array deploying (${KEEPALIVE.area} m2 on a ${KEEPALIVE.mastH} m mast, ${KEEPALIVE.deployS} s)`, 'info'); }
-    } else if (a.state !== 'stowed') { a.state = 'stowing'; this.log('Keep-alive array stowing', 'info'); }
+    } else { a.pending = false; if (a.state !== 'stowed') { a.state = 'stowing'; this.log('Keep-alive array stowing', 'info'); } }
   }
   _array(dt) {
     const a = this.array, R = this.sim.rover, sun = this.sim.sunDir, K = KEEPALIVE;
@@ -725,6 +742,18 @@ export class Health {
     if (a.state === 'stowing') this.hold(a.k * K.deployS + 0.5, 'stowing keep-alive array');
     if (a.state === 'deploying') { a.k = Math.min(1, a.k + dt / K.deployS); if (a.k >= 1) { a.state = 'deployed'; this.log('Keep-alive array deployed, tracking the sun', 'ok'); } }
     if (a.state === 'stowing') { a.k = Math.max(0, a.k - dt / K.deployS); if (a.k <= 0) { a.state = 'stowed'; this.log('Keep-alive array stowed', 'info'); } }
+    // Survival mode asks for the array once, at entry. Entered while still rolling (battery ran down mid-drive) the
+    // deploy was refused and never asked for again, so the rover sat with the array stowed until the pack died.
+    // Ask again as soon as it has stopped in sunlight.
+    // (pending is cleared by a successful deploy and by an operator stow, so "array stow" still wins.)
+    if (this.survival.on && a.pending && a.state === 'stowed' && R.power.sunlit && sun.y > 0) { const v = R.body.linvel(); if (Math.hypot(v.x, v.z) <= 0.05) this.deployArray(true); }
+    // Solar + battery (HUNCH requirement): when parked idle in sunlight the rover opens the array and trickle-charges
+    // (opt-in: sim.idleSolar, on in the browser). It stows by itself before any drive command (above).
+    if (this.sim.idleSolar && a.state === 'stowed' && !this.survival.on && !this.sim.autonomy.gen && R.powered && !wantsMove && R.power.sunlit && sun.y > 0.05) {
+      const v = R.body.linvel();
+      a.idleT = (Math.hypot(v.x, v.z) <= 0.05 ? (a.idleT || 0) + dt : 0);
+      if (a.idleT > 20) { a.idleT = 0; this.deployArray(true); }
+    } else a.idleT = 0;
     a.yaw = Math.atan2(-sun.z, sun.x);
     a.W = a.state === 'deployed' ? K.area * K.efficiency * MOON.solarConstant * Math.sqrt(Math.max(0, 1 - sun.y * sun.y)) * R.power.sunlit * (sun.y > -0.01 ? 1 : 0) : 0;
     R.power.auxSolarW = a.W;
@@ -736,13 +765,21 @@ export class Health {
     if (on && !S.on) {
       S.on = true; S.t0 = this.sim.time; S.why = why;
       R.cmd.vx = R.cmd.vz = R.cmd.wz = 0; R.brake = true; R.powered = false;
+      S.pausedMission = !!A.gen && !A.paused;   // a mission the operator had already paused is not ours to resume
       if (A.gen) { A.paused = true; A.mode = 'MANUAL'; }
       this.log(`SURVIVAL MODE (${why}): drive, LiDAR and camera off; FC-${this.redund.fc} at minimum, heaters to survival set points, beacon on`, 'err');
+      this.array.pending = true;                 // wanted for as long as survival lasts: at sunrise too, not only now
       if (R.power.sunlit && this.sim.sunDir.y > 0) this.deployArray(true);
     } else if (!on && S.on) {
       S.on = false;
       this.log('Leaving survival mode: power-on self-test', 'warn');
       if (!R.estop && !this.canArm()) this.sim.startUp();
+      // A mission that survival mode paused for a low battery picks up where it stopped once the self-test has armed
+      // the drive (it used to wait for an operator "resume", which never comes during a comms loss).
+      if (/battery/.test(S.why) && S.pausedMission && A.gen && A.paused) this.after(8, () => {
+        if (S.on || !A.gen || !A.paused || R.estop || !R.powered) return;
+        this.log(`Battery back above ${(FAILURES.survivalExitSoc * 100).toFixed(0)} %: resuming the paused mission`, 'ok'); A.resume();
+      });
     }
   }
   _survivalAuto() {
