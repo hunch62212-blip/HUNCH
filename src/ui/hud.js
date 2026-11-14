@@ -566,7 +566,7 @@ export class HUD {
     }
     ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(W / 2 - 20, H / 2); ctx.lineTo(W / 2 + 20, H / 2); ctx.moveTo(W / 2, H / 2 - 20); ctx.lineTo(W / 2, H / 2 + 20); ctx.stroke();
-    ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '16px monospace'; ctx.fillText(`CAM-1 · 70° HFOV · ${new Date(this.sim.time * 1000).toISOString().substr(11, 8)}`, 10, 22);
+    ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '16px monospace'; ctx.fillText(`CAM-1 · 70° HFOV · ${new Date(this.sim.time * 1000).toISOString().slice(11, 19)}`, 10, 22);
     const c = S.cass;
     $('#camInfo').textContent = `fiducials ${S.detections.length} · rocks ${S.rockDetections.length}` + (c && c.valid ? ` · CASS lat ${(c.lateral * 100).toFixed(1)} cm yaw ${(c.yaw * 57.3).toFixed(2)}°` : '') + (c && c.ring ? ` · dock ring ${c.ring.along.toFixed(2)} m` : '');
   }

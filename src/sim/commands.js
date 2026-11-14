@@ -110,7 +110,7 @@ export function runCommand(sim, ui, line, _uplinked = false) {
         cycle: ['Mission 6: Full logistics cycle', () => A.missionCycle()],
       };
       const e = map[m];
-      if (!e) { say('usage: mission <1-6|cycle> [A|B]', 'warn'); break; }
+      if (!e) { say('usage: mission <1-6|cycle> [A|B|C]', 'warn'); break; }
       if (A.gen) A.abort('new mission');
       A.start(e[0], e[1]());
       break;
