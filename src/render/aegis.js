@@ -7,10 +7,18 @@ import { ROVER, K } from '../sim/config.js';
 import { buildAegis, loadTeamModels } from './teamModels.js';
 import { MODE, bayOf, partPos } from '../sim/health.js';
 import { mergeStatic } from './mergeStatic.js';
+import { heightAt } from '../sim/terrain.js';
 import { KEEPALIVE, FENDER, RADIATOR } from '../sim/config.js';
 
 // sim bogie index (FL=0, FR=1, ML=2, MR=3, RL=4, RR=5 where L=-z, R=+z) for fusion_rover wheelGroups order ([0..2] at +z, [3..5] at -z)
 const MODEL_TO_SIM = [1, 3, 5, 0, 2, 4];
+
+// Ride height the wheels are drawn at, model metres: the commanded ride minus the mean of d (d[i] = (commanded strut length - actual) / K),
+// i.e. the mean strut extension the physics has, limited to the model's wheel-arch range. Exported for tests/v17_suite.mjs.
+export const DRAWN_RIDE_RANGE = [-0.045, 0.065];
+export function drawnRide(rideOffset, d) {
+  return Math.max(DRAWN_RIDE_RANGE[0], Math.min(DRAWN_RIDE_RANGE[1], rideOffset / K - (d[0] + d[1] + d[2] + d[3] + d[4] + d[5]) / 6));
+}
 
 export class AegisModel {
   constructor(scene) {
@@ -203,12 +211,32 @@ export class AegisModel {
     const cl = (v, m) => Math.max(-m, Math.min(m, v));
     const rho = cl((posZ.rho - negZ.rho) / 2, RB.rhoMax);
     this.bogie.pose(rho, cl(posZ.beta, RB.betaMax), cl(negZ.beta, RB.betaMax));
-    const ride = cl(rover.rideOffset / K, -0.045, 0.065);
+    // Ride height as the struts have it, in model metres, limited to the wheel-arch range -0.045 .. +0.065. Two faults fixed here (v1.7.0):
+    //  1. this line was cl(rover.rideOffset / K, -0.045, 0.065), but cl(v, m) clamps to +-m and ignores a third argument, so it
+    //     returned max(0.045, min(-0.045, v)) = +0.045 whatever the ride height was. The wheels were always drawn 0.045 x K = 0.73 m
+    //     below their nominal position: 0.73 m into the ground at ride 0, 1.39 m at full kneel, and the strut graphics never moved.
+    //  2. it used the COMMANDED ride height; the body follows the command with a lag and sags under a new load. The mean of d is
+    //     (commanded - actual) / K, so subtracting it gives the actual mean strut extension, which is what the wheels must show.
+    const ride = drawnRide(rover.rideOffset, d);
     for (let i = 0; i < 6; i++) {
       const wg = this.wheelGroups[i], w = rover.wheels[MODEL_TO_SIM[i]];
       wg.group.position.y -= ride;           // body rises on the struts, wheels stay down (kneel+bump wheel-arch limit preserved)
       wg.strut.setLength(ride);
       this.tires[i].rotation.y = -w.angle;
+    }
+    // Terrain clamp, the second line after the strut-true ride height above: whatever is left (rocker-bogie pose limits, the pose's
+    // small-angle kinematics, tyre sinkage) must not draw a tread below the heightfield. The hub's world position is compared with
+    // the ground under it and lifted along the body's up axis if needed. The fenders are children of the wheel group
+    // (buildSurvivalHardware), so they ride with the wheel. this.terrainClamp = false switches it off for measurements.
+    const T = this.terrainClamp === false ? null : rover.sim?.terrain;
+    if (T) {
+      const q = this.root.quaternion, upY = Math.max(0.5, 1 - 2 * (q.x * q.x + q.z * q.z)), v = this._hubV || (this._hubV = new THREE.Vector3());
+      for (let i = 0; i < 6; i++) {
+        const g = this.wheelGroups[i].group;
+        v.set(g.position.x * K, g.position.y * K, g.position.z * K).applyQuaternion(q).add(this.root.position);
+        const minHubY = heightAt(T, v.x, v.z) + ROVER.wheel.radius;   // = (groundY + wheel radius) in world metres
+        if (v.y < minHubY) g.position.y += (minHubY - v.y) / (K * upY);
+      }
     }
     // ring jaws
     const Lf = rover.lift;

@@ -20,9 +20,11 @@ export class Sim {
     Object.assign(this, w);
     this.time = 0;
     this.timeScale = 1;
+    // (v1.7.0: minScale is PHYS.railsMinScale = 5, was 50. Full physics tops out near 3x real time on the team Mac mini, so 5x, 10x and
+    // 20x could never be reached by stepping the physics faster; the cruise legs now use the same rails the 50x mode always used.)
     // Transit warp: at >= minScale the long autonomous cruise legs run kinematically (Rover.railsPlace) in H-second
     // steps; pickup, docking, charging, pivots, recoveries and anything the rails check refuses stay on full physics.
-    this.warp = { enabled: opts.warp ?? true, minScale: 50, H: 0.5, active: false, steps: 0, simS: 0, lastScanD: 0, lastStreamD: 0 };
+    this.warp = { enabled: opts.warp ?? true, minScale: PHYS.railsMinScale, H: 0.5, active: false, steps: 0, simS: 0, lastScanD: 0, lastStreamD: 0 };
     this.warping = false;   // true only inside warpStep, while the autonomy tick runs
     this.actualRate = 0;    // achieved sim seconds per wall second (EMA), for the HUD
     this.paused = false;
@@ -153,16 +155,24 @@ export class Sim {
   }
   _precisionPost(dt) {
     for (const [b, s] of this._shadow) {
-      const t = b.translation(), v = b.linvel();
+      const t = b.translation(), vc = b.linvel(), w = b.angvel(), c = b.worldCom();
+      // velocity of the body ORIGIN (translation() is the origin, linvel() the centre of mass 2.25 m above it): v + w x r
+      const rx = t.x - c.x, ry = t.y - c.y, rz = t.z - c.z;
+      const v = { x: vc.x + w.y * rz - w.z * ry, y: vc.y + w.z * rx - w.x * rz, z: vc.z + w.x * ry - w.y * rx };
       // solver displacement beyond the plain v*dt (contact push-out) is taken as-is
       const ex = (t.x - s.px) - v.x * dt, ey = (t.y - s.py) - v.y * dt, ez = (t.z - s.pz) - v.z * dt;
       if (Math.abs(ex) > 2e-3 || Math.abs(ey) > 2e-3 || Math.abs(ez) > 2e-3) { s.x = t.x; s.y = t.y; s.z = t.z; continue; }
       s.x += v.x * dt; s.y += v.y * dt; s.z += v.z * dt;
-      // Only correct at creep speeds, where the rounding swallows the motion (the reason this guard exists). Re-setting
-      // the position after every step at driving speed left the rover's broadphase proxy stale: it never paired with a
-      // rock streamed in nearby, and the chassis drove through a 1.4 m boulder (tests/rock_climb.mjs on the 2.5 km map;
-      // ray and wheel queries still saw the rock). Above 0.1 m/s one ulp is < 1.5 % of a step and unbiased.
-      if (Math.hypot(v.x, v.z) > 0.1) { s.x = t.x; s.y = t.y; s.z = t.z; continue; }
+      // Correct only up to PHYS.posGuardMaxSpeed. What is being corrected (measured, tests/scratch/dbg_quant.mjs): the solver moves
+      // a body in steps of 2^-11 m = 0.49 mm per axis, 8 float32 ulps at these coordinates, so each step's displacement is v dt
+      // rounded to that grid: up to 0.03 m/s of error per axis at ANY speed. At 0.12 m/s commanded straight the rover travelled
+      // 6 deg to the left of its heading at 0.131 m/s; -4 deg at 0.3 m/s; under 1 deg above ~2.5 m/s.
+      // History: the limit was 0.1 m/s ("above it one ulp is < 1.5 % of a step and unbiased": true of one ulp, but the grid is 8).
+      // It was lowered to that after re-setting the position every step at driving speed left the rover's broadphase proxy stale and
+      // the chassis drove through a 1.4 m boulder (tests/rock_climb.mjs). With the fresh-rock refresh in stepOnce that no longer
+      // happens: tests/scratch/dbg_rock_shadow.mjs blocks at 0.3 and 0.6 m/s with the guard always on, and rock_climb runs at
+      // 0.6 m/s, inside the new limit. Above the limit the rounding is left alone (it is small against the motion there).
+      if (Math.hypot(vc.x, vc.z) > PHYS.posGuardMaxSpeed) { s.x = t.x; s.y = t.y; s.z = t.z; continue; }
       if (s.x !== t.x || s.y !== t.y || s.z !== t.z) b.setTranslation({ x: s.x, y: s.y, z: s.z }, false);
     }
   }
@@ -360,11 +370,13 @@ export class Sim {
     this.streamRocks([this.rover.pose()]);
     this._shadow = null; // float64 position shadows restart from the solver's positions
   }
-  // one step of whichever kind applies; returns the sim seconds advanced
-  stepAuto() {
+  // one step of whichever kind applies; returns the sim seconds advanced. owed (optional): sim seconds the caller still has to
+  // pay this frame; a rails step is sized to it (between one physics step and warp.H) so that at 5-20x the rover moves every
+  // frame instead of jumping warp.H = 0.5 s of travel every few frames.
+  stepAuto(owed) {
     let skipAutonomy = false;
     if (this.warpWanted() && this.autonomy.railsOk) {
-      const r = this.warpStep();
+      const r = this.warpStep(owed == null ? this.warp.H : Math.max(PHYS.dt, Math.min(this.warp.H, owed)));
       if (r.dt > 0) return r.dt;
       skipAutonomy = r.autoRan;
     }
@@ -377,10 +389,17 @@ export class Sim {
   advance(realDt, budgetMs = 20) {
     if (this.paused) { this.actualRate = 0; return 0; }
     this._acc = (this._acc || 0) + Math.min(realDt, 0.1) * this.timeScale;
+    // The budget grows with the time scale, but only to PHYS.warpBudgetMaxMs (50 ms): beyond that the frame rate collapses (160 ms
+    // of physics per frame is 6 frames a second) for a few per cent more sim time. Sim speed above what the CPU can step comes from
+    // the rails (stepAuto), not from a longer frame.
+    const scale = Math.max(1, this.timeScale);
+    const effectiveBudget = Math.min(budgetMs * Math.min(scale, 2.5), PHYS.warpBudgetMaxMs);
+    const effectiveMaxSteps = Math.min(PHYS.maxSubSteps * scale, PHYS.warpMaxSteps);
     const t0 = performance.now(), simT0 = this.time;
+    let steps = 0;
     while (this._acc >= PHYS.dt) {
-      this._acc -= this.stepAuto();
-      if (performance.now() - t0 > budgetMs) break;
+      this._acc -= this.stepAuto(this._acc);
+      if (++steps >= effectiveMaxSteps || performance.now() - t0 > effectiveBudget) break;
     }
     // carry a little backlog between frames; beyond that the CPU cannot keep up with the time scale
     const cap = Math.max(0.25, this.timeScale * 0.05);

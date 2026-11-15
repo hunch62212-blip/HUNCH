@@ -226,3 +226,53 @@ select.btn { padding: 3px 4px; }
   #overrideBanner { top: 100px; width: calc(100% - 24px); text-align: center; }
   #stick { left: auto; right: 12px; margin-left: 0; bottom: calc(24% + 64px); width: 100px; height: 100px; }
 }
+
+/* ---- three-layer HUD (hud.js initLayers): #hud[data-layer] = 0 clean | 1 essential (default) | 2 full engineering ---- */
+/* layer 0: only the 3D view, a faint menu button and the latched-E-STOP banner (Esc still stops the rover) */
+#hudMenu { display: none; position: absolute; top: 10px; right: 10px; width: 34px; height: 30px; padding: 0; font-size: 16px; opacity: 0.35; pointer-events: auto; }
+#hudMenu:hover { opacity: 1; }
+#hud[data-layer="0"] > *:not(#hudMenu):not(#estopBanner) { display: none !important; }
+#hud[data-layer="0"] #hudMenu { display: block; }
+/* layer 1: the engineering panels and the top bar's engineering controls are hidden, the essential widgets shown */
+#hud[data-layer="1"] :is(#vehicle, #mapPanel, #camPanel, #missions, #console, #autoPanel, #instPanel, #thermPanel, #dockPanel, #manifestPanel, #healthPanel, #helpPanel, #topbar .eng) { display: none !important; }
+#hud[data-layer="1"] #topbar { padding-right: 196px; }
+/* layer 2: everything that already existed; the essential widgets would only repeat it */
+#hud[data-layer="2"] #essential { display: none !important; }
+#layerBtns { gap: 4px; }
+#quickMission .btn { white-space: nowrap; }
+@media (max-width: 1500px) { #hud[data-layer="1"] #topbar .brandx { display: none; } }
+
+#essential { position: absolute; inset: 0; pointer-events: none; }
+#essential .essw, #eAlarm { position: absolute; padding: 8px 10px; }
+#eDrive { top: calc(var(--tb, 44px) + 20px); left: 10px; width: 250px; }
+#ePower { top: calc(var(--tb, 44px) + 20px + 112px); left: 10px; width: 250px; }
+#eMap { top: calc(var(--tb, 44px) + 20px + 40px); right: 10px; padding: 4px; }
+#miniMap { width: 200px; height: 200px; display: block; border-radius: 4px; }
+#eGuide { left: 50%; bottom: 14px; transform: translateX(-50%); min-width: 360px; max-width: min(720px, calc(100vw - 40px)); text-align: center; }
+#eAlarm { left: 50%; top: calc(var(--tb, 44px) + 66px); transform: translateX(-50%); display: none; color: var(--warn); font-weight: 600; border-color: rgba(255, 176, 32, 0.55) !important; max-width: min(720px, calc(100vw - 40px)); text-align: center; }
+#eAlarm.crit { color: #fff; background: rgba(160, 24, 12, 0.85) !important; border-color: rgba(255, 77, 58, 0.8) !important; }
+.eRow { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; margin: 2px 0; }
+.eRow .k { color: var(--dim); }
+.eRow.eTime { margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--line); }
+.eBig { font-size: 30px; font-weight: 600; line-height: 1; }
+.eUnit { color: var(--dim); margin-right: auto; }
+.eSub { color: var(--dim); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.eGuideMain { font-weight: 700; font-size: 14px; letter-spacing: 0.04em; }
+.rpmBadge { padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; border: 1px solid var(--line); background: var(--bg2); }
+.rpmBadge.crawl { color: var(--accent); border-color: rgba(53, 208, 255, 0.5); }
+.rpmBadge.cruise { color: var(--text); }
+.rpmBadge.fast { color: var(--ok); border-color: rgba(61, 220, 132, 0.5); }
+.rpmBadge.turbo { color: var(--warn); border-color: rgba(255, 176, 32, 0.6); }
+.rpmBadge.manual { color: #b9a4ff; border-color: rgba(185, 164, 255, 0.5); }
+
+/* time-warp badge: top-right, under the top bar (layers 1 and 2; layer 0 hides it with the rest of the HUD) */
+.warp-badge { position: absolute; top: calc(var(--tb, 44px) + 20px); right: 10px; display: none; padding: 5px 12px; border-radius: 999px; font-size: 12px; font-weight: 800; letter-spacing: 0.1em; color: #ffd28a; background: rgba(255, 176, 32, 0.16); border: 1px solid #ffb020; pointer-events: none; z-index: 2; }
+.warp-badge.paused { color: var(--err); background: rgba(255, 77, 58, 0.16); border-color: var(--err); }
+.warp-badge.slow { color: var(--accent); background: rgba(53, 208, 255, 0.14); border-color: var(--accent); }
+#hud[data-layer="2"] .warp-badge { right: 360px; } /* the engineering map panel owns the top-right column */
+@media (max-width: 1300px) { #hud[data-layer="2"] .warp-badge { right: 10px; top: calc(var(--tb, 44px) + 4px); } }
+@media (max-width: 760px), (max-height: 520px) {
+  #eDrive { width: 190px; } #ePower { width: 190px; top: calc(var(--tb, 40px) + 12px + 100px); }
+  #eMap { top: calc(var(--tb, 40px) + 12px + 36px); } #miniMap { width: 130px; height: 130px; }
+  #eGuide { min-width: 0; width: calc(100% - 24px); bottom: 8px; }
+}

@@ -46,6 +46,7 @@ export class HUD {
     this.camOverlay.width = 636; this.camOverlay.height = 476;
     this.history = []; this.hIdx = -1;
     this.bind();
+    this.initLayers();
     this.fillManifest();
     sim.on('log', (e) => this.addLog(e));
     for (const e of sim.logs) this.addLog(e);
@@ -75,24 +76,50 @@ export class HUD {
       <span class="pill mono" id="clock">MET 00:00:00</span>
       <span class="pill" id="pMode">MANUAL</span>
       <span class="pill" id="pDrive">ARMED</span>
-      <span class="pill" id="pComms">COMMS</span>
-      <span class="pill" id="pLidar">LIDAR</span>
-      <span class="pill" id="pCam">CAM</span>
-      <span class="pill" id="pSteer">SKID STEER</span>
-      <button class="pill" id="pHealth" title="Vehicle health / FDIR panel">HEALTH</button>
-      <button class="pill" id="pTherm" title="Thermal brain panel (T)">THERMAL</button>
-      <span class="pill" id="pAI" title="Local LLM copilot on the Mac mini (type: ai help)">AI</span>
+      <span class="pill eng" id="pComms">COMMS</span>
+      <span class="pill eng" id="pLidar">LIDAR</span>
+      <span class="pill eng" id="pCam">CAM</span>
+      <span class="pill eng" id="pSteer">SKID STEER</span>
+      <button class="pill eng" id="pHealth" title="Vehicle health / FDIR panel">HEALTH</button>
+      <button class="pill eng" id="pTherm" title="Thermal brain panel (T)">THERMAL</button>
+      <span class="pill eng" id="pAI" title="Local LLM copilot on the Mac mini (type: ai help)">AI</span>
       <div class="grow"></div>
       <div class="btnrow timebtns" id="timeBtns">
-        ${[0, 1, 2, 5, 10, 20].map((x) => `<button class="btn" data-ts="${x}">${x === 0 ? '❚❚' : x + '×'}</button>`).join('')}<button class="btn ff" data-ts="50" title="Fast forward: 50x sim time (X). Long autonomous drives use transit warp; precision steps run full physics as fast as the CPU allows">⏩ 50×</button>
+        ${[0, 1, 2, 3, 5, 10, 20].map((x) => `<button class="btn" data-ts="${x}" title="${x === 0 ? 'Pause (P)' : x >= 5 ? 'Time scale ' + x + '×: long cruise legs over mapped ground run on the transit-warp rails; pick-up, docking and unmapped ground run full physics as fast as the CPU allows' : 'Time scale ' + x + '× (full physics)'}">${x === 0 ? '❚❚' : x + '×'}</button>`).join('')}<button class="btn ff" data-ts="50" title="Fast forward: 50x sim time (X). Long autonomous drives use transit warp; precision steps run full physics as fast as the CPU allows">⏩ 50×</button>
       </div>
-      <div class="btnrow" id="viewBtns">
+      <div class="btnrow" id="quickMission">
+        <button class="btn on" data-m="6" title="Full logistics cycle: cargo CM-40A first, then the rest of the manifest">M6 Full cycle</button>
+        <button class="btn" data-c="resume">resume</button><button class="btn danger" data-c="abort">abort</button>
+      </div>
+      <div class="btnrow" id="layerBtns">
+        <button class="btn" id="hudBtn" title="Cycle the HUD layers: essential, engineering, hidden (H)">☰ HUD</button>
+        <button class="btn" id="hideHudBtn" title="Hide the whole HUD (H or the ☰ button brings it back)">Hide All HUD</button>
+      </div>
+      <div class="btnrow eng" id="viewBtns">
         ${['chase', 'orbit', 'top', 'cam', 'free'].map((v) => `<button class="btn" data-view="${v}">${v === 'cam' ? 'onboard' : v}</button>`).join('')}
       </div>
-      <select class="btn" id="qualitySel" title="Graphics quality"><option value="auto">GFX auto</option><option value="low">GFX low</option><option value="medium">GFX medium</option><option value="high">GFX high</option><option value="ultra">GFX ultra</option></select>
-      <button class="btn" id="helpBtn">? help</button>
+      <select class="btn eng" id="qualitySel" title="Graphics quality"><option value="auto">GFX auto</option><option value="low">GFX low</option><option value="medium">GFX medium</option><option value="high">GFX high</option><option value="ultra">GFX ultra</option></select>
+      <button class="btn eng" id="helpBtn">? help</button>
       <div id="safety"><div id="restart"><button class="btn danger" id="resetBtn" title="Release the E-STOP latch">RESET</button><button class="btn" id="startBtn" title="Power-on self-test and arm drive">START</button></div>
       <button id="estop" title="EMERGENCY STOP (Esc)">E-STOP</button></div>
+    </div>
+    <button id="hudMenu" class="btn" title="Show the HUD (H)">☰</button>
+    <div id="warpIndicator" class="warp-badge">▶▶ 10× WARP</div>
+    <div id="essential">
+      <div id="eDrive" class="panel essw">
+        <div class="eRow"><span class="eBig mono" id="eSpeed">0.00</span><span class="eUnit">m/s</span><span class="rpmBadge" id="eRpm">CRAWL</span></div>
+        <div class="eSub mono" id="eRpmWhy">—</div>
+        <div class="eRow eTime"><span class="k">Time</span><span class="mono" id="eWarp">1×</span></div>
+      </div>
+      <div id="ePower" class="panel essw">
+        <div class="eRow"><span class="k">Battery</span><span class="mono" id="eSoc">0 %</span></div>
+        <div class="bar"><i id="eSocBar"></i></div>
+        <div class="eRow"><span class="k">Power draw</span><span class="mono" id="ePow">0 kW</span></div>
+        <div class="eRow"><span class="k">Endurance</span><span class="mono" id="eEnd">—</span></div>
+      </div>
+      <div id="eMap" class="panel essw"><canvas id="miniMap" width="200" height="200"></canvas></div>
+      <div id="eGuide" class="panel essw"><div class="eGuideMain" id="eGuideMain">IDLE</div><div class="eSub mono" id="eGuideDetail"></div></div>
+      <div id="eAlarm" class="panel"></div>
     </div>
     <div id="vehicle" class="panel"><h3>Vehicle state <span class="tog">▾</span></h3><div class="body">
       <div class="kv">
@@ -202,7 +229,7 @@ export class HUD {
       <div><b>Driving (manual)</b><br><kbd>W</kbd>/<kbd>S</kbd> forward / reverse (hold)<br><kbd>A</kbd>/<kbd>D</kbd> steer (skid steer: curves while moving, slow point-turn when stopped and unloaded)<br><kbd>Space</kbd> brake · <kbd>Shift</kbd> slow / precise<br>Smart rpm sets the limit itself, 120 to 280 (the reason is shown under Vehicle state); hold full throttle straight on flat ground for TURBO<br>Gamepad: left stick drive/steer</div>
       <div><b>Cargo handling</b><br><kbd>G</kbd> close / open ring jaws<br><kbd>R</kbd>/<kbd>F</kbd> ride height up / down (kneel under a module, rise to lift it)</div>
       <div><b>Safety</b><br><kbd>Esc</kbd> E-STOP (latching). Restart = RESET then START.<br>Touching the drive keys during a mission pauses autonomy (operator override).</div>
-      <div><b>View</b><br><kbd>C</kbd> cycle camera · mouse drag orbit · wheel zoom<br><kbd>V</kbd> LiDAR overlay · <kbd>I</kbd> physics overlay + instruments · <kbd>T</kbd> thermal brain panel · <kbd>P</kbd> pause · <kbd>X</kbd> fast forward 50× · <kbd>H</kbd> this help<br><kbd>Enter</kbd> focus console · <kbd>↑</kbd> history</div>
+      <div><b>View</b><br><kbd>C</kbd> cycle camera · mouse drag orbit · wheel zoom<br><kbd>V</kbd> LiDAR overlay · <kbd>I</kbd> physics overlay + instruments · <kbd>T</kbd> thermal brain panel · <kbd>P</kbd> pause · <kbd>X</kbd> fast forward 50× · <kbd>H</kbd> cycle the HUD (essential → engineering → hidden) · <kbd>?</kbd> this help<br><kbd>Enter</kbd> focus console · <kbd>↑</kbd> history</div>
       <div><b>Useful commands</b><br>mission cycle · mission 3 B · goto hab<br>limit rpm 120 · rpm 240 · rpm auto · turbo on/off/auto<br>drive 0.5 0.05 · stop<br>lift kneel/carry · clamp close<br>fault block · fault wheel 2 · clear faults<br>map save · routes · plan · timescale 10</div>
     </div></div>`;
   }
@@ -244,7 +271,10 @@ export class HUD {
       const b = e.target.closest('[data-rep]'); if (b) { this.exec(`repair ${b.dataset.rep}`); return; }
       const tr = e.target.closest('tr[data-k]'); if (tr) { sim.health.selected = tr.dataset.k; this._hT = 0; }
     });
-    this.root.querySelectorAll('[data-ts]').forEach((b) => b.addEventListener('click', () => { const v = +b.dataset.ts; if (v === 0) sim.paused = !sim.paused; else { sim.paused = false; sim.timeScale = v; } }));
+    this.root.querySelectorAll('[data-ts]').forEach((b) => b.addEventListener('click', () => {
+      const v = +b.dataset.ts; if (v === 0) sim.paused = !sim.paused; else { sim.paused = false; sim.timeScale = v; }
+      this.syncTimeUi(); // the clicked button lights up at once, not at the next 10 Hz HUD tick
+    }));
     this.root.querySelectorAll('[data-view]').forEach((b) => b.addEventListener('click', () => ui.setView(b.dataset.view)));
     this.root.querySelectorAll('[data-m]').forEach((b) => b.addEventListener('click', () => this.exec(`mission ${b.dataset.m} ${$('#cargoSel').value}`)));
     this.root.querySelectorAll('[data-c]').forEach((b) => b.addEventListener('click', () => this.exec(b.dataset.c)));
@@ -302,6 +332,89 @@ export class HUD {
     if (this.ai && this.ai.online && w.length >= 3 && !KNOWN.has(w[0].toLowerCase())) { this.ai.ask(line); return; }
     runCommand(this.sim, this.ui, line);
   }
+  // ---- three-layer HUD (H / ☰ HUD): 0 clean (canvas + a faint ☰), 1 essential (default), 2 full engineering ----
+  initLayers() {
+    let l = 1; try { const v = +localStorage.getItem('aegis-hud-layer'); if ([0, 1, 2].includes(v) && localStorage.getItem('aegis-hud-layer') != null) l = v; } catch (e) { /* private mode */ }
+    this.setLayer(l, true);
+    $('#hudBtn').addEventListener('click', () => this.cycleLayer());
+    $('#hideHudBtn').addEventListener('click', () => this.setLayer(0));
+    $('#hudMenu').addEventListener('click', () => this.setLayer(1));
+  }
+  setLayer(l, quiet = false) {
+    this.layer = l; this.root.dataset.layer = String(l); this._t = 0; // redraw the layer's widgets at the next frame
+    const b = $('#hudBtn'); if (b) b.textContent = l === 1 ? '☰ HUD 1/2' : l === 2 ? '☰ HUD 2/2' : '☰ HUD';
+    try { localStorage.setItem('aegis-hud-layer', String(l)); } catch (e) { /* private mode */ }
+    if (!quiet) this.sim.log(`HUD layer ${l}: ${['clean view', 'essential', 'full engineering'][l]}`, 'info');
+  }
+  cycleLayer() { this.setLayer({ 1: 2, 2: 0, 0: 1 }[this.layer] ?? 1); } // 1 -> 2 -> 0 -> 1
+
+  // time-scale buttons and the warp badge (top-right)
+  syncTimeUi() {
+    const sim = this.sim;
+    this.root.querySelectorAll('[data-ts]').forEach((b) => b.classList.toggle('on', (+b.dataset.ts === 0 && sim.paused) || (!sim.paused && +b.dataset.ts === sim.timeScale)));
+    const w = $('#warpIndicator'), ts = sim.timeScale, paused = sim.paused;
+    w.style.display = paused || ts !== 1 ? 'block' : 'none';
+    w.classList.toggle('paused', paused);
+    w.textContent = paused ? '❚❚ PAUSED' : ts > 1 ? `▶▶ ${ts}× WARP` : `◀ ${ts}× SLOW`;
+    w.classList.toggle('slow', !paused && ts < 1);
+  }
+
+  updateEssential(tl) {
+    const sim = this.sim, R = sim.rover, A = sim.autonomy, H = sim.health;
+    const e = sim.slam.est;
+    $('#eSpeed').textContent = fmt(Math.abs(tl.fwdSpeed), 2);
+    const tier = R.rpm.tier, rb = $('#eRpm'); rb.textContent = tier.toUpperCase(); rb.className = 'rpmBadge ' + tier;
+    $('#eRpmWhy').textContent = `${R.rpm.proto.toFixed(0)} rpm · ${R.rpm.why}`;
+    { const rails = sim.warp.active && sim.timeScale >= sim.warp.minScale; // say why the actual rate is what it is
+      $('#eWarp').textContent = sim.paused ? 'PAUSED' : `${sim.timeScale}×${sim.timeScale > 1 ? ` (actual ${sim.actualRate >= 10 ? sim.actualRate.toFixed(0) : sim.actualRate.toFixed(1)}×${rails ? ', transit warp' : sim.lagging ? ', CPU-limited' : ''})` : ''}`; }
+    $('#eSoc').textContent = `${fmt(R.power.soc * 100, 0)} %  ·  ${fmt(R.power.wh / 1000, 0)} kWh`;
+    const sb = $('#eSocBar'); sb.style.width = R.power.soc * 100 + '%'; sb.style.background = R.power.soc < A.reserveSoc ? 'var(--err)' : R.power.soc < 0.4 ? 'var(--warn)' : 'var(--ok)';
+    const loadW = R.power.loadW || 0;
+    $('#ePow').textContent = `${fmt(loadW / 1000, 2)} kW`;
+    // endurance: energy above the reserve at the present electrical load (drive + hotel)
+    const usable = Math.max(0, R.power.wh - A.reserveSoc * ROVER.battery.capacityWh), hrs = loadW > 50 ? usable / loadW : Infinity;
+    $('#eEnd').textContent = !Number.isFinite(hrs) ? '— (idle)' : hrs >= 99 ? '> 99 h' : `${Math.floor(hrs)} h ${String(Math.round((hrs % 1) * 60)).padStart(2, '0')} min`;
+    // mission guidance:  PHASE -> DESTINATION | distance remaining
+    const g = A.goal, auto = !!A.gen;
+    const dist = auto && g ? Math.hypot(g.x - e.x, g.z - e.z) : null;
+    const phase = auto ? (A.phase || 'Active') : 'IDLE';
+    $('#eGuideMain').textContent = `${phase.toUpperCase()}${auto && g?.name ? ` → ${g.name}` : ''}${dist != null ? `  |  ${Math.round(dist).toLocaleString('en-US')} m` : ''}`;
+    $('#eGuideDetail').textContent = auto ? (A.missionName ? A.missionName + ' · ' : '') + (A.detail || '') : 'no active mission: pick a mission (M6 Full cycle)';
+    // alarms: banner only while something is wrong
+    const msgs = [];
+    if (R.estop) msgs.push('E-STOP LATCHED');
+    for (const a of [...H.alarms.values()].sort((x, y) => ({ critical: 0, warning: 1, caution: 2 }[MODE[x.id].sev] - { critical: 0, warning: 1, caution: 2 }[MODE[y.id].sev])).slice(0, 3)) msgs.push(`${unitLabel(MODE[a.id], a.n)} · ${MODE[a.id].name}`);
+    if (H.survival.on) msgs.push('SURVIVAL MODE');
+    if (R.power.soc < A.reserveSoc) msgs.push(`battery ${fmt(R.power.soc * 100, 0)} % under the ${(A.reserveSoc * 100).toFixed(0)} % reserve`);
+    if (A.faults.comms) msgs.push('COMMS LOS');
+    if (sim.sensors.faults.lidar) msgs.push('LIDAR FAIL');
+    const al = $('#eAlarm'); al.style.display = msgs.length ? 'block' : 'none';
+    if (msgs.length) { al.textContent = '⚠ ' + msgs.join('  ·  '); al.classList.toggle('crit', R.estop || [...H.alarms.values()].some((a) => MODE[a.id].sev === 'critical')); }
+    this.drawMini();
+  }
+
+  // 200 x 200 px overview: pad -> habitat route, the plan, remembered routes, the trail and the rover (SLAM estimate)
+  drawMini() {
+    const sim = this.sim, cv = $('#miniMap'), ctx = cv.getContext('2d'), W = cv.width, Hh = cv.height, A = sim.autonomy;
+    const P = WORLD.pad, B = WORLD.habitat, cx = (P.x + B.x) / 2, cz = (P.z + B.z) / 2;
+    const sc = (Math.min(W, Hh) - 36) / Math.max(Math.abs(B.x - P.x), Math.abs(B.z - P.z), 1);   // px per metre, route fills the frame
+    const px = (x, z) => [W / 2 + (x - cx) * sc, Hh / 2 + (z - cz) * sc];
+    ctx.fillStyle = '#05070a'; ctx.fillRect(0, 0, W, Hh);
+    ctx.strokeStyle = 'rgba(140,170,210,0.18)'; ctx.lineWidth = 1; ctx.strokeRect(0.5, 0.5, W - 1, Hh - 1);
+    ctx.setLineDash([4, 4]); ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.beginPath(); ctx.moveTo(...px(P.x, P.z)); ctx.lineTo(...px(B.x, B.z)); ctx.stroke(); ctx.setLineDash([]);
+    ctx.strokeStyle = 'rgba(255,210,61,0.7)'; ctx.lineWidth = 1.5;
+    for (const r of sim.slam.routes) { ctx.beginPath(); r.pts.forEach((q, i) => { const [x, y] = px(q.x, q.z); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.stroke(); }
+    const tr = sim.slam.trajectory; ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let i = Math.max(0, tr.length - 1500), j = 0; i < tr.length; i += 4, j++) { const [x, y] = px(tr[i].x, tr[i].z); j ? ctx.lineTo(x, y) : ctx.moveTo(x, y); } ctx.stroke();
+    if (A.path && A.gen) { ctx.strokeStyle = '#35d0ff'; ctx.lineWidth = 2; ctx.beginPath(); for (let i = 0; i < A.path.length; i += 3) { const [x, y] = px(A.path[i].x, A.path[i].z); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); } ctx.stroke(); }
+    const dot = (x, z, col, label) => { const [a, b] = px(x, z); ctx.fillStyle = col; ctx.beginPath(); ctx.arc(a, b, 3.5, 0, 7); ctx.fill(); if (label) { ctx.font = '10px sans-serif'; ctx.textAlign = a > W - 40 ? 'right' : 'left'; ctx.fillText(label, a > W - 40 ? a - 6 : a + 6, b - 4); ctx.textAlign = 'left'; } };
+    dot(P.x, P.z, '#c8d2de', 'PAD'); dot(B.x, B.z, '#3ddc84', 'HAB');
+    for (const c of sim.cargo) { const g = A.cargoEst.get(c.id); if (g && c.state !== 'held') dot(g.x, g.z, '#ffd23d'); }
+    const e = sim.slam.est, [rx, ry] = px(e.x, e.z);
+    ctx.save(); ctx.translate(rx, ry); ctx.rotate(-e.yaw); ctx.fillStyle = '#35d0ff'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(8, 0); ctx.lineTo(-5, -5); ctx.lineTo(-5, 5); ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
+  }
+
   toggleHelp(v) { const p = $('#helpPanel'); const show = v ?? p.style.display !== 'block'; p.style.display = show ? 'block' : 'none'; }
 
   addLog(e) {
@@ -321,7 +434,7 @@ export class HUD {
     const nCrit = [...H.alarms.values()].filter((a) => MODE[a.id].sev === 'critical').length;
     const hp = $('#pHealth');
     hp.textContent = H.survival.on ? 'SURVIVAL MODE' : H.job ? 'REPAIRING' : H.alarms.size ? `${H.alarms.size} ALARM${H.alarms.size > 1 ? 'S' : ''}` : 'HEALTH OK';
-    hp.className = 'pill ' + (nCrit || H.survival.on ? 'err' : H.alarms.size || H.job ? 'warn' : 'ok');
+    hp.className = 'pill eng ' + (nCrit || H.survival.on ? 'err' : H.alarms.size || H.job ? 'warn' : 'ok');
     for (const id of ['#rndBtn', '#rndBtn2']) { const b = $(id); b.textContent = `RANDOM FAILURES: ${H.random.on ? 'ON · ' + H.random.preset : 'OFF'}`; b.classList.toggle('on', H.random.on); }
     if ($('#healthPanel').style.display !== 'block') return;
     this._hT = (this._hT || 0) - 0.1; if (this._hT > 0) return; this._hT = 0.5;
@@ -367,14 +480,14 @@ export class HUD {
   update(dt) {
     this.inst.update(this.sim.rover, dt, !!this.ui.overlays.eng);
     this.therm.update(dt);
-    { const [txt, cls] = this.therm.status(), e = $('#pTherm'); if (e.textContent !== txt) e.textContent = txt; e.className = 'pill ' + cls; }
+    { const [txt, cls] = this.therm.status(), e = $('#pTherm'); if (e.textContent !== txt) e.textContent = txt; e.className = 'pill eng ' + cls; }
     this._t -= dt; if (this._t > 0) return; this._t = 0.1;
     const sim = this.sim, R = sim.rover, A = sim.autonomy, S = sim.sensors, tl = R.telemetry();
     $('#camPanel').style.top = ($('#mapPanel').getBoundingClientRect().bottom + 8) + 'px';
     // show the speed actually achieved: above ~5x the physics is CPU-bound, and 50x relies on transit warp
     const act = sim.actualRate, warpOn = sim.warp.active && sim.timeScale >= sim.warp.minScale;
     $('#clock').textContent = `MET ${fmtT(sim.time)}${sim.paused ? ' ❚❚' : ''} ${sim.timeScale !== 1 ? '· ' + sim.timeScale + '×' : ''}${sim.timeScale > 1 && !sim.paused ? ` (actual ${act >= 10 ? act.toFixed(0) : act.toFixed(1)}×${warpOn ? ', transit warp' : sim.lagging ? ', CPU-limited' : ''})` : ''}${S.decimated ? ' · sensors decimated' : ''}`;
-    const pill = (id, txt, cls) => { const e = $(id); e.textContent = txt; e.className = 'pill ' + cls; };
+    const pill = (id, txt, cls) => { const e = $(id); e.textContent = txt; e.className = (e.classList.contains('eng') ? 'pill eng ' : 'pill ') + cls; }; // keeps the layer marker
     pill('#pMode', A.mode === 'AUTO' ? 'AUTO' : A.paused && A.gen ? 'OVERRIDE' : 'MANUAL', A.mode === 'AUTO' ? 'info' : A.paused && A.gen ? 'warn' : '');
     pill('#pDrive', R.estop ? 'E-STOP' : sim.startup ? 'SELF-TEST' : R.powered ? 'DRIVE ARMED' : 'DISARMED', R.estop ? 'err' : R.powered ? 'ok' : 'warn');
     if (this.ai) pill('#pAI', this.ai.busy ? 'AI THINKING' : this.ai.online ? 'AI ONLINE' : this.ai.online === false ? 'AI OFFLINE' : 'AI', this.ai.busy ? 'info' : this.ai.online ? 'ok' : this.ai.online === false ? 'warn' : '');
@@ -387,10 +500,12 @@ export class HUD {
     $('#resetBtn').disabled = !R.estop; $('#startBtn').disabled = R.estop || R.powered || !!sim.startup;
     $('#estopBanner').style.display = R.estop ? 'block' : 'none';
     $('#overrideBanner').style.display = A.paused && A.gen && !R.estop ? 'block' : 'none';
-    this.root.querySelectorAll('[data-ts]').forEach((b) => b.classList.toggle('on', (+b.dataset.ts === 0 && sim.paused) || (!sim.paused && +b.dataset.ts === sim.timeScale)));
+    this.syncTimeUi();
     this.root.querySelectorAll('[data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === this.ui.view));
     this.updateHealth(dt);
 
+    if (this.layer === 0) return;                           // clean view: nothing on screen to feed
+    if (this.layer === 1) { this.updateEssential(tl); return; } // essential layer: the engineering panels are hidden
     const e = sim.slam.est, p = tl.pose;
     const hdg = (y) => ((90 - y * 180 / Math.PI) % 360 + 360) % 360;
     $('#vSpeed').textContent = `${fmt(tl.fwdSpeed, 2)} m/s`;
@@ -566,8 +681,8 @@ export class HUD {
     }
     ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(W / 2 - 20, H / 2); ctx.lineTo(W / 2 + 20, H / 2); ctx.moveTo(W / 2, H / 2 - 20); ctx.lineTo(W / 2, H / 2 + 20); ctx.stroke();
-    ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '16px monospace'; ctx.fillText(`CAM-1 · 70° HFOV · ${new Date(this.sim.time * 1000).toISOString().slice(11, 19)}`, 10, 22);
+    ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '16px monospace'; ctx.fillText(`CAM-1 · ${ROVER.camera.hFovDeg}° HFOV${ROVER.camera.stereo ? ' stereo' : ''} · ${new Date(this.sim.time * 1000).toISOString().slice(11, 19)}`, 10, 22);
     const c = S.cass;
-    $('#camInfo').textContent = `fiducials ${S.detections.length} · rocks ${S.rockDetections.length}` + (c && c.valid ? ` · CASS lat ${(c.lateral * 100).toFixed(1)} cm yaw ${(c.yaw * 57.3).toFixed(2)}°` : '') + (c && c.ring ? ` · dock ring ${c.ring.along.toFixed(2)} m` : '');
+    $('#camInfo').textContent = `fiducials ${S.detections.length} · rocks ${S.rockDetections.length}` + (S.stereo ? ` · depth ${S.stereo.n} pts (${S.stereo.fused} fused)` : '') + (c && c.valid ? ` · CASS lat ${(c.lateral * 100).toFixed(1)} cm yaw ${(c.yaw * 57.3).toFixed(2)}°` : '') + (c && c.ring ? ` · dock ring ${c.ring.along.toFixed(2)} m` : '');
   }
 }

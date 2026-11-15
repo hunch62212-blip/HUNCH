@@ -1,6 +1,6 @@
 // Navigation: global A* on a 2 m costmap derived from the SLAM elevation map, and a
 // footprint-aware local planner that rolls out constant-curvature arcs over the 0.5 m map.
-import { WORLD, ROVER } from './config.js';
+import { WORLD, ROVER, NAV } from './config.js';
 import { RES, TILE, CLS } from './slam.js';
 
 const PRES = 2;                                   // planning cell size (m)
@@ -32,7 +32,7 @@ export class Planner {
     this.knownMask = new Uint8Array(PN * PN);
     this.lastSmooth = { corners: 0, forced: 0, filleted: 0, unfilleted: 0 };
     this.routeBonus = 0.5;
-    this.inflate = 5.8;   // m, hard inflation (AEGIS-V1 half width 4.9 m + margin)
+    this.inflate = NAV.inflateEmpty;   // m, hard inflation (AEGIS-V1 half width 4.9 m + margin); navTo sets NAV.inflateLoaded (6.5) while loaded
     this.soft = 15;       // m, soft cost falloff
     this.builtVersion = -1;
     this.lastPlanMs = 0; this.expanded = 0;
@@ -101,6 +101,9 @@ export class Planner {
     const cg = this.sim.rover && this.sim.rover.lift.cargo;
     const cgHalf = cg ? Math.max(cg.T.adapterR || 0, cg.T.shape === 'cylinder' ? cg.T.radius : cg.T.width / 2) : 0;
     const tall = cg ? Math.max(0, Math.hypot(cg.T.length / 2 + Math.abs(cg.T.carryX || 0), cgHalf) + 0.5 - this.inflate) : 0;
+    // (thin posts are also checked against the rover's actual rectangle by the local planner: LocalPlanner.posts, v1.7.0. A wider
+    // disc here was tried and dropped: it made the pad-apron masts close the start of proven loaded routes.)
+    const post = tall;
     stampDisk(WORLD.pad.x, WORLD.pad.z, Math.max(19.2, 12.0 + tall), LETHAL);
     const H = this.sim.terrain.hab;
     for (let s = -16; s <= 16; s += 2) for (let d = 0; d <= 16; d += 2) stampDisk(H.face.x - H.nx * d + H.tx * s, H.face.z - H.nz * d + H.tz * s, 2, LETHAL);
@@ -112,13 +115,13 @@ export class Planner {
     const line = (x, z, ax, az, len, r) => { const n = Math.max(1, Math.ceil(len / r)); for (let i = 0; i <= n; i++) { const s = -len / 2 + len * i / n; stampDisk(x + ax * s, z + az * s, r, LETHAL); } };
     for (const it of this.sim.terrain.base || []) {
       if (it.kind === 'dome') stampDisk(it.x, it.z, it.r, LETHAL);
-      else if (it.kind === 'mast' || it.kind === 'light') stampDisk(it.x, it.z, it.r + tall, LETHAL);
-      else if (it.kind === 'array') { stampDisk(it.x, it.z, 0.2 + tall, LETHAL); line(it.x, it.z, 1, 0, it.w, 0.5 + tall); } // post + panel (world-x aligned, as world.js)
+      else if (it.kind === 'mast' || it.kind === 'light') stampDisk(it.x, it.z, it.r + post, LETHAL);
+      else if (it.kind === 'array') { stampDisk(it.x, it.z, 0.2 + post, LETHAL); line(it.x, it.z, 1, 0, it.w, 0.5 + tall); } // post + panel (world-x aligned, as world.js)
       else if (it.len) line(it.x, it.z, Math.cos(it.yaw), -Math.sin(it.yaw), it.len, it.r); // tunnel / modules (horizontal cylinders)
     }
     const PD = this.sim.powerDock && this.sim.powerDock.layout;
     if (PD) {
-      for (const a of PD.arrays) stampDisk(a.x, a.z, 0.45 + tall, LETHAL);
+      for (const a of PD.arrays) stampDisk(a.x, a.z, 0.45 + post, LETHAL);
       const b = PD.bank; // bank box: depth along the face normal, width along the face
       line(b.x, b.z, H.tx, H.tz, b.w, b.d / 2);
     }
@@ -350,6 +353,45 @@ export class Planner {
     out.push(pts[pts.length - 1]);
     return out;
   }
+  // Route straightening (v1.7.0). A route is recorded as driven, so a loaded leg that explored unmapped crater field keeps
+  // every probe and detour of that first drive (R1 measured 2.9 km for a 2.0 km straight line) and each later repeat drove
+  // them again. Once a route is stored, every stretch whose chord runs over ground that is already mapped, outside the hard
+  // obstacle margin, no costlier than the stretch itself, and passes the full wheel + belly footprint check (with this
+  // route's load) at every metre is replaced by the chord; corners are then rounded as A* paths are (loaded: R 18 m).
+  // Unmapped ground is never used: the result only runs where the rover has seen the ground.
+  straighten(pts, loaded) {
+    if (!pts || pts.length < 30) return null;
+    const R = loaded ? this.loadedMinRadius : 0;
+    const mapped = (x, z) => { const k = this.idx(x, z); return k >= 0 && this.knownMask[k] && this.cost[k] < LETHAL * 0.5; };
+    const chordOK = (a, b) => {
+      const L = Math.hypot(b.x - a.x, b.z - a.z), n = Math.max(1, Math.ceil(L)), yaw = Math.atan2(-(b.z - a.z), b.x - a.x);
+      for (let q = 0; q <= n; q++) if (!mapped(a.x + (b.x - a.x) * q / n, a.z + (b.z - a.z) * q / n)) return false;
+      for (let q = 0; q <= n; q++) {
+        const fp = checkFootprint(this.slam, a.x + (b.x - a.x) * q / n, a.z + (b.z - a.z) * q / n, yaw, loaded, { wheels: WHEEL_CENTERS, convexBelly: true });
+        if (fp.hit || fp.unmapped) return false;
+      }
+      return true;
+    };
+    const out = [pts[0]];
+    let i = 0, cuts = 0;
+    while (i < pts.length - 1) {
+      let j = Math.min(pts.length - 1, i + 160);
+      for (; j > i + 1; j -= j - i > 40 ? 8 : j - i > 12 ? 3 : 1) {
+        let along = 0; for (let k = i; k < j; k++) along += this.segmentCost(pts[k], pts[k + 1]);
+        const direct = this.segmentCost(pts[i], pts[j]);
+        if (!Number.isFinite(direct) || direct > along * 1.02) continue;
+        if (R && out.length >= 2 && !this.cornerOK(out[out.length - 2], pts[i], pts[j], R, out.length === 2, j === pts.length - 1)) continue;
+        if (!chordOK(pts[i], pts[j])) continue;
+        break;
+      }
+      if (j > i + 1) cuts++;
+      out.push(pts[Math.max(j, i + 1)]); i = Math.max(j, i + 1);
+    }
+    const sm = R ? this.fillet(out, R) : out;
+    const res = this.resample(sm, 1.0);
+    let len = 0; for (let k = 1; k < res.length; k++) len += Math.hypot(res[k].x - res[k - 1].x, res[k].z - res[k - 1].z);
+    return { pts: res, length: len, cuts };
+  }
   // smallest circumradius of the path, sampled every `step` m (for the loaded turning-radius check)
   static pathMinRadius(pts, step = 3) {
     let best = Infinity;
@@ -450,7 +492,9 @@ function checkFootprint(S, x, z, yaw, loaded, opts = {}) {
 }
 
 export class LocalPlanner {
-  constructor(slam) { this.slam = slam; this.prevK = 0; this.last = null; }
+  // posts(): surveyed thin structures [{x, z, r}] (light masts, array posts) that the LiDAR height map does not hold;
+  // extent(): the rover's half length / half width, grown to the carried module's when loaded. Both set by Autonomy.
+  constructor(slam) { this.slam = slam; this.prevK = 0; this.last = null; this.posts = null; this.extent = null; }
 
   // Rolls out constant-curvature arcs (forward, or reverse when dir = -1) and checks every
   // wheel contact patch plus the straddle-bay belly clearance along each one.
@@ -472,6 +516,13 @@ export class LocalPlanner {
     const underUs = (px, pz) => { for (const [hx, hz] of here) if ((px - hx) ** 2 + (pz - hz) ** 2 < 1.4 * 1.4) return true; return false; };
     let best = null;
     const arcs = [];
+    // surveyed posts near the arcs (v1.7.0): tested against the rover's rectangle, not the centre disc the global costmap uses. The
+    // arcs cut inside the planned line on a bend, and a frame corner (6.95 m from the centre) caught an apron light mast. An arc is
+    // refused where a post comes within 0.6 m of the rectangle AND closer than it is now, so a rover already touching one can move off.
+    const ext = this.extent ? this.extent() : { hl: ROVER.frame.halfLen, hw: ROVER.frame.halfWid };
+    const posts = (this.posts ? this.posts() : []).filter((q) => (q.x - pose.x) ** 2 + (q.z - pose.z) ** 2 < (horizon + ext.hl + 8) ** 2);
+    const postGap = (q, x, z, yaw) => { const c = Math.cos(yaw), sn = Math.sin(yaw), dx = q.x - x, dz = q.z - z; return Math.max(Math.abs(dx * c - dz * sn) - ext.hl, Math.abs(dx * sn + dz * c) - ext.hw) - q.r; };
+    const gap0 = posts.map((q) => postGap(q, pose.x, pose.z, pose.yaw));
     for (const k of ks) {
       let x = pose.x, z = pose.z, yaw = pose.yaw;
       let hz = 0, freeDist = horizon, unknown = 0, ok = true, hitPt = null, knownDist = horizon;
@@ -481,6 +532,7 @@ export class LocalPlanner {
         x += Math.cos(yaw) * 0.5 * dir; z += -Math.sin(yaw) * 0.5 * dir;
         if ((s * 2) % 2 === 0) pts.push({ x, z });
         const fp = checkFootprint(S, x, z, yaw, loaded, { belly, relaxed: opts.relaxed, underUs, checkBelly: Math.abs(s - Math.round(s)) < 1e-6 });
+        if (!fp.hit) for (let q = 0; q < posts.length; q++) { const g = postGap(posts[q], x, z, yaw); if (g < 0.6 && g < gap0[q] - 0.02) { fp.hit = true; fp.hitPt = { x: posts[q].x, z: posts[q].z }; break; } }
         unknown += fp.unknown; hz += fp.hz;
         if (fp.unmapped && knownDist === horizon) knownDist = s - 0.5;
         if (fp.hit) { hitPt = fp.hitPt; freeDist = s - 0.5; ok = freeDist >= Math.min(6, horizon * 0.5); break; }

@@ -59,3 +59,37 @@ console.log(`min radius: empty ${worstEmpty.toFixed(1)} m, loaded ${worstLoaded.
 // the arcs are exact R = 18 m; the estimate fits circles through points 3 m apart on a 1 m resampled path (~3 % low)
 atLeast('loaded planned centre line: minimum turning radius (R_min 18 m, estimator tolerance 1 m)', worstLoaded, 17.0, ' m', 1);
 check('empty plans are not filleted (point turns allowed)', worstEmpty < worstLoaded, `empty ${worstEmpty.toFixed(1)} m < loaded ${worstLoaded.toFixed(1)} m`);
+
+// ---- 3. route straightening (v1.7.0): chords only over mapped, clear ground, never closer to an obstacle than the hard margin
+{
+  S.clear(); P.blocked = []; P.unknownNearHazardCost = 12;
+  const x0 = 200, z0 = -400, LEN = 240, HW = 40;          // a flat mapped corridor 240 m x 80 m
+  const cell = (wx, wz) => { const ix = Math.floor(wx / RES), iz = Math.floor(wz / RES), tt = S.getTile(Math.floor(ix / TILE), Math.floor(iz / TILE), true); return [tt, (iz - tt.tz * TILE) * TILE + (ix - tt.tx * TILE)]; };
+  for (let x = x0; x < x0 + LEN; x += RES) for (let z = z0 - HW; z < z0 + HW; z += RES) {
+    const [tt, i] = cell(x, z); tt.n[i] = 5; tt.h[i] = 0; tt.h0[i] = 0; tt.v[i] = 0.001; tt.haz[i] = 20; tt.cls[i] = CLS.FREE; tt.dirty = false;
+  }
+  const bx = x0 + 120, bz = z0; // a 3 m boulder in the middle of the corridor
+  for (let x = bx - 1.5; x <= bx + 1.5; x += RES) for (let z = bz - 1.5; z <= bz + 1.5; z += RES) { const [tt, i] = cell(x, z); tt.h[i] = 2.0; tt.h0[i] = 2.0; tt.haz[i] = 255; tt.cls[i] = CLS.ROCK; }
+  // the route as a first exploration drives it: a wide zigzag that swings round the boulder
+  const zig = []; for (let s = 0; s <= LEN - 10; s += 1) zig.push({ x: x0 + 5 + s, z: z0 + 22 * Math.sin(s / 18), t: s });
+  for (const loaded of [false, true]) {
+    P.inflate = loaded ? 6.5 : 5.8;
+    S.setPayload(loaded);
+    P.buildCostmap([]);
+    const zigLen = zig.reduce((a, q, k) => a + (k ? Math.hypot(q.x - zig[k - 1].x, q.z - zig[k - 1].z) : 0), 0);
+    const st = P.straighten(zig, loaded);
+    const tag = loaded ? 'loaded' : 'empty';
+    check(`straighten (${tag}): shorter than the zigzag`, !!st && st.length < 0.8 * zigLen, st ? `${st.length.toFixed(0)} m vs ${zigLen.toFixed(0)} m` : 'none');
+    if (!st) continue;
+    const near = Math.min(...st.pts.map((q) => Math.hypot(q.x - bx, q.z - bz)));
+    atLeast(`straighten (${tag}): clears the boulder by the hard margin`, near, P.inflate, ' m', 1);
+    check(`straighten (${tag}): every point on mapped ground`, st.pts.every((q) => Math.abs(q.z - z0) < HW && q.x >= x0 && q.x < x0 + LEN));
+    check(`straighten (${tag}): keeps both ends`, Math.hypot(st.pts[0].x - zig[0].x, st.pts[0].z - zig[0].z) < 0.01 && Math.hypot(st.pts.at(-1).x - zig.at(-1).x, st.pts.at(-1).z - zig.at(-1).z) < 0.01);
+    if (loaded) atLeast('straighten (loaded): corners rounded at R >= 18 m', Planner.pathMinRadius(st.pts), 17.0, ' m', 1);
+  }
+  // a stretch over unmapped ground is left as driven
+  const out = [{ x: x0 + 5, z: z0 }, { x: x0 + 5, z: z0 + 80 }, { x: x0 + 100, z: z0 + 80 }, { x: x0 + 100, z: z0 }];
+  const raw = P.resample(out, 1.0), st2 = P.straighten(raw, false);
+  check('straighten: no chord across unmapped ground', !st2 || st2.length >= raw.length - 5, st2 ? `${st2.length.toFixed(0)} m (driven ${raw.length - 1} m)` : 'none');
+  S.setPayload(false);
+}

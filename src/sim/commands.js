@@ -86,7 +86,7 @@ export function runCommand(sim, ui, line, _uplinked = false) {
   switch (cmd) {
     case 'help': case '?':
       for (const [c, d] of HELP) say(`${c.padEnd(52)} ${d}`);
-      say('Keys: W/S drive, A/D turn, SPACE brake, R/F lift, G clamp, ESC = E-STOP, C camera, V lidar, H help');
+      say('Keys: W/S drive, A/D turn, SPACE brake, R/F lift, G clamp, ESC = E-STOP, C camera, V lidar, H cycle HUD layers, ? help');
       break;
     case 'estop': case 'e-stop': sim.emergencyStop('console'); break;
     case 'reset': sim.resetEstop(); break;

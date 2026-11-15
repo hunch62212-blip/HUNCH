@@ -2,7 +2,7 @@
 // generator one step, so mission scripts read like the procedure they implement.
 // All decisions use estimated (SLAM) state and sensor measurements, never ground truth.
 import * as THREE from 'three';
-import { ROVER, WORLD, DOCK, MOON, POWER_DOCK } from './config.js';
+import { ROVER, WORLD, DOCK, MOON, POWER_DOCK, MISSION, NAV } from './config.js';
 import { Planner, LocalPlanner, LETHAL } from './planner.js';
 import { OrbitalDEM, matchToDEM } from './orbitalMap.js';
 const LETHAL_HALF = LETHAL * 0.5; // planner hard-inflation cost (obstacle margin)
@@ -19,6 +19,21 @@ export class Autonomy {
     this.rate = 10;
     this.planner = new Planner(sim, slam);
     this.local = new LocalPlanner(slam);
+    // surveyed thin posts and the vehicle's swept rectangle for the local planner's post check (planner.js LocalPlanner)
+    { let posts = null; // built on first use: the power dock is created after the autonomy
+      const build = () => {
+        const out = [];
+        for (const it of sim.terrain?.base || []) if (it.kind === 'mast' || it.kind === 'light' || it.kind === 'array') out.push({ x: it.x, z: it.z, r: it.kind === 'array' ? 0.2 : (it.r || 0.2) });
+        for (const a of sim.powerDock?.layout?.arrays || []) out.push({ x: a.x, z: a.z, r: 0.45 });
+        return out;
+      };
+      this.local.posts = () => (posts ??= build());
+      this.local.extent = () => {
+        const R = sim.rover, F = ROVER.frame, cg = R && R.loaded && R.lift.cargo;
+        if (!cg) return { hl: F.halfLen, hw: F.halfWid };
+        const T = cg.T, half = Math.max(T.adapterR || 0, T.shape === 'cylinder' ? T.radius : T.width / 2);
+        return { hl: Math.max(F.halfLen, T.length / 2 + Math.abs(T.carryX || 0)), hw: Math.max(F.halfWid, half) };
+      }; }
     this.dem = sim.terrain ? new OrbitalDEM(sim.terrain) : null; // orbital elevation model for map-relative fixes (orbitalMap.js)
     this.mrl = { on: true, dLast: 0, tLast: -1e9, fixes: 0, last: null };
     this.mode = 'MANUAL';      // MANUAL | AUTO
@@ -163,8 +178,9 @@ export class Autonomy {
     // (remembered-route waypoints from at/before anchorT live in unshifted map tiles and must stay aligned with them)
     for (const p of this.path || []) if (!(p.t <= anchorT)) r.apply(p);
     for (const b of this.planner.blocked) if (!b.fault) r.apply(b);
-    for (const p of this.portEst.values()) { r.apply(p); p.nYaw = wrap(p.nYaw + r.dyawEnd); }
-    for (const g of this.cargoEst.values()) if (g.src && g.src !== 'manifest') { r.apply(g); g.yaw = wrap(g.yaw + r.dyawEnd); }
+    // landmark estimates move with the map they were seen in (Slam.shiftFrame warpAt), not rigidly about the current pose
+    for (const p of this.portEst.values()) { const dy = r.warpAt(p); if (dy != null) p.nYaw = wrap(p.nYaw + dy); }
+    for (const g of this.cargoEst.values()) if (g.src && g.src !== 'manifest') { const dy = r.warpAt(g); if (dy != null) g.yaw = wrap(g.yaw + dy); }
     this._replanNow = true;
     return r;
   }
@@ -213,6 +229,9 @@ export class Autonomy {
     for (const d of this.sensors.detections) {
       if (d.kind === 'cargo') {
         const c = d.obj, T = c.T;
+        // the module on the rover's own cradle is in view of the cameras for the whole loaded leg: its tags say nothing about
+        // where cargo is waiting, and fusing them dragged the pad estimate 2 km along with the rover ("disagreed ... restarting")
+        if (c.state === 'held' || c.state === 'docked' || c.state === 'delivered') continue;
         const p = this.toEst(d.pos);
         const nYaw = this.dirToEst(d.normal) + d.yawNoise;
         let axisYaw, center;
@@ -298,6 +317,7 @@ export class Autonomy {
     if (this.gen) this.log(`Mission "${this.missionName}" aborted: ${reason}`, 'warn');
     if (this.slam.recording) this.slam.endRecord(false);
     this.gen = null; this.missionName = null; this.mode = 'MANUAL'; this.phase = 'Idle'; this.detail = '';
+    this.sim.rover.crawlZone = false; // an aborted mission must not leave the drive held at the crawl cap
     this.path = null; this.stop();
     this.sim.emit('mission', { state: 'abort' });
   }
@@ -337,6 +357,7 @@ export class Autonomy {
         this.history.push({ name: this.missionName, ok: res.ok !== false, ...this.summary() });
         this.sim.emit('mission', { name: this.missionName, state: 'done', ok: res.ok !== false });
         this.gen = null; this.mode = 'MANUAL'; this.phase = 'Idle'; this.path = null;
+        R.crawlZone = false;
         R.brake = true;
       }
     } catch (e) {
@@ -547,6 +568,15 @@ export class Autonomy {
       if (!offPath && Math.hypot(tail.x - goal.x, tail.z - goal.z) <= 1.5) {
         const cur = P.pathCost([{ x: e2.x, z: e2.z }, ...this.path.slice(i0)]);
         const neu = P.pathCost(res.pts);
+        // Replan hysteresis (NAV): a routine replan only switches the path for a confirmed lethal obstacle within NAV.replanBlockM
+        // path points, or once the fresh plan is cheaper than the path in hand by NAV.replanCostGain (30 %), and a path just
+        // switched to is held for NAV.commitM of travel. Flickering map cells used to make the committed trajectory jump.
+        const blockedNear = P.pathBlocked(this.path, i0, NAV.replanBlockM) >= 0;
+        const sp = this._pathSwitchPos;
+        if (!blockedNear) {
+          if (Number.isFinite(cur) && sp && Math.hypot(e2.x - sp.x, e2.z - sp.z) < NAV.commitM) return true; // (a path with a blocked stretch further on has infinite cost: never held)
+          if (Number.isFinite(cur) && neu > cur / (1 + NAV.replanCostGain)) return true;
+        }
         // commitment (v1.5.0): for 20 s after a switch, a routine replan only replaces a path that has become blocked;
         // after that the new one must be >15 % AND > 12 m of typical ground cheaper (tiny relative gains on a 2 km route
         // used to flip the plan every few seconds)
@@ -562,7 +592,7 @@ export class Autonomy {
         if (Number.isFinite(cur) && dTurn > 60 * DEG && neu > cur * 0.7) return true;
       }
     }
-    if (this.path !== res.pts) this._pathSwitchT = this.sim.time;
+    if (this.path !== res.pts) { this._pathSwitchT = this.sim.time; this._pathSwitchPos = { x: e.x, z: e.z }; }
     this.path = res.pts; this.pathIdx = 0;
     this.pathTight = !!res.tight;
     this.pathSource = 'A* (explore)';
@@ -576,43 +606,67 @@ export class Autonomy {
   routeFromMemory(goal) {
     const e = this.est();
     const cands = [];
+    // each route offers its straightened line and, behind it, the line it was actually driven on (r.rawPts): a straightened chord
+    // crosses ground first seen from a distance, and closer scans can later show a rock on it, while the driven line stays proven
     for (const r of this.slam.routes) {
       if (!r.ok || r.pts.length < 20) continue;
-      let i0 = -1, d0 = Infinity, i1 = -1, d1 = Infinity;
-      r.pts.forEach((p, i) => {
-        const a = (p.x - e.x) ** 2 + (p.z - e.z) ** 2, b = (p.x - goal.x) ** 2 + (p.z - goal.z) ** 2;
-        if (a < d0) { d0 = a; i0 = i; } if (b < d1) { d1 = b; i1 = i; }
-      });
-      d0 = Math.sqrt(d0); d1 = Math.sqrt(d1);
-      if (d0 > 150 || d1 > 150 || Math.abs(i1 - i0) < 25) continue;
-      const seg = i0 < i1 ? r.pts.slice(i0, i1 + 1) : r.pts.slice(i1, i0 + 1).reverse();
-      const loadedNeed = this.sim.rover.loaded || !!this.surveyLimits;
-      cands.push({ r, seg, d0, d1, score: (loadedNeed && !r.loadedOk ? 2000 : 0) + seg.length + 2 * (d0 + d1) });
+      for (const [pts, alt] of [[r.pts, 0], ...(r.rawPts ? [[r.rawPts, 1]] : [])]) {
+        let i0 = -1, d0 = Infinity, i1 = -1, d1 = Infinity;
+        pts.forEach((p, i) => {
+          const a = (p.x - e.x) ** 2 + (p.z - e.z) ** 2, b = (p.x - goal.x) ** 2 + (p.z - goal.z) ** 2;
+          if (a < d0) { d0 = a; i0 = i; } if (b < d1) { d1 = b; i1 = i; }
+        });
+        d0 = Math.sqrt(d0); d1 = Math.sqrt(d1);
+        if (d0 > 150 || d1 > 150 || Math.abs(i1 - i0) < 25) continue;
+        const seg = i0 < i1 ? pts.slice(i0, i1 + 1) : pts.slice(i1, i0 + 1).reverse();
+        const loadedNeed = this.sim.rover.loaded || !!this.surveyLimits;
+        // (the driven line ranks after its own straightened line: +1 per route point of score, i.e. it is the fallback)
+        cands.push({ r, seg, d0, d1, alt, score: (loadedNeed && !r.loadedOk ? 2000 : 0) + seg.length + 2 * (d0 + d1) + (alt ? 1 : 0) });
+      }
     }
     if (!cands.length) return null;
     cands.sort((a, b) => a.score - b.score);
     const P = this.planner, okRoutes = this.slam.routes.filter((x) => x.ok);
+    let why = '', bridged = false;
+    const at = (p) => `(${p.x.toFixed(0)}, ${p.z.toFixed(0)})`;
     const repairSeg = (seg) => {
       let cur = seg, repairs = 0;
+      // fallback (v1.7.0): a blocked stretch the local repair cannot get round (short rejoin, 320-point detour cap) is bridged by a
+      // longer detour to a point further along where the route is clear again (up to 300 m on, larger search budget). Before, any
+      // such stretch threw the whole 2 km route away and the loaded rover explored the crater field instead.
+      const bridge = (bi, pre) => {
+        bridged = true;
+        for (let j = bi + 30; j < Math.min(cur.length - 15, bi + 300); j += 15) {
+          if (P.pathBlocked(cur, j, Math.min(60, cur.length - j)) >= 0) continue;
+          const d = P.plan(cur[pre].x, cur[pre].z, cur[j].x, cur[j].z, { maxExpand: 300000 });
+          if (d && d.pts.length >= 2 && d.pts.length <= 900 && P.pathBlocked(d.pts, 0, d.pts.length) < 0) { why = `bridged a blocked stretch at ${at(cur[bi])}`; return [...cur.slice(0, pre), ...d.pts, ...cur.slice(j + 1)]; }
+        }
+        return null;
+      };
       for (let bi; (bi = P.pathBlocked(cur, 0, cur.length)) >= 0;) {
-        if (++repairs > 10) return null;
+        if (++repairs > 10) { why = `more than 10 blocked stretches (last at ${at(cur[bi])})`; return null; }
         let pre = Math.max(0, bi - 8);
         while (pre > 0 && P.pathBlocked(cur, pre, 1) >= 0 && bi - pre < 60) pre--;
         let post = Math.min(cur.length - 1, bi + 8);
         while (post < cur.length - 1 && post - bi < 120 && P.pathBlocked(cur, post, Math.min(6, cur.length - post)) >= 0) post++;
         if (P.pathBlocked(cur, pre, 1) >= 0) {
           if (pre === 0 && P.pathBlocked(cur, post, 1) < 0 && Math.hypot(cur[post].x - e.x, cur[post].z - e.z) <= 220) { cur = cur.slice(post); continue; }
-          return null;
+          why = `blocked at ${at(cur[bi])}, no clear point before it`; return null;
         }
         if (P.pathBlocked(cur, post, 1) >= 0) {
           if (post === cur.length - 1 && Math.hypot(cur[pre].x - goal.x, cur[pre].z - goal.z) <= 220) { cur = cur.slice(0, pre + 1); continue; }
-          return null;
+          const br = bridge(bi, pre); if (br) { cur = br; continue; }
+          why = `blocked from ${at(cur[bi])} for more than 120 m`; return null;
         }
         const detour = P.plan(cur[pre].x, cur[pre].z, cur[post].x, cur[post].z, { maxExpand: 120000 });
-        if (!detour || detour.pts.length < 2 || detour.pts.length > 320 || P.pathBlocked(detour.pts, 0, detour.pts.length) >= 0) return null;
+        if (!detour || detour.pts.length < 2 || detour.pts.length > 320 || P.pathBlocked(detour.pts, 0, detour.pts.length) >= 0) {
+          const br = bridge(bi, pre); if (br) { cur = br; continue; }
+          why = `no local detour around ${at(cur[bi])}`; return null;
+        }
         cur = [...cur.slice(0, pre), ...detour.pts, ...cur.slice(post + 1)];
       }
-      return cur.length >= 15 ? cur : null;
+      if (cur.length < 15) { why = 'too little of it left after repairs'; return null; }
+      return cur;
     };
     const tryAttach = (seg) => {
       const first = seg[0], last = seg[seg.length - 1];
@@ -624,9 +678,13 @@ export class Autonomy {
     P.buildCostmap(okRoutes);
     const repaired = [];
     for (const c of cands) {
+      bridged = false;
       const seg = repairSeg(c.seg);
-      if (!seg) continue;
-      repaired.push({ c, seg });
+      if (seg) repaired.push({ c, seg, bridged });
+    }
+    // a candidate that needed no long bridging detour first (e.g. the driven line of a route whose straightened line is blocked)
+    repaired.sort((a, b) => (a.bridged - b.bridged) || (a.c.score - b.c.score));
+    for (const { c, seg } of repaired) {
       const res = tryAttach(seg);
       if (res) return { route: c.r, ...res };
     }
@@ -641,11 +699,59 @@ export class Autonomy {
         }
       } finally { P.inflate = inf; }
     }
-    return { rejected: cands[0].r };
+    if (repaired.length && !why) why = 'no A* link from here to the route or from the route to the goal';
+    return { rejected: cands[0].r, why };
   }
 
-  // navigate to a goal using the global/local planners and route memory
+  // navigate to a goal using the global/local planners and route memory.
+  // Recovery and retry (v1.7.0): a leg the navigation gives up on (no progress for 4 min, boxed in after 4 unwinds,
+  // moving away from the goal, steering not answering, pivot stall) used to end the whole mission, so one bad pocket on a
+  // 2 km traverse cost all three deliveries. Now the leg is re-tried up to NAV.legRetries times after an autonomous
+  // recovery (_retryPrep): back out of the pocket, keep what was learned about it, re-check the position against the
+  // orbital map, and try the other route source (remembered route <-> fresh exploration). Only then is the operator asked.
   *navTo(goal, opts = {}) {
+    const tries = opts.retries ?? (goal.toCharger ? 1 : NAV.legRetries);
+    let r = null, noMemory = !!opts.noMemory;
+    for (let a = 0; ; a++) {
+      r = yield* this._navLeg(goal, { ...opts, noMemory, attempt: a });
+      if (!r || r.ok !== false || !r.retry || a >= tries || !this.gen) return r;
+      { const R = this.sim.rover, tilt = Math.max(Math.abs(R.tilt.pitch), Math.abs(R.tilt.roll)) * 180 / Math.PI;
+        if (tilt > 12 || R.tilt.margin < (R.loaded ? 18 : 12)) { this.log(`No autonomous retry: the vehicle is on a steep tilt (${tilt.toFixed(0)} deg, tip margin ${R.tilt.margin.toFixed(0)} deg)`, 'warn'); return r; } }
+      this.metrics.retries = (this.metrics.retries || 0) + 1;
+      this.log(`Navigation to ${goal.name || 'goal'} stopped (${r.why}). Autonomous recovery and retry ${a + 1}/${tries}`, 'warn');
+      yield* this._retryPrep(goal, r);
+      // the route source that just failed is not the one to repeat: a remembered route that keeps boxing in is dropped,
+      // an exploration that wandered gets the remembered route back
+      noMemory = r.usedRoute ? true : false;
+    }
+  }
+
+  *_retryPrep(goal, r) {
+    const R = this.sim.rover, P = this.planner;
+    const phase0 = this.phase;
+    this.phase = `${phase0.replace(/ \((recovery|unwind|retry)\)$/, '')} (retry)`;
+    this.stop();
+    for (let i = 0; i < 30 && R.telemetry().speed > 0.05; i++) yield;
+    // keep the obstacle marks the failed attempt learned (fail() clears them for the next, unrelated leg)
+    const now = this.sim.time;
+    for (const b of r.blocks || []) if (b.ttl == null || b.t == null || now - b.t < b.ttl) P.blocked.push(b);
+    this.goal = goal;
+    // steering / stall: a few metres straight back on a clear arc frees the tyres from their ruts.
+    // boxed in / no progress / moving away: back out along the way in, which also marks the pocket lethal (unwindPath)
+    // (not after "boxed in again after 4 reverse recoveries": it has just unwound four times out of this pocket, and the pocket is
+    // already marked lethal; a fifth reverse took a loaded rover over a rim in a v1.7.0 test run)
+    if (/steering|pivot/.test(r.why)) yield* this.recover(goal, 'retry');
+    else if (!/boxed in/.test(r.why)) yield* this.unwindPath(R.loaded ? 20 : 25);
+    // re-localise before re-planning: a drifted estimate puts the map's obstacles in the wrong place, and box-ins on long
+    // legs came with SLAM errors of 5-13 m (CHANGES.md §27). Force an orbital-map check at the next tick.
+    this.mrl.dLast = -1e9;
+    if (this.mrl.buf) this.mrl.buf = [];
+    yield* this.wait(3, 'retry: re-localising against the orbital map');
+    this._noSteerT = 0;
+    this.phase = phase0;
+  }
+
+  *_navLeg(goal, opts = {}) {
     const R = this.sim.rover;
     const tol = goal.tol ?? 2.0;
     const from = this.site(this.est().x, this.est().z), to = goal.site || this.site(goal.x, goal.z);
@@ -656,15 +762,19 @@ export class Autonomy {
     if (!goal.toCharger) yield* this.checkPower(goal.name);
     this.phase = `Navigate to ${goal.name || to}`;
     this.slam.setPayload(R.loaded || !!this.surveyLimits); // the first plan already needs this leg's limits
-    let usingRoute = false;
-    const mem = Math.hypot(goal.x - this.est().x, goal.z - this.est().z) > 150 ? this.routeFromMemory(goal) : null;
+    this.planner.inflate = (R.loaded || this.surveyLimits) ? NAV.inflateLoaded : NAV.inflateEmpty; // 6.5 m hard margin around obstacles while carrying
+    let usingRoute = false, routeProven = false, rejoins = 0;
+    const mem = !opts.noMemory && Math.hypot(goal.x - this.est().x, goal.z - this.est().z) > 150 ? this.routeFromMemory(goal) : null;
     if (mem && mem.pts) {
       this.path = mem.pts; this.pathIdx = 0; usingRoute = true;
       mem.route.uses++;
+      // a route this vehicle has already driven with this load (loaded routes are recorded under the loaded limits) is known
+      // to be passable: a close obstacle beside it is not a reason to leave it (see the squeeze test below)
+      routeProven = !!mem.route.loadedOk || !(R.loaded || this.surveyLimits);
       this.pathSource = `REPEAT ${mem.route.id} (${mem.route.from}->${mem.route.to}, used ${mem.route.uses}x)`;
       this.log(`Route memory: reusing proven route ${mem.route.id} (${mem.route.from}->${mem.route.to}); joins ${mem.d0.toFixed(0)} m from here, leaves ${mem.d1.toFixed(0)} m from goal`, 'ok');
       this.sim.emit('path');
-    } else if (mem && mem.rejected) this.log(`Route memory: ${mem.rejected.id} is now blocked - exploring a new route`, 'warn');
+    } else if (mem && mem.rejected) this.log(`Route memory: ${mem.rejected.id} is now blocked (${mem.why || 'unknown'}) - exploring a new route`, 'warn');
     if (!usingRoute && !this.replan(goal, 'initial')) {
       yield* this.wait(2, 'waiting for map data');
       if (!this.replan(goal, 'retry')) return { ok: false, why: 'no path to goal (check geofences / goal location)' };
@@ -689,16 +799,20 @@ export class Autonomy {
     const fail = (why) => {
       this._stuckPosRef = null;
       if (this.slam.recording) this.slam.endRecord(false);
+      const blocks = this.planner.blocked.filter((b) => !b.fault);
       this.planner.blocked = this.planner.blocked.filter((b) => b.fault);
       this.stop();
-      return { ok: false, why };
+      return { ok: false, why, retry: true, blocks, usedRoute: usingRoute || this.pathSource.startsWith('REPEAT') };
     };
-    let frozen0 = this.frozenS;
+    let frozen0 = this.frozenS, lidarDownSince = null, unknownRun = 0, deadband = false, lastPos = this.est(), pinRef = null, pins = 0;
     while (true) {
       // time the executive was frozen does not count against the progress / stuck watchdogs
       if (this.frozenS > frozen0) { const f = this.frozenS - frozen0; frozen0 = this.frozenS; stuckT += f; bestT += f; t00 += f; lastReplan += f; }
       const e = this.est();
       const dGoal = Math.hypot(goal.x - e.x, goal.z - e.z);
+      // upset: past any drivable attitude (the tilt reflex fires at 14-17 deg). Nothing autonomous is safe from here
+      { const tilt = Math.max(Math.abs(R.tilt.pitch), Math.abs(R.tilt.roll)) * 180 / Math.PI;
+        if (tilt > NAV.upsetDeg) { const r = fail(`vehicle upset: tilt ${tilt.toFixed(0)} deg: all motion stopped, operator assistance required`); r.retry = false; R.brake = true; return r; } }
       if (dGoal < tol) break;
       this.pathIdx = this.nearestOnPath(e);
       if (usingRoute && !this.pathSource.startsWith('REPEAT')) usingRoute = false;
@@ -719,10 +833,19 @@ export class Autonomy {
       const awayLim = this.path && !this._noSteerT ? Math.max(240, 0.4 * bestD) : Math.max(150, 0.25 * bestD);
       if (Number.isFinite(bestD) && dGoal > bestD + awayLim) return fail(`moving away from ${goal.name || 'goal'} (${dGoal.toFixed(0)} m, was ${bestD.toFixed(0)} m): stopped, operator assistance required`);
       // steering-authority check: moving, asked to turn, and the gyro says the body is not turning
-      { const f = R._cmdF, yr = Math.abs(this.sensors.imu.yawRate || 0);
-        if (f && !(this.sim.warping && this.railsOk) && Math.abs(f.vx) > 0.5 && Math.abs(f.wz) > 0.04 && yr < 0.25 * Math.abs(f.wz)) this._noSteerT = (this._noSteerT || 0) + this.dt;
+      // (v1.7.0: compared on 6 s averages, in the direction commanded, against NAV.noSteerRatio = 10 %. Measured: a healthy rover
+      // achieves 40-55 % of the commanded yaw rate (skid-steer scrub), on five wheels with one free-rolling 15-25 %; 25 % stopped
+      // the five-wheel traverse of tests/faults.mjs. The instantaneous test counted the normal lag of a loaded
+      // skid-steer turn - the yaw rate builds over seconds while the command already reverses on an S-bend - as "no response",
+      // and stopped a loaded leg 75 m from PORT-3 (CHANGES.md §29). A body that really does not yaw still trips it in ~15 s.)
+      { const f = R._cmdF, yrS = this.sensors.imu.yawRate || 0, a = Math.min(1, this.dt / 6);
+        const on = f && !(this.sim.warping && this.railsOk) && Math.abs(f.vx) > 0.5;
+        const sg = f && f.wz ? Math.sign(f.wz) : 0;
+        this._yawCmdAvg = (this._yawCmdAvg || 0) + a * ((on ? Math.abs(f.wz) : 0) - (this._yawCmdAvg || 0));
+        this._yawActAvg = (this._yawActAvg || 0) + a * ((on ? yrS * sg : 0) - (this._yawActAvg || 0));
+        if (on && this._yawCmdAvg > 0.04 && this._yawActAvg < NAV.noSteerRatio * this._yawCmdAvg) this._noSteerT = (this._noSteerT || 0) + this.dt;
         else this._noSteerT = Math.max(0, (this._noSteerT || 0) - 2 * this.dt);
-        if (this._noSteerT > 15) { this._noSteerT = 0; return fail('vehicle is not responding to steering (yaw rate < 25 % of command for 15 s): stopped, operator assistance required'); } }
+        if (this._noSteerT > 15) { this._noSteerT = 0; return fail(`vehicle is not responding to steering (yaw rate < ${(NAV.noSteerRatio * 100).toFixed(0)} % of command for 15 s): stopped, operator assistance required`); } }
       const forceReplan = this._replanNow;
       if (this._replanNow) { this._replanNow = false; lastReplan = -1e9; bestD = Infinity; }
       if ((this.slam.lastLoop?.t ?? -1e9) > lastLoopSeen) {
@@ -755,7 +878,10 @@ export class Autonomy {
             }
           }
           const blk = usingRoute ? this.planner.pathBlocked(this.path, this.pathIdx, 150) >= 0 : false;
-          const squeeze = usingRoute && !blk && freeNow < 11 && this.pathIdx > 25 && dGoal > 60;
+          // squeeze: a close obstacle along a route not proven for this load. On a proven one (v1.7.0) the local planner steers past
+          // it on the route; leaving the route there sent the loaded rover exploring next to the obstacle, and it boxed in at the
+          // same spot in every M6 run (CHANGES.md §27, §29, §31). A route that is actually blocked still splices / replans (blk).
+          const squeeze = usingRoute && !routeProven && !blk && freeNow < 11 && this.pathIdx > 25 && dGoal > 60;
           if (usingRoute && (blk || squeeze)) {
             let spliced = false;
             if (blk && dGoal > 120) {
@@ -768,6 +894,18 @@ export class Autonomy {
                   this.pathIdx = 0; this.sim.emit('path'); spliced = true;
                   this.log('Remembered route obstructed ahead: splicing local detour', 'info');
                 }
+              }
+            }
+            // (v1.7.0) before giving the route memory up for exploration, ask it again from here: it now has the driven line behind
+            // each straightened route and longer bridging detours. Dropping straight to exploration sent a loaded rover round the back
+            // of the habitat into the power-dock yard, where it boxed in 25 m from PORT-2's pre-dock point
+            if (!spliced && blk && rejoins < 3 && dGoal > 150) {
+              rejoins++;
+              const m2 = this.routeFromMemory(goal);
+              if (m2 && m2.pts) {
+                this.path = m2.pts; this.pathIdx = 0; spliced = true; this.sim.emit('path');
+                this.pathSource = `REPEAT ${m2.route.id} (${m2.route.from}->${m2.route.to}, re-joined)`;
+                this.log(`Remembered route obstructed ahead: re-joined ${m2.route.id} ${m2.d0.toFixed(0)} m from here`, 'info');
               }
             }
             if (!spliced) {
@@ -792,7 +930,9 @@ export class Autonomy {
       // lookahead target on the path
       let li = this.pathIdx;
       const cross = Math.hypot(this.path[li].x - e.x, this.path[li].z - e.z);
-      let look = usingRoute ? clamp(5 + R.telemetry().speed * 2.5, 6, 18) : clamp(7 + R.telemetry().speed * 4, 8, 25);
+      // lookahead >= NAV.lookaheadMin (10 m): the pure-pursuit point sits far enough ahead that the delayed regolith shear
+      // reaction of a skid-steer vehicle does not make it hunt left and right around a short-chord target
+      let look = clamp(Math.max(NAV.lookaheadMin, R.telemetry().speed * NAV.lookaheadSpeedS), NAV.lookaheadMin, 25);
       if (cross > 2.5) look = Math.min(look, Math.max(5.5, 11 - cross));
       let acc = 0;
       while (li < this.path.length - 1 && acc < look) { acc += Math.hypot(this.path[li + 1].x - this.path[li].x, this.path[li + 1].z - this.path[li].z); li++; }
@@ -838,6 +978,26 @@ export class Autonomy {
           continue;
         }
       }
+      // pinned / spinning in place (v1.7.0): the wheels have turned > 2.5 m in 8 s but the LiDAR scene has not moved and the
+      // heading has not changed. Wheel odometry would carry the estimate away (15 m in a minute when the rover was wedged under
+      // the pod rack), so the estimate is put back where the scene says the vehicle is, the spot is marked and the rover recovers.
+      if (!this.sim.warp.active && this.sensors.scanId !== pinRef?.id) {
+        const now = this.sim.time;
+        if (!pinRef || now - pinRef.t > 8) {
+          const cur = this._scanSample(), o = this.sensors.odom;
+          if (pinRef && o.dist - pinRef.d > 2.5 && Math.abs(wrap(e.yaw - pinRef.e.yaw)) < 3 * DEG && this._scanSame(pinRef.pts, cur)) {
+            const lost = o.dist - pinRef.d;
+            this.slam.est.x = pinRef.e.x; this.slam.est.z = pinRef.e.z;
+            this.metrics.pinned = (this.metrics.pinned || 0) + 1;
+            this.log(`Wheels turned ${lost.toFixed(1)} m but the LiDAR scene did not move: vehicle pinned or spinning in place. Position held, recovering`, 'warn');
+            this.planner.blocked.push({ x: pinRef.e.x + Math.cos(e.yaw) * 7, z: pinRef.e.z - Math.sin(e.yaw) * 7, r: 3, t: now, ttl: 600 });
+            if (++pins > 3) return fail('vehicle pinned: wheels turn but it does not move (4 times): operator assistance required');
+            yield* this.recover(goal, 'pinned');
+            pinRef = null; stuckT = this.sim.time; stuckPos = this.est(); continue;
+          }
+          pinRef = { t: now, id: this.sensors.scanId, d: o.dist, e: this.est(), pts: cur };
+        }
+      }
       // speed governor
       // a survey (teach) drive plans and checks the ground with the loaded limits, so the route it records is one a
       // loaded rover can repeat (point turns and empty speeds stay available: see surveyRoute)
@@ -852,7 +1012,12 @@ export class Autonomy {
           this.stop(); yield* this.recover(goal, 'steep slope'); lastReplan = 0; continue;
         } }
       let v = Math.min(this.speedSetting, R.speedCap());
-      if (this.sensors.faults.lidar) v = Math.min(v, usingRoute ? 0.3 : 0);
+      // a LiDAR dropout only derates the leg once it has lasted NAV.dropoutHoldS: a transient one (power cycle, dust glitch) is
+      // coasted through at a walking pace instead of stopping or aborting the leg
+      if (this.sensors.faults.lidar) {
+        lidarDownSince ??= this.sim.time;
+        v = Math.min(v, this.sim.time - lidarDownSince > NAV.dropoutHoldS ? (usingRoute ? 0.3 : 0) : 1.0);
+      } else lidarDownSince = null;
       { const mg = R.tilt.marginF ?? R.tilt.margin; if (mg < 22) v *= clamp((mg - 8) / 14, 0.3, 1); if (loaded) v = Math.min(v, 0.6 + Math.max(0, mg - 10) * 0.12); }
       if (R.wheels.some((w) => w.fault)) v *= 0.75;
       v *= this.sim.health ? this.sim.health.fx.speedK : 1; // FDIR derates (hub cooling, strut leak, battery string)
@@ -934,8 +1099,14 @@ export class Autonomy {
       // Two stopping-distance limits (braking at `dec` below, the same value the dynamics instruments use): stop 3 m
       // short of any known hazard, and never outrun the mapped ground - unseen terrain can hide a crater rim
       const dec = loaded ? 0.2 : 0.6; // loaded: under the ~0.4 m/s^2 nose-over limit of the passive pitch (CHANGES.md §14)
+      // Unmapped (UNKNOWN) ground is not an obstacle: on flat ground (< NAV.flatDeg) the speed floor through the unmapped cells ahead
+      // is NAV.unknownCoastSpeed for up to NAV.unknownCoastM metres while the next LiDAR sweeps fill them in, and only then the
+      // 0.3 m/s creep. A mapped LETHAL / ROCK hit still brakes through freeDist exactly as before.
+      unknownRun = lp.knownDist < 6 ? unknownRun + Math.hypot(e.x - lastPos.x, e.z - lastPos.z) : 0; lastPos = e;
+      const tiltFlat = Math.max(Math.abs(R.tilt.pitch), Math.abs(R.tilt.roll)) * 180 / Math.PI < NAV.flatDeg;
+      const coastFloor = tiltFlat && unknownRun < NAV.unknownCoastM && lp.freeDist >= lp.horizon - 1 ? NAV.unknownCoastSpeed : 0.3;
       let vCmd = Math.min(v, Math.max(0.3, Math.sqrt(2 * dec * Math.max(0, lp.freeDist - 3))));
-      vCmd = Math.min(vCmd, Math.max(0.3, Math.sqrt(2 * dec * Math.max(0, lp.knownDist - 1.5))));
+      vCmd = Math.min(vCmd, Math.max(coastFloor, Math.sqrt(2 * dec * Math.max(0, lp.knownDist - 1.5))));
       { // tilt-aware speed: slow on tilted ground and so that the curve's lateral acceleration fits the remaining tip margin
         const mgn = R.tilt.marginF ?? R.tilt.margin, tiltDeg = Math.max(Math.abs(R.tilt.pitch), Math.abs(R.tilt.roll)) * 180 / Math.PI;
         const aOK = MOON.g * Math.tan(Math.min(60, Math.max(0.5, mgn - 9)) * DEG);
@@ -955,7 +1126,19 @@ export class Autonomy {
       }
       // turbo (300 rpm) is only released on a straight, long, mapped, obstacle-free stretch
       R.turboOk = !loaded && !this.pathTight && Math.abs(lp.k) < 0.012 && lp.freeDist >= lp.horizon - 1 && lp.knownDist > 25 && dGoal > 50;
-      this.cmd(vCmd, 0, vCmd * lp.k);
+      // Yaw command shaping (smooth, no hunting): +-3 deg heading deadband (hysteresis to 4 deg) on a gentle path, damping of the
+      // overshoot when nearly lined up but still rotating, and a yaw-acceleration limit of NAV.maxYawAccel on the command.
+      let wzCmd = vCmd * lp.k;
+      const hAbs = Math.abs(headErr);
+      if (hAbs < NAV.headingDeadbandDeg * DEG) deadband = true; else if (hAbs > (NAV.headingDeadbandDeg + 1) * DEG) deadband = false;
+      if (deadband && Math.abs(lp.k) < 0.02) wzCmd = 0;
+      // damping only when it IS an overshoot in the making: nearly lined up on a straight stretch, and still rotating toward the
+      // target faster than yawDampRate. (Without the direction and straight-path tests this also halved the yaw command on every
+      // gentle curve, where the rover is supposed to be rotating: it under-steered, drifted past 5 deg and snapped back.)
+      { const yr = this.sensors.imu.yawRate || 0;
+        if (hAbs < NAV.yawDampErrDeg * DEG && Math.abs(lp.k) < 0.02 && Math.abs(yr) > NAV.yawDampRate && yr * headErr > 0) wzCmd *= NAV.yawDampGain; }
+      { const w0 = R.cmd.wz, dw = NAV.maxYawAccel * this.dt; wzCmd = w0 + clamp(wzCmd - w0, -dw, dw); }
+      this.cmd(vCmd, 0, wzCmd);
       this.detail = `${R.rpm.proto.toFixed(0)} rpm ${R.rpm.tier} | ${this.pathSource} | ${dGoal.toFixed(0)} m to go | v ${vCmd.toFixed(2)} m/s${lp.knownDist < 6 ? ' (creeping: unmapped ground ahead)' : ''} | ${Math.abs(lp.k) < 0.004 ? "straight" : `turn ${lp.k > 0 ? "L" : "R"} R=${Math.abs(1 / lp.k).toFixed(0)} m`}`;
       // stuck detection (embedding / slip / hidden obstacle)
       this._stuckPosRef = stuckPos;
@@ -974,7 +1157,20 @@ export class Autonomy {
     this.stop();
     if (this.slam.recording) {
       const r = this.slam.endRecord(true);
-      if (r) this.log(`Route memory: stored ${r.id} ${r.from}->${r.to} (${r.length.toFixed(0)} m, ${(r.time / 60).toFixed(1)} min)`, 'ok');
+      if (r) {
+        // straighten it over the ground this drive has mapped (Planner.straighten): later repeats skip the first drive's detours
+        let note = '';
+        if (NAV.straightenRoutes) {
+          const P = this.planner;
+          P.buildCostmap(this.slam.routes.filter((q) => q.ok && q !== r));
+          const st = P.straighten(r.pts, R.loaded || !!this.surveyLimits);
+          if (st && st.length < r.length - 20) {
+            note = `, straightened to ${st.length.toFixed(0)} m (${st.cuts} shortcuts over mapped ground)`;
+            r.raw = { length: r.length }; r.rawPts = r.pts; r.pts = st.pts; r.length = st.length;
+          }
+        }
+        this.log(`Route memory: stored ${r.id} ${r.from}->${r.to} (${(r.raw?.length ?? r.length).toFixed(0)} m, ${(r.time / 60).toFixed(1)} min${note})`, 'ok');
+      }
     }
     this.planner.blocked = this.planner.blocked.filter((b) => b.fault);
     if (goal.yaw != null) {
@@ -1087,6 +1283,34 @@ export class Autonomy {
     this.phase = phase0;
   }
 
+  // The way back for an unwind: breadcrumbs from the newest backwards until `distance` m of path (only recent ones: older ones may
+  // belong to another leg).
+  _unwindTrace(e0, distance, now0) {
+    const trace = [{ x: e0.x, z: e0.z }];
+    let len = 0;
+    // (v1.7.0) breadcrumbs recorded during an earlier unwind are the vehicle backing OUT; read backwards they lead back INTO that
+    // pocket. A second box-in near the first one followed them back over the first pocket's rim, and a loaded rover tipped. So an
+    // earlier unwind is jumped over, together with the stretch of the old entry path it already retraced: the trace resumes at the
+    // pre-unwind breadcrumb nearest that unwind's end point, or stops if there is none.
+    const traj = this.slam.trajectory, spans = (this._unwindSpans || []).filter((q) => now0 - q.t1 < 900);
+    for (let i = traj.length - 1; i >= 0 && len < distance; i--) {
+      const b = traj[i];
+      if (now0 - b.t > 900) break;
+      const sp = spans.find((q) => b.t >= q.t0 - 0.5 && b.t <= q.t1 + 0.5);
+      if (sp) {
+        let j = i; while (j >= 0 && traj[j].t >= sp.t0 - 0.5) j--;
+        let best = -1, bd = 6;
+        for (let q = j; q >= 0 && j - q < 120; q--) { const d = Math.hypot(traj[q].x - sp.end.x, traj[q].z - sp.end.z); if (d < bd) { bd = d; best = q; } }
+        if (best < 0) break;
+        i = best + 1; continue;
+      }
+      const a = trace[trace.length - 1], d = Math.hypot(b.x - a.x, b.z - a.z);
+      if (d < 1.0) continue;
+      trace.push({ x: b.x, z: b.z }); len += d;
+    }
+    return { trace, len };
+  }
+
   // Reverse-recovery for a boxed-in rover (CHANGES.md §17). When the local planner cannot find a forward path
   // (e.g. boxed in by boulders or crater rims), the vehicle backs out along the breadcrumbs it drove in on (the proven
   // entry trajectory, which is clear because it just drove it), at 0.15 m/s. The rear arcs are checked every tick by
@@ -1113,15 +1337,7 @@ export class Autonomy {
     }
     // 2. the way in: breadcrumbs from the newest backwards until `distance` m of path (only recent ones: older ones
     // may belong to another leg)
-    const trace = [{ x: e0.x, z: e0.z }];
-    let len = 0;
-    for (let i = this.slam.trajectory.length - 1; i >= 0 && len < distance; i--) {
-      const b = this.slam.trajectory[i];
-      if (now0 - b.t > 900) break;
-      const a = trace[trace.length - 1], d = Math.hypot(b.x - a.x, b.z - a.z);
-      if (d < 1.0) continue;
-      trace.push({ x: b.x, z: b.z }); len += d;
-    }
+    const { trace, len } = this._unwindTrace(e0, distance, now0);
     this.log(`Boxed in: unwinding ${Math.min(len, distance).toFixed(0)} m back along the entry trajectory at ${R.loaded ? 0.15 : 0.4} m/s, corridor ahead marked lethal for ${TTL} s`, 'warn');
     let moved = 0, ok = len >= 6, proven = 0;
     if (!ok) this.log('Unwind: no usable entry trajectory (breadcrumbs too short or too old)', 'warn');
@@ -1130,16 +1346,7 @@ export class Autonomy {
     const vU = R.loaded ? 0.15 : 0.4;
     const t0 = this.sim.time, tMax = Math.min(distance, len) / vU * 1.6 + 20;
     let ti = 1;
-    const sampleElev = () => {
-      const sc = this.sensors.scan; if (!sc || !sc.n) return [];
-      const pts = [], st = Math.max(1, Math.floor(sc.n / 180));
-      for (let i = 0; i < sc.n; i += st) {
-        const bx = sc.body[i * 3], by = sc.body[i * 3 + 1], bz = sc.body[i * 3 + 2];
-        const r = Math.hypot(bx, bz);
-        if (by > -0.2 && r > 2 && r < 35) pts.push(bx, bz);
-      }
-      return pts;
-    };
+    const sampleElev = () => this._scanSample();
     let stallRef = { t: t0, e: e0, pts: sampleElev(), id: this.sensors.scanId };
     while (ok && moved < Math.min(distance, len) - 1 && this.sim.time - t0 < tMax) {
       const e = this.est();
@@ -1147,19 +1354,9 @@ export class Autonomy {
       if (this.sim.time - stallRef.t > 18 && this.sensors.scanId !== stallRef.id) {
         const odomMove = Math.hypot(e.x - stallRef.e.x, e.z - stallRef.e.z);
         const curPts = sampleElev();
-        if (odomMove > 1.8 && stallRef.pts.length >= 30 && curPts.length >= 30) {
-          let hit = 0, tot = stallRef.pts.length / 2;
-          for (let i = 0; i < stallRef.pts.length; i += 2) {
-            const px = stallRef.pts[i], pz = stallRef.pts[i + 1];
-            for (let j = 0; j < curPts.length; j += 2) {
-              const dx = curPts[j] - px, dz = curPts[j + 1] - pz;
-              if (dx * dx + dz * dz < 0.04) { hit++; break; }
-            }
-          }
-          if (hit >= 15 && hit / tot >= 0.75) {
-            this.log('Unwind: vehicle stationary against obstacle despite wheel rotation, stopping reverse', 'warn');
-            break;
-          }
+        if (odomMove > 1.8 && this._scanSame(stallRef.pts, curPts)) {
+          this.log('Unwind: vehicle stationary against obstacle despite wheel rotation, stopping reverse', 'warn');
+          break;
         }
         stallRef = { t: this.sim.time, e, pts: curPts, id: this.sensors.scanId };
       }
@@ -1173,8 +1370,10 @@ export class Autonomy {
         // follow the trace itself (pure pursuit, 0.15 m/s) while the tilt margin holds, and stop if it does not
         const c = Math.cos(e.yaw), s = Math.sin(e.yaw), tx = trace[ti].x - e.x, tz = trace[ti].z - e.z;
         const rT = tx * s + tz * c, d2 = Math.max(4, tx * tx + tz * tz);
-        const mgn = R.tilt.marginF ?? R.tilt.margin;
-        if (mgn < 10) { this.log('Unwind: tilt margin too small to keep reversing, stopping here', 'warn'); break; }
+        // raw tip margin, not the 0.8 s filtered one: reversing a loaded rover over a rim, the filtered value was still above 10 deg
+        // when the vehicle had already gone over (v1.7.0 M6 run: tilt 36 deg, then 64 deg). Loaded stops at 15 deg (CoM 6.8 m up).
+        const mgn = Math.min(R.tilt.margin, R.tilt.marginF ?? R.tilt.margin);
+        if (mgn < (R.loaded ? 15 : 10)) { this.log('Unwind: tilt margin too small to keep reversing, stopping here', 'warn'); break; }
         k = Math.max(-0.12, Math.min(0.12, -2 * rT / d2));
         proven++;
       }
@@ -1183,6 +1382,7 @@ export class Autonomy {
       yield;
     }
     this.stop();
+    { const eu = this.est(); (this._unwindSpans ||= []).push({ t0: now0, t1: this.sim.time, end: { x: eu.x, z: eu.z } }); if (this._unwindSpans.length > 20) this._unwindSpans.shift(); }
     for (let i = 0; i < 8; i++) yield;
     if (this.slam.recording) {
       const pts = this.slam.recording.pts, eu = this.est();
@@ -1211,26 +1411,54 @@ export class Autonomy {
     this.phase = phase0;
   }
 
-  rearClear(e, ahead = 2.5) {
+  // LiDAR scene sample (body frame x, z of raised returns 2-35 m out) and a same-scene test: >= 75 % of the earlier sample's
+  // points still within 0.2 m. Used to tell a vehicle that is not moving although its wheels turn (pinned, spinning in place)
+  _scanSample() {
+    const sc = this.sensors.scan; if (!sc || !sc.n) return [];
+    const pts = [], st = Math.max(1, Math.floor(sc.n / 180));
+    for (let i = 0; i < sc.n; i += st) {
+      const bx = sc.body[i * 3], by = sc.body[i * 3 + 1], bz = sc.body[i * 3 + 2];
+      const r = Math.hypot(bx, bz);
+      if (by > -0.2 && r > 2 && r < 35) pts.push(bx, bz);
+    }
+    return pts;
+  }
+  _scanSame(a, b) {
+    if (!a || !b || a.length < 30 || b.length < 30) return false;
+    let hit = 0; const tot = a.length / 2;
+    for (let i = 0; i < a.length; i += 2) {
+      const px = a[i], pz = a[i + 1];
+      for (let j = 0; j < b.length; j += 2) { const dx = b[j] - px, dz = b[j + 1] - pz; if (dx * dx + dz * dz < 0.04) { hit++; break; } }
+    }
+    return hit >= 15 && hit / tot >= 0.75;
+  }
+
+  rearClear(e, ahead = 2.5, relaxed = false) {
     // check the strip swept by the rear of the vehicle before reversing
     // only the wheel tracks matter: the straddle bay passes over low objects (cargo, saddles)
     const c = Math.cos(e.yaw), s = Math.sin(e.yaw);
     const hl = ROVER.frame.halfLen;
     for (let x = -hl; x >= -hl - ahead; x -= 0.5) for (const zz of [-4.4, -3.84, -3.3, 3.3, 3.84, 4.4]) {
-      const wh = this.slam.wheelHazard(e.x + x * c + zz * s, e.z - x * s + zz * c);
+      const wh = this.slam.wheelHazard(e.x + x * c + zz * s, e.z - x * s + zz * c, relaxed);
       if (wh && wh.lethal) return false;
     }
     return true;
   }
-  *backUp(dist) {
+  // opts.relaxed: reversing out along the line the rover has just driven in on (the drive-under), so the tyres are retracing
+  // their own tracks; the relaxed wheel-hazard limits (as unwindPath uses) apply. Returns the distance reversed.
+  *backUp(dist, opts = {}) {
     const s0 = this.est(); const phase0 = this.phase.replace(/ \(recovery\)$/, ''); this.phase = phase0 + ' (recovery)';
-    const t0 = this.sim.time;
-    while (Math.hypot(this.est().x - s0.x, this.est().z - s0.z) < dist && this.sim.time - t0 < 60) {
-      if (!this.rearClear(this.est())) { this.stop(); this.log('Reverse stopped: obstacle behind the vehicle', 'warn'); break; }
-      this.cmd(-0.6, 0, 0); this.detail = 'recovery: reversing (rear strip clear)'; yield;
+    const t0 = this.sim.time, hold = opts.yaw;
+    while (Math.hypot(this.est().x - s0.x, this.est().z - s0.z) < dist && this.sim.time - t0 < 60 + dist / 0.6) {
+      if (!this.rearClear(this.est(), 2.5, !!opts.relaxed)) { this.stop(); this.log('Reverse stopped: obstacle behind the vehicle', 'warn'); break; }
+      // (with a heading to hold: steer on it, so a long reverse out from under a module stays on the module axis)
+      if (hold != null) this.cmdCurv(-0.6, -clamp(0.8 * wrap(hold - this.est().yaw), -0.05, 0.05));
+      else this.cmd(-0.6, 0, 0);
+      this.detail = 'recovery: reversing (rear strip clear)'; yield;
     }
     this.stop();
     this.phase = phase0;
+    return Math.hypot(this.est().x - s0.x, this.est().z - s0.z);
   }
 
   // ---------------- cargo acquisition ----------------
@@ -1245,29 +1473,55 @@ export class Autonomy {
 
   *acquire(c, opts = {}) {
     const R = this.sim.rover, T = c.T;
-    try { return yield* this._acquire(c, opts); } finally { this.slam.lcSuspended = false; this.slam.matchSuspended = false; this.slam.mapping = true; }
+    try { return yield* this._acquire(c, opts); } finally { R.crawlZone = false; this.slam.lcSuspended = false; this.slam.matchSuspended = false; this.slam.mapping = true; }
   }
   // AEGIS-V1 pickup (module_carry.js): kneel, drive along the module axis under it until the clamp bands are
   // over the rings, RISE so the V-saddles lift it off the stand's lug notches, then close the ring jaws.
   *_acquire(c, opts = {}) {
     const R = this.sim.rover, T = c.T, RD = ROVER.ride;
     if (R.loaded) return { ok: false, why: 'already carrying cargo' };
+    this._backedOut = true;
     const aft = Math.min(-T.length / 2, (T.adapterX || 0) - (T.adapterLen || 0) / 2);
     const carry = T.carryX || 0;
+    // waits for the struts themselves (R.rideActual, strut position sensors), not only for the set point (R.lift.pos) to arrive;
+    // 30 s limit so a strut that cannot reach its stroke (FDIR) fails the checks that follow instead of hanging the mission
     const waitRide = function* (self, target, label) {
       R.lift.target = target;
-      while (Math.abs(R.lift.pos - target) > 0.01) { self.stop(); self.detail = `${label}: ride ${R.lift.pos.toFixed(2)} -> ${target.toFixed(2)} m`; yield; }
+      const t0 = self.sim.time;
+      while ((Math.abs(R.lift.pos - target) > 0.01 || Math.abs(R.rideActual - target) > 0.03) && self.sim.time - t0 < 30) { self.stop(); self.detail = `${label}: ride ${R.rideActual.toFixed(2)} -> ${target.toFixed(2)} m`; yield; }
       for (let i = 0; i < 20; i++) { self.stop(); yield; }
     };
     const backOut = function* (self) {
       const gc = self.cargoGuess(c);
       // clear overhead module returns from the 2.5D ground map (within +-4.38 m, leaving the +-5.63 m stand legs mapped)
       self.slam.clearFootprint(gc.x, gc.z, gc.yaw, -aft + 0.6, (T.adapterR || T.radius) + 0.4);
-      yield* self.backUp(-aft + ROVER.frame.halfLen + 4);
+      // straight back out along the module axis, the line the drive-under came in on (v1.7.0: relaxed rear check and heading
+      // held; the plain check stopped this reverse part-way under the pod rack, and the next attempt then raised the struts
+      // and drove off wedged under the rack: no yaw response, spinning wheels, 15 m of odometry error)
+      const need = -aft + ROVER.frame.halfLen + 4;
+      let got = yield* self.backUp(need, { relaxed: true, yaw: gc.yaw });
+      if (got < need - 1) { // still part-way under: try once more at a crawl after a pause (a transient return behind)
+        yield* self.wait(2, 'backing out from under the module');
+        got += yield* self.backUp(need - got, { relaxed: true, yaw: gc.yaw });
+      }
+      // clear of the module = the deck's front is behind the module's aft end (on its axis frame), whatever the reverse managed: an
+      // attempt abandoned short of the module never had the deck under it, and must not stop the pick-up
+      const e2 = self.est(), ax = Math.cos(gc.yaw), az = -Math.sin(gc.yaw);
+      const front = (e2.x - gc.x) * ax + (e2.z - gc.z) * az + ROVER.frame.halfLen; // deck front on the module axis, from its centre
+      const clear = front < aft - 0.3;
+      if (!clear) self.log(`${c.id}: could only back out ${got.toFixed(1)} of ${need.toFixed(1)} m; deck front ${(front - aft).toFixed(1)} m past the module's aft end`, 'warn');
+      return clear;
     };
     for (let attempt = 1; attempt <= 3; attempt++) {
       this.slam.lcSuspended = false; this.slam.matchSuspended = false; this.slam.mapping = true;
-      if (attempt > 1 && Math.abs(R.lift.pos - RD.cruise) > 0.02) yield* waitRide(this, RD.cruise, 'raising');
+      R.crawlZone = false; // open-ground transit to the pre-grasp point runs at the smart-rpm ceiling
+      // raise again only once the deck is out from under the module (the struts would press the deck into it)
+      // (RD.cruise does not exist in ROVER.ride: the old test compared with undefined, never raised, and every retry re-approached
+      // the module kneeled, 0.65 m lower, belly first. The driving ride height is 0.)
+      if (attempt > 1 && Math.abs(R.lift.pos) > 0.02) {
+        if (!this._backedOut) return { ok: false, why: `${c.id}: rover still under the module after a failed pickup: operator assistance required` };
+        yield* waitRide(this, 0, 'raising to driving height');
+      }
       let g = this.cargoGuess(c);
       // stand-off point on the module axis behind its aft end (rover front 14 m short of it)
       const pre = (gg, gap) => { const back = -aft + ROVER.frame.halfLen + gap - carry; return { x: gg.x - Math.cos(gg.yaw) * back, z: gg.z + Math.sin(gg.yaw) * back }; };
@@ -1276,6 +1530,7 @@ export class Autonomy {
       if (r && r.ok === false) return r;
       this.slam.lcSuspended = true; // the scene around the cargo is about to change (we move it)
       this.slam.matchSuspended = true; // avoid scan-to-map pulling pose onto shifted PAD/cargo cells during approach
+      R.crawlZone = true; // the pre-grasp point is 16 m short of the module: everything from here (line-up, kneel, drive under, lift) is the 120 rpm crawl
       this.phase = `M2 Locate ${c.id} (fiducials)`;
       let t0 = this.sim.time;
       while (this.sim.time - t0 < 1.5) { this.stop(); this.detail = `cargo estimate from ${this.cargoGuess(c).src}`; yield; }
@@ -1343,7 +1598,7 @@ export class Autonomy {
       for (let i = 0; i < 15; i++) yield;
       if (!ok) {
         this.log(`${c.id}: not centred under the module (attempt ${attempt}), backing out to retry`, 'warn');
-        yield* backOut(this);
+        this._backedOut = yield* backOut(this);
         continue;
       }
       if (opts.approachOnly) { this.log(`${c.id}: rover centred under the module, ready to lift`, 'ok'); return { ok: true }; }
@@ -1352,21 +1607,21 @@ export class Autonomy {
       const y0 = c.body.translation().y;
       yield* waitRide(this, RD.carry, 'rising (roller-screw struts)');
       const lifted = c.body.translation().y - y0;
-      if (lifted < 0.3) { this.log(`${c.id}: module did not lift off the stand (${lifted.toFixed(2)} m)`, 'warn'); yield* waitRide(this, RD.kneel, 'kneeling'); yield* backOut(this); continue; }
+      if (lifted < 0.3) { this.log(`${c.id}: module did not lift off the stand (${lifted.toFixed(2)} m)`, 'warn'); yield* waitRide(this, RD.kneel, 'kneeling'); this._backedOut = yield* backOut(this); continue; }
       this.phase = `M3 Clamp ${c.id}`;
       const res = R.clampClose();
-      if (!res.ok) { this.log(`Clamp attempt ${attempt} refused: ${res.why}`, 'warn'); yield* waitRide(this, RD.kneel, 'kneeling'); yield* backOut(this); continue; }
+      if (!res.ok) { this.log(`Clamp attempt ${attempt} refused: ${res.why}`, 'warn'); yield* waitRide(this, RD.kneel, 'kneeling'); this._backedOut = yield* backOut(this); continue; }
       while (R.lift.clamp === 'closing') { this.detail = `ring jaws closing ${(R.lift.clampT * 100).toFixed(0)}%  (lugs ${lifted.toFixed(2)} m above the notches)`; yield; }
       // (was: retried straight away with the module still riding unclamped on the raised saddles, so the next attempt's
       // approach drive carried it off its stand. Set it back down and back out first, like the other failure paths.)
-      if (R.lift.clamp !== 'closed') { this.log(`Clamp attempt ${attempt} failed: ${R.lift.msg}`, 'warn'); while (R.lift.clamp === 'opening') yield; yield* waitRide(this, RD.kneel, 'kneeling'); yield* backOut(this); continue; }
+      if (R.lift.clamp !== 'closed') { this.log(`Clamp attempt ${attempt} failed: ${R.lift.msg}`, 'warn'); while (R.lift.clamp === 'opening') yield; yield* waitRide(this, RD.kneel, 'kneeling'); this._backedOut = yield* backOut(this); continue; }
       yield* this.wait(0.5, 'verifying load path');
       c.state = 'held';
       // the module is now part of the vehicle: forget its footprint in the terrain map
       { const e2 = this.est(); const half = (T.adapterR || T.radius) + 0.5;
         this.slam.clearFootprint(e2.x + Math.cos(e2.yaw) * carry, e2.z - Math.sin(e2.yaw) * carry, e2.yaw, -aft + 2.2, half);
         this.slam.mapping = true;
-        this._needStandExit = { x: e2.x, z: e2.z, yaw: e2.yaw, dist: 12.0 }; }
+        this._needStandExit = { x: e2.x, z: e2.z, yaw: e2.yaw, dist: MISSION.standExitM }; }
       const st = this.manifest.find((m) => m.cargo === c); if (st) st.status = 'in transit';
       this.log(`${c.id} lifted ${lifted.toFixed(2)} m off its stand and clamped (${(T.mass * MOON.g / 1000).toFixed(1)} kN on the saddles)`, 'ok');
       return { ok: true };
@@ -1410,7 +1665,7 @@ export class Autonomy {
   }
 
   *deliver(portId) {
-    try { return yield* this._deliver(portId); } finally { this.slam.lcSuspended = false; this.slam.matchSuspended = false; this.slam.mapping = true; }
+    try { return yield* this._deliver(portId); } finally { this.sim.rover.crawlZone = false; this.slam.lcSuspended = false; this.slam.matchSuspended = false; this.slam.mapping = true; }
   }
   *_deliver(portId) {
     const R = this.sim.rover;
@@ -1419,21 +1674,33 @@ export class Autonomy {
     const c = R.lift.cargo, T = c.T;
     if (this._needStandExit) {
       const ex = this._needStandExit; this._needStandExit = null;
-      const e0 = this.est();
-      const prog = () => (this.est().x - ex.x) * Math.cos(ex.yaw) - (this.est().z - ex.z) * Math.sin(ex.yaw);
+      const e0 = this.est(), RD = ROVER.ride, dir = MISSION.standExitDir;
+      // metres travelled from the pick-up spot along the module axis, in the exit direction (+1 forward: toward the habitat, the
+      // open end of the stand; see MISSION.standExitDir for why not reverse)
+      const prog = () => { const e = this.est(); return dir * ((e.x - ex.x) * Math.cos(ex.yaw) - (e.z - ex.z) * Math.sin(ex.yaw)); };
       if (Math.hypot(e0.x - ex.x, e0.z - ex.z) < ex.dist + 2 && prog() < ex.dist) {
         this.phase = `Exit ${c.id} stand`;
         this.slam.lcSuspended = true;
+        R.crawlZone = true;
         try {
+          // 1. lift verification on the vehicle itself, not on the set point: struts at the carry stroke (position sensors), jaws
+          //    locked. The 23 t vehicle does not move while the module's lugs can still be in the stand notches.
+          const tV = this.sim.time;
+          while (this.sim.time - tV < 20 && !(R.rideActual >= RD.carry - 0.04 && R.lift.clamp === 'closed')) {
+            this.stop(); this.detail = `verifying lift before departure: struts ${R.rideActual.toFixed(2)} / ${RD.carry.toFixed(2)} m, jaws ${R.lift.clamp}`; yield;
+          }
+          // 2. straight out along the module axis with the heading held (curvature limited to MISSION.standExitKap: measured
+          //    0.1 deg of heading change and 2 cm of lateral drift over the 12 m, 0 N of stand contact on the module). No turn
+          //    starts inside the stand footprint; navTo takes over only once the rover centre is standExitM from the pick-up spot.
           const t0 = this.sim.time;
-          while (prog() < ex.dist && this.sim.time - t0 < 40) {
-            const e = this.est(), d = prog();
-            this.cmdCurv(0.5, clamp(0.8 * wrap(ex.yaw - e.yaw), -0.05, 0.05));
-            this.detail = `exiting stand (${Math.max(0, d).toFixed(1)} / ${ex.dist.toFixed(1)} m)`;
+          while (prog() < ex.dist && this.sim.time - t0 < 90) {
+            const e = this.est();
+            this.cmdCurv(dir * MISSION.standExitSpeed, dir * clamp(0.8 * wrap(ex.yaw - e.yaw), -MISSION.standExitKap, MISSION.standExitKap)); // x dir: the yaw rate v * kap must correct the heading in reverse too
+            this.detail = `leaving the stand, heading held (${Math.max(0, prog()).toFixed(1)} / ${ex.dist.toFixed(1)} m)`;
             yield;
           }
           this.stop();
-        } finally { this.slam.lcSuspended = false; }
+        } finally { R.crawlZone = false; this.slam.lcSuspended = false; }
       }
     }
     if (this.faults.port[portId]) {
@@ -1502,6 +1769,7 @@ export class Autonomy {
         const target = { x: g.x + nn.x * frontOff(), z: g.z + nn.z * frontOff() };
         const rel = this.relBody(target, e);
         let lat = rel.r, along = rel.f, yawErr = wrap(wrap(g.nYaw + Math.PI) - e.yaw), src = 'port fiducial';
+        R.crawlZone = along < MISSION.crawlDockM; // the last 20 m of vestibule entry run at the 120 rpm crawl cap
         if (ring && ring.port === port && ring.along < 12) {
           along = ring.along; src = 'docking-ring camera';
           if (ring.yaw != null) yawErr = ring.yaw; // module axis vs port axis, measured on the ring itself
@@ -1641,6 +1909,7 @@ export class Autonomy {
     { const rq = c.body.rotation(); const q = new THREE.Quaternion(rq.x, rq.y, rq.z, rq.w); const ax = new THREE.Vector3(1, 0, 0).applyQuaternion(q); acc.yawDeg = wrap(Math.atan2(-ax.z, ax.x) - Math.atan2(port.nz, -port.nx)) / DEG; }
     this.metrics.accuracy.push(acc);
     this.sim.dockCapture(c, port);
+    R.crawlZone = false; // soft capture done: clear of the approach zone
     this.log(`SOFT CAPTURE ${port.name}: lateral ${acc.lateralMm.toFixed(1)} mm, vertical ${acc.verticalMm.toFixed(1)} mm, yaw ${acc.yawDeg.toFixed(2)} deg`, 'ok');
     // berthing sequence: pressure boundary sealed before the module hatch opens
     // Order: the sealing faces are cleaned while they are still 30 mm apart (soft capture), THEN drawn together. (The
@@ -1831,7 +2100,15 @@ export class Autonomy {
         this.log(`${item.id}: leg needs ~${(item.energy / 1000).toFixed(0)} kWh above the ${(this.reserveSoc * 100).toFixed(0)}% reserve - recharging first`, 'warn');
         const rc = yield* this.chargeAtDock(0.9); if (rc && rc.ok === false) return rc;
       }
-      let r = yield* this.surveyRoute(item.cargo); if (r.ok === false) return r;
+      // reserve check at the top of every leg: the next cargo is a drive back to the pad staging area and a loaded 2 km
+      // transit, so a rover at or under the reserve recharges at the power dock first and then carries on by itself
+      if (!this.sim.rover.loaded && this.sim.rover.power.soc <= this.reserveSoc) {
+        this.log(`${item.id}: SoC ${(this.sim.rover.power.soc * 100).toFixed(0)}% is at the ${(this.reserveSoc * 100).toFixed(0)}% reserve - recharging at the power dock, then resuming`, 'warn');
+        const rc = yield* this.chargeAtDock(0.9); if (rc && rc.ok === false) return rc;
+      }
+      // straight to the cargo (acquire: approach -> kneel -> rise -> clamp). The empty survey drive to the port and back
+      // (surveyRoute) is opt-in: MISSION.preSurveyRoute
+      let r = MISSION.preSurveyRoute ? yield* this.surveyRoute(item.cargo) : { ok: true }; if (r.ok === false) return r;
       r = yield* this.acquire(item.cargo); if (r.ok === false) return r;
       r = yield* this.deliver(item.cargo.dest); if (r.ok === false) return r; // dest, not the plan copy: "reroute" may change it
       this.metrics.legs.push({ id: item.id, time: this.sim.time - legStart.t, dist: this.sim.rover.odo.dist - legStart.d, energyWh: this.sim.rover.power.energyUsedWh - legStart.e });

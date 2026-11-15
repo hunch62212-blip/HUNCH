@@ -226,7 +226,8 @@ async function main() {
     if (k === 't') hud.toggleThermal();
     if (k === 'p') sim.paused = !sim.paused;
     if (k === 'x') { sim.paused = false; sim.timeScale = sim.timeScale >= 50 ? 1 : 50; sim.log(sim.timeScale >= 50 ? 'FAST FORWARD 50x' : 'Time scale 1x', 'ok'); }
-    if (k === 'h' || k === '?') hud.toggleHelp();
+    if (k === 'h') hud.cycleLayer();
+    if (k === '?') hud.toggleHelp();
     if (k === 'g') { const L = sim.rover.lift; const r = L.clamp === 'open' ? sim.rover.clampClose() : sim.rover.clampOpen(); sim.log(r.ok ? sim.rover.lift.msg : 'Refused: ' + r.why, r.ok ? 'ok' : 'warn'); }
     if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
   });
@@ -289,6 +290,7 @@ async function main() {
   // Adaptive quality: 'auto' walks down this ladder when the frame rate sags and back up when there is headroom
   const LADDER = [['high', 1], ['high', 0.85], ['medium', 0.85], ['medium', 0.7], ['low', 0.7], ['low', 0.55]];
   let rung = 0, auto = false, slowT = 0, fastT = 0, ema = 1 / 60, simBudget = 20, camEvery = 1;
+  const warpT = { phys: 0, over: 8, every: 1, drew: true }; // time-warp frame accounting (ms): physics per frame, non-physics per drawn frame
   function applyRung(r) {
     rung = Math.max(0, Math.min(LADDER.length - 1, r)); const [q, sc] = LADDER[rung];
     S.setQuality(q, sc);
@@ -316,7 +318,7 @@ async function main() {
   }
   // default = adaptive 'auto' (sizes itself to the device and steps down if the frame rate sags); a manual choice is remembered
   { let q = 'auto'; try { q = localStorage.getItem('aegis-quality') || 'auto'; } catch (e) { /* ignore */ } ui.setQuality(q); ui.quality = q; }
-  sim.log('Type "help" for commands, H for controls. Try: mission cycle  |  W/A/S/D to drive  |  Esc = E-STOP', 'info');
+  sim.log('Type "help" for commands, H cycles the HUD layers, ? for controls. Try: mission cycle  |  W/A/S/D to drive  |  Esc = E-STOP', 'info');
   await step(100, 'Ready');
   document.getElementById('loading').style.display = 'none';
 
@@ -329,14 +331,20 @@ async function main() {
     requestAnimationFrame(loop);
     const rawDt = clock.getDelta();
     const dt = Math.min(rawDt, 0.1);
-    if (auto && !document.hidden && rawDt < 0.25) {   // ignore tab-switch stalls
+    // (the governor is frozen above 1x: a frame stretched by time-warp physics is not a slow GPU, and stepping the quality and the
+    // physics budget down for it starved the very warp that caused it)
+    if (auto && !document.hidden && rawDt < 0.25 && sim.timeScale <= 1) {   // ignore tab-switch stalls
       ema += (rawDt - ema) * 0.08;
       if (ema > 1 / 42) { slowT += rawDt; fastT = 0; } else if (ema < 1 / 56) { fastT += rawDt; slowT = 0; } else { slowT = fastT = 0; }
       if (slowT > 1.5 && rung < LADDER.length - 1) { applyRung(rung + 1); slowT = 0; ema = 1 / 50; }
       else if (fastT > 12 && rung > 0) { applyRung(rung - 1); fastT = 0; ema = 1 / 50; }
     }
     manualInput(dt);
+    // What the previous frame spent outside the physics (drawing, presenting, waiting for the display): a running mean over drawn frames.
+    if (warpT.drew && rawDt < 0.25) warpT.over += (Math.max(0, rawDt * 1000 - warpT.phys) - warpT.over) * 0.15;
+    const tPhys = performance.now();
     const simDt = sim.advance(dt, simBudget); // sim seconds this frame (many at 50x)
+    warpT.phys = performance.now() - tPhys;
     const R = sim.rover, p = R.pose();
     roverModel.update(R, sim.time);
     powerDockVis.update(dt);
@@ -399,56 +407,64 @@ async function main() {
     }
     camera.updateProjectionMatrix();
 
-    // shadows follow the area of interest
-    const focus = ui.view === 'cam' ? new THREE.Vector3(p.x, p.y, p.z) : controls.target;
-    S.sun.position.copy(focus).addScaledVector(sim.sunDir, 400); S.sun.target.position.copy(focus);
-    S.sky.position.copy(camera.position);
-    if (frame % 4 === 0) terrainMesh.update(camera.position, 6);
-    if (frame % 10 === 0) pebbles.update(ui.view === 'cam' ? p : controls.target);
+    // Draw throttle, only while the time warp is CPU-limited (sim.lagging above 1x). Each drawn frame costs warpT.over ms that the
+    // physics does not get; when that is large (a 4K display, software rendering) the scene is drawn every 2nd-4th frame instead,
+    // never less often than ~8 times a second, and the frames in between are physics only. When drawing is cheap, or the sim keeps
+    // up (1x, or cruising on the transit-warp rails), every frame is drawn as always.
+    warpT.every = sim.lagging && sim.timeScale > 1 && !sim.paused ? Math.max(1, Math.min(Math.round(warpT.over / 15), Math.floor(120 / Math.max(20, warpT.phys)), 4)) : 1;
+    warpT.drew = warpT.every <= 1 || frame % warpT.every === 0;
+    if (warpT.drew) {
+      // shadows follow the area of interest
+      const focus = ui.view === 'cam' ? new THREE.Vector3(p.x, p.y, p.z) : controls.target;
+      S.sun.position.copy(focus).addScaledVector(sim.sunDir, 400); S.sun.target.position.copy(focus);
+      S.sky.position.copy(camera.position);
+      if (frame % 4 === 0) terrainMesh.update(camera.position, 6);
+      if (frame % 10 === 0) pebbles.update(ui.view === 'cam' ? p : controls.target);
 
-    if (frame % 90 === 0) S.csmRegister(scene);
-    S.csm.update(); S.csmGuard(); S.shadowSchedule(frame);
-    renderer.shadowMap.autoUpdate = true;
-    S.composer.render();
-    // onboard camera feed (scissored into the HUD frame)
-    const rect = hud.camRect();
-    if (rect && ui.view !== 'cam') {
-      const H = window.innerHeight;
-      const redraw = camEvery <= 1 || frame % camEvery === 0 || !feedRT.ready;
-      if (camEvery <= 1) {
-        // full rate: straight into the HUD frame (scissored)
-        const cp = sim.sensors.cameraPose();
-        roverCam.position.copy(cp.pos); roverCam.quaternion.copy(cp.q).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2));
-        roverCam.updateMatrixWorld();
-        renderer.shadowMap.autoUpdate = false;
-        renderer.setScissorTest(true);
-        renderer.setScissor(rect.left, H - rect.bottom, rect.width, rect.height); renderer.setViewport(rect.left, H - rect.bottom, rect.width, rect.height);
-        const vis = lidar.points.visible; lidar.points.visible = false;
-        renderer.autoClear = true; renderer.render(scene, roverCam);
-        lidar.points.visible = vis;
-        renderer.setScissorTest(false); renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
-      } else {
-        // reduced rate: render the onboard feed into a small target every few frames, blit it every frame
-        if (redraw) {
+      if (frame % 90 === 0) S.csmRegister(scene);
+      S.csm.update(); S.csmGuard(); S.shadowSchedule(frame);
+      renderer.shadowMap.autoUpdate = true;
+      S.composer.render();
+      // onboard camera feed (scissored into the HUD frame)
+      const rect = hud.camRect();
+      if (rect && ui.view !== 'cam') {
+        const H = window.innerHeight;
+        const redraw = camEvery <= 1 || frame % camEvery === 0 || !feedRT.ready;
+        if (camEvery <= 1) {
+          // full rate: straight into the HUD frame (scissored)
           const cp = sim.sensors.cameraPose();
           roverCam.position.copy(cp.pos); roverCam.quaternion.copy(cp.q).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2));
           roverCam.updateMatrixWorld();
-          const vis = lidar.points.visible; lidar.points.visible = false;
           renderer.shadowMap.autoUpdate = false;
-          renderer.setRenderTarget(feedRT); renderer.autoClear = true; renderer.render(scene, roverCam); renderer.setRenderTarget(null);
-          lidar.points.visible = vis; feedRT.ready = true;
+          renderer.setScissorTest(true);
+          renderer.setScissor(rect.left, H - rect.bottom, rect.width, rect.height); renderer.setViewport(rect.left, H - rect.bottom, rect.width, rect.height);
+          const vis = lidar.points.visible; lidar.points.visible = false;
+          renderer.autoClear = true; renderer.render(scene, roverCam);
+          lidar.points.visible = vis;
+          renderer.setScissorTest(false); renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
+        } else {
+          // reduced rate: render the onboard feed into a small target every few frames, blit it every frame
+          if (redraw) {
+            const cp = sim.sensors.cameraPose();
+            roverCam.position.copy(cp.pos); roverCam.quaternion.copy(cp.q).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2));
+            roverCam.updateMatrixWorld();
+            const vis = lidar.points.visible; lidar.points.visible = false;
+            renderer.shadowMap.autoUpdate = false;
+            renderer.setRenderTarget(feedRT); renderer.autoClear = true; renderer.render(scene, roverCam); renderer.setRenderTarget(null);
+            lidar.points.visible = vis; feedRT.ready = true;
+          }
+          renderer.setScissorTest(true);
+          renderer.setScissor(rect.left, H - rect.bottom, rect.width, rect.height); renderer.setViewport(rect.left, H - rect.bottom, rect.width, rect.height);
+          renderer.autoClear = false; renderer.render(feedScene, feedCam); renderer.autoClear = true;
+          renderer.setScissorTest(false); renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
         }
-        renderer.setScissorTest(true);
-        renderer.setScissor(rect.left, H - rect.bottom, rect.width, rect.height); renderer.setViewport(rect.left, H - rect.bottom, rect.width, rect.height);
-        renderer.autoClear = false; renderer.render(feedScene, feedCam); renderer.autoClear = true;
-        renderer.setScissorTest(false); renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
       }
     }
     hud.update(dt);
     frame++;
   }
   loop();
-  window.sim = sim; window.app = { camera, controls, ui, scene, renderer, applyRung: (r) => { auto = false; applyRung(r); } }; // for debugging in the browser console
+  window.sim = sim; window.app = { camera, controls, ui, scene, renderer, roverModel, warpT, applyRung: (r) => { auto = false; applyRung(r); } }; // for debugging in the browser console
 }
 
 main().catch((e) => { console.error(e); loadMsg.textContent = 'Error: ' + e.message; loadMsg.style.color = '#ff4d3a'; });

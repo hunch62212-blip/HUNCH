@@ -1,5 +1,5 @@
-// Sensor models: 16-channel spinning LiDAR, monocular camera with fiducial (AprilTag-style)
-// detection and rock detection, IMU (gyro bias random walk), wheel odometry, and the cradle
+// Sensor models: 32-channel 360 deg spinning LiDAR on the front deck corner, stereo depth camera with fiducial
+// (AprilTag-style) detection and rock detection, IMU (gyro bias random walk), wheel odometry, and the cradle
 // alignment sensor suite (lateral laser rangefinders + light curtains + dock gap sensor).
 import * as THREE from 'three';
 import { ROVER, CARGO_TYPES, DOCK } from './config.js';
@@ -10,6 +10,10 @@ import { wheelSoil } from './terramechanics.js';
 
 const rand = mulberry32(777);
 export function gauss() { let u = 0, v = 0; while (u === 0) u = rand(); while (v === 0) v = rand(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+// the LiDAR and the stereo depth camera draw from their own stream: their hit counts depend on the terrain and the scan policy, and
+// sharing the IMU / camera / alignment-sensor stream above made every precision sensor's noise change whenever the scan did
+const randRange = mulberry32(31337);
+function gaussRange() { let u = 0, v = 0; while (u === 0) u = randRange(); while (v === 0) v = randRange(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
 
 export class Sensors {
   constructor(sim) {
@@ -62,18 +66,19 @@ export class Sensors {
       }
     }
   }
-  // Adaptive spin: the head turns faster when the rover is fast (fresher scans, ~constant ray budget, coarser azimuth),
-  // and slower with finer azimuth when it creeps (docking, pickup). Applied only between scans.
+  // Adaptive spin (ray budget): the head turns faster when the rover is fast (fresher scans, ~constant ray budget, coarser
+  // azimuth), and slower with finer azimuth when it creeps (docking, pickup): ROVER.lidar.tiers. At time scales above 1x the scan
+  // RATE drops as 1 / scale (min 1 Hz) and the azimuth steps are capped at 180 from 10x: the same sim-time coverage for the same
+  // wall-clock cost. Applied only between scans.
   _lidarPolicy() {
     if (this.lidarAuto === false) return;
     const now = this.sim.time;
     if (now - (this._polT ?? -9) < 2) return;
-    const v = Math.hypot(this.odom.vx, this.odom.vz);
-    const tier = v < 0.5 ? [5, 240] : v < 2.5 ? [8, 150] : [12, 100];
+    const v = Math.hypot(this.odom.vx, this.odom.vz), ts = Math.max(1, this.sim.timeScale);
+    const [, hz, az] = ROVER.lidar.tiers.find((t) => v < t[0]) || ROVER.lidar.tiers[ROVER.lidar.tiers.length - 1];
+    const rate = Math.max(1, Math.round(hz / Math.min(10, Math.ceil(ts)))), hRes = ts >= 10 ? Math.min(az, 180) : az;
     const C = this.lidarCfg;
-    if (C.rateHz !== tier[0] || C.hRes !== tier[1]) {
-      C.rateHz = tier[0]; C.hRes = tier[1]; this._buildDirs(); this._polT = now;
-    }
+    if (C.rateHz !== rate || C.hRes !== hRes) { C.rateHz = rate; C.hRes = hRes; this._buildDirs(); this._polT = now; }
   }
   // Two LiDAR heads sit on the front deck corners (lidar_mount.js: port unit A, starboard unit B, mirrored in z).
   // A is prime, B a cold spare: FDIR switches to it when A does not come back from a power cycle (health.js).
@@ -227,6 +232,12 @@ export class Sensors {
       this._camT += 0.1;
       if (this.cameraOn && !this.faults.camera && R.powered && this.sim.thermal?.ok.camera !== false) this._doCamera(); else { this.detections = []; this.rockDetections = []; }
     }
+    // stereo depth: ROVER.camera.stereoRateHz in sim time at 1x, stretched with the time scale so the wall-clock cost stays flat
+    this._stT = (this._stT ?? 0) - dt;
+    if (this._stT <= 0) {
+      this._stT = Math.max(1, this.sim.timeScale) / ROVER.camera.stereoRateHz;
+      if (ROVER.camera.stereo && this.cameraOn && !this.faults.camera && R.powered && this.sim.thermal?.ok.camera !== false) this._doStereo(); else this.stereo = null;
+    }
     this._cassN = (this._cassN || 0) + 1;
     if (this.sim.timeScale <= 3 || this._cassN % 2 === 0 || !this.cass) this.cass = this._doCASS(p);
     this.sunTick(dt, p);
@@ -248,7 +259,9 @@ export class Sensors {
   _beginScan(sectors) {
     const { channels, hRes } = this.lidarCfg;
     const N = channels * hRes;
-    this._partial = { sectors, sector: 0, world: new Float32Array(N * 3), kind: new Uint8Array(N), m: 0 };
+    // interlaced firing (ROVER.lidar.interlace): even beams on one sweep, odd beams on the next
+    this._ilv = (this._ilv ?? 1) ^ 1;
+    this._partial = { sectors, sector: 0, world: new Float32Array(N * 3), kind: new Uint8Array(N), m: 0, c0: ROVER.lidar.interlace ? this._ilv : 0, cs: ROVER.lidar.interlace ? 2 : 1 };
   }
   _scanSector(p) {
     const L = ROVER.lidar, P = this._partial;
@@ -256,16 +269,17 @@ export class Sensors {
     const { channels, hRes, range } = this.lidarCfg;
     const h0 = Math.floor(P.sector * hRes / P.sectors), h1 = Math.floor((P.sector + 1) * hRes / P.sectors);
     const d = new THREE.Vector3(), q = p.q, dirs = this._dirs, colliderRock = this.sim.colliderRock;
-    // above 3x time scale, fire every other azimuth to keep the simulation interactive
-    const hs = this.sim.timeScale > 3 ? 2 : 1;
-    this.decimated = hs > 1;
-    for (let c = 0; c < channels; c++) for (let h = h0; h < h1; h += hs) {
+    // (the scan rate and azimuth steps follow the time scale in _lidarPolicy; no per-ray decimation here any more)
+    this.decimated = false;
+    const mask = this._selfMask(p);
+    for (let c = P.c0; c < channels; c += P.cs) for (let h = h0; h < h1; h++) {
       const i = c * hRes + h;
       d.set(dirs[i * 3], dirs[i * 3 + 1], dirs[i * 3 + 2]).applyQuaternion(q);
       const hit = this._castRay(o, d, range);
       if (!hit) continue;
-      const t = hit.timeOfImpact + L.noise * gauss();
+      const t = hit.timeOfImpact + L.noise * gaussRange();
       if (t < 1.0) continue;
+      if (mask && mask(o.x + d.x * t, o.y + d.y * t, o.z + d.z * t)) continue; // the vehicle's own chassis / payload
       const m = P.m++;
       P.world[m * 3] = o.x + d.x * t; P.world[m * 3 + 1] = o.y + d.y * t; P.world[m * 3 + 2] = o.z + d.z * t;
       const hc = hit.collider.handle;
@@ -273,6 +287,50 @@ export class Sensors {
       P.kind[m] = hc === this.sim.terrainCollider.handle ? 0 : colliderRock.has(hc) ? 1 : owner && owner.kind === 'cargo' ? 3 : 2;
     }
     P.sector++;
+  }
+  // Dynamic self-occlusion mask: a return that lands on the chassis box or on the carried module's cylinder is the vehicle seeing
+  // itself, not an obstacle, and must never be mapped (the payload would become a wall 4 m from the rover). The ray queries
+  // already skip the rover's and the held cargo's colliders (collision groups, world.js Q_SENSOR / G_CARGO_HELD); this test on the
+  // hit point is the explicit second line and also covers the cargo's enclosing cylinder (ring-adapter sled, module overhang),
+  // which has no collider of its own. Known simplification, as before v1.7.0: the rays pass THROUGH the vehicle instead of being
+  // blocked by it, so the one modelled head sees all round; on the real vehicle the second corner head covers what the first cannot.
+  // Returns a (wx, wy, wz) => boolean test in world coordinates, or null when nothing needs masking.
+  _selfMask(p) {
+    const R = this.sim.rover, F = ROVER.frame, qi = p.q.clone().invert(), v = new THREE.Vector3();
+    const c = R.loaded ? R.lift.cargo : null, T = c && c.T, b = c && R.lift.base;
+    const cylR = T ? Math.max(T.adapterR || 0, T.shape === 'cylinder' ? T.radius : Math.hypot(T.height / 2, T.width / 2)) + 0.3 : 0;
+    const cylL = T ? Math.max(T.length / 2 + Math.abs(T.carryX || 0), (T.adapterLen || 0) / 2 + Math.abs(T.adapterX || 0)) + 0.3 : 0;
+    return (wx, wy, wz) => {
+      v.set(wx - p.x, wy - p.y, wz - p.z).applyQuaternion(qi);   // body frame
+      if (Math.abs(v.x) < F.halfLen && Math.abs(v.z) < F.halfWid && v.y > F.tubY0 && v.y < F.deckY + 0.3) return true; // chassis box (belly tub to deck)
+      if (T) { const dy = v.y - b.y, dz = v.z - b.z; if (Math.abs(v.x - b.x) < cylL && dy * dy + dz * dz < cylR * cylR) return true; }
+      return false;
+    };
+  }
+
+  // Stereo depth (ROVER.camera.stereo): a coarse dense depth grid across the camera's field of view. Depth noise follows
+  // the disparity model sigma_z = z^2 sigma_d / (f B). Returns are expressed in the body frame like a LiDAR scan and fused by
+  // Slam.integrate alongside the LiDAR hits; points whose depth sigma exceeds ROVER.camera.fuseSigma are not fused (see there).
+  _doStereo() {
+    const R = this.sim.rover, C = ROVER.camera, cam = this.cameraPose(), p = R.pose();
+    const [nu, nv] = C.stereoGrid, hf = C.hFovDeg * Math.PI / 360, tu = Math.tan(hf), tv = tu * 0.75;
+    const f = (C.imagePx / 2) / tu, zMin = f * C.baselineM / 64;            // 64 px disparity search window
+    const body = new Float32Array(nu * nv * 3), sigma = new Float32Array(nu * nv), qi = p.q.clone().invert(), d = new THREE.Vector3(), w = new THREE.Vector3();
+    let m = 0;
+    for (let iv = 0; iv < nv; iv++) for (let iu = 0; iu < nu; iu++) {
+      const u = ((iu + 0.5) / nu * 2 - 1) * tu, vv = ((iv + 0.5) / nv * 2 - 1) * tv;
+      d.copy(cam.fwd).addScaledVector(cam.right, u).addScaledVector(cam.up, -vv).normalize();
+      const cosA = d.dot(cam.fwd), hit = this._castRay(cam.pos, d, C.depthRange / cosA);
+      if (!hit) continue;
+      const z = hit.timeOfImpact * cosA;                                    // depth along the optical axis
+      if (z < zMin) continue;
+      const sig = z * z * C.disparityNoise / (f * C.baselineM), t = hit.timeOfImpact + gaussRange() * sig / cosA;
+      w.copy(cam.pos).addScaledVector(d, t);
+      w.x -= p.x; w.y -= p.y; w.z -= p.z; w.applyQuaternion(qi);
+      body[m * 3] = w.x; body[m * 3 + 1] = w.y; body[m * 3 + 2] = w.z; sigma[m] = sig; m++;
+    }
+    this.stereo = { t: this.sim.time, n: m, fused: 0 };
+    if (m) this.stereo.fused = this.sim.slam.integrate({ n: m, body: body.subarray(0, m * 3), sigma: sigma.subarray(0, m), roll: this.imu.roll, pitch: this.imu.pitch }, C.fuseSigma);
   }
   _finishScan(p) {
     // motion de-skew: express every return in the body frame at the end of the sweep

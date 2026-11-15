@@ -138,10 +138,35 @@ export const ROVER = {
   battery: { capacityWh: 420000, nominalV: 400, internalR: 0.02 },
   solar: { panelArea: 0, panels: 0, efficiency: 0.30, mastHeight: 0 }, // charged at the AEGIS garage (dock_station.js)
   avionicsW: 900, heaterW: 600, lidarW: 22, cameraW: 6, commsW: 90,
-  lift: { travel: 0, rate: 0.5, capacityN: 60000, stageMax: 0, stageRate: 0, lateralMax: 0, jawS: 2.5 },
+  // ride-height stroke: `rate` is the fast path for small trims. A move longer than trimBand follows a minimum-jerk (quintic) S-curve,
+  // ease-in and ease-out, of duration max(tMin, 1.875 x stroke / vPeak, tFull x min(1, stroke / fullAt)): any stroke of fullAt (0.5 m) or
+  // more takes at least tFull, so the 0.65 m squat-down takes 3.7 s (peak 0.33 m/s, 0.27 m/s^2) and the 1.47 m kneel-to-carry lift 3.9 s
+  // (peak 0.70 m/s, 0.55 m/s^2 = 0.34 lunar g). The levelling servo feeds the stroke rate forward (rover.js _leveling), so this is the
+  // motion of the body itself, not only of the set point. Soft seat: an upward stroke that would run the saddles into a module resting
+  // overhead stops seatMargin m under it (duration x seatK: the rover moves alone), then lifts from rest (rover.js _liftStep).
+  // [ASSUMED] sim tuning; real roller-screw EMAs are jerk-limited over seconds.
+  lift: { travel: 0, rate: 0.5, capacityN: 60000, stageMax: 0, stageRate: 0, lateralMax: 0, jawS: 2.5, sCurve: { vPeak: 0.7, tMin: 0.5, tFull: 3.7, fullAt: 0.5, trimBand: 0.02, seatMargin: 0.03, seatK: 0.65 } },
   // one LiDAR (front deck corner, lidar_mount.js unit FS) and one camera on the avionics pod
-  lidar: { mountLocal: { x: k(0.25), y: k(0.266), z: -k(0.15) }, channels: 16, vFovDeg: [-30, 10], tiltDeg: -10, hRes: 180, range: 90, rateHz: 5, noise: 0.02 },
-  camera: { mountLocal: { x: k(0.275), y: k(0.29), z: 0 }, hFovDeg: 70, pitchDeg: -12, range: 70 },
+  // v1.7.0 sensor suite. LiDAR mount [CAD]: the team's chosen option D of the lidar_mount.js trade study, a fixed scanner on a front
+  // deck corner under the module (unit FS; unit FP, mirrored in z, is the cold spare). The spec for v1.7.0 asked for a centre mast at
+  // y = k(0.35) = 5.7 m: that point is inside the carried module (underside 5.2 m at ride 0) and the study rejected a mast for that
+  // reason ("stowed head sat 24 mm inside the module swing"), so the mount stays where the CAD and the drawn model have it.
+  // Scanner [ASSUMED]: 32 beams over -30..+15 deg (was 16 over -30..+10), 360 deg sweep, head pitched 10 deg nose-down as before.
+  //   rateHz / hRes  the head's rated 10 Hz x 360 azimuth steps = 115 000 rays/s, 6x what the old scanner cast and the dominant CPU
+  //                  cost of the whole simulation. What it runs is `tiers` (sensors.js _lidarPolicy): [speed limit m/s, scan Hz,
+  //                  azimuth steps], the old scanner's own schedule ...
+  //   interlace      ... with the 32 beams fired as two interleaved sets of 16 on alternate sweeps: every sweep costs what a 16-beam
+  //                  one did (19 200 rays/s), and the map gets all 32 rings over two sweeps (the rover moves < 0.5 m between them).
+  // Camera [ASSUMED]: a stereo depth pair on the avionics pod, 90 deg HFOV (was 70 mono), 0.18 m baseline, dense depth to depthRange m.
+  //   disparityNoise  sub-pixel disparity sigma (px, imagePx-wide image): depth sigma = z^2 x disparityNoise / (f x baseline),
+  //                   3 cm at 8 m, 10 cm at 14 m, 0.6 m at 35 m;  stereoRateHz / stereoGrid  depth frame rate and its columns x rows
+  //   fuseSigma       m: only depth points at or under this sigma are fused into the map (slam.js integrate)
+  lidar: { mountLocal: { x: k(0.25), y: k(0.266), z: -k(0.15) }, channels: 32, vFovDeg: [-30, 15], tiltDeg: -10, hRes: 360, range: 90, rateHz: 10, noise: 0.02,
+    interlace: true, tiers: [[0.5, 5, 240], [2.5, 8, 150], [Infinity, 12, 100]] },
+  camera: {
+    mountLocal: { x: k(0.275), y: k(0.29), z: 0 }, hFovDeg: 90, pitchDeg: -12, range: 70,
+    stereo: true, baselineM: 0.18, depthRange: 35, disparityNoise: 0.03, stereoRateHz: 4, stereoGrid: [32, 18], imagePx: 640, fuseSigma: 0.10,
+  },
   climbMax: 0.85 * k(0.065), // edge height a driven 2.1 m wheel can roll up
 };
 
@@ -284,8 +309,51 @@ export const FAILURES = {
   survivalEnterSoc: 0.06, survivalExitSoc: 0.30,
 };
 
+// [ASSUMED] mission-executive tuning (autonomy.js). All sim choices, none traced to a source.
+//   preSurveyRoute   drive the empty rover to the port and back before the first pick-up (the old behaviour of
+//                    surveyRoute). Off: "Do Full Mission" goes straight to the cargo; the loaded leg then explores or
+//                    reuses a remembered route. Enable it to teach the route empty before a loaded transit.
+//   crawlApproachM / crawlDockM  m from the cargo / the port inside which the drive is held to the 120 rpm crawl cap
+//                    (ROVER.motor.protoCrawlRpm): cargo approach + kneel + lift, and habitat vestibule entry + soft capture
+//   standExitM       m of straight departure from the loading stand along the module axis, heading held (autonomy.js _deliver); the
+//                    transit arc (planner fillet, R >= 18 m loaded) starts only after it
+//   standExitSpeed   m/s of that departure;  standExitKap  1/m, the most curvature the heading hold may use inside the stand
+//   standExitDir     +1 forward (default), -1 reverse. Every stand on the pad points its module at the habitat, so forward is the
+//                    direction of travel and the far end of the stand is open. Reverse was measured (tests/scratch/ab_departure.mjs):
+//                    the loaded rover, which cannot point-turn, is left behind its own stand facing it, and it did not get 30 m away
+//                    in 25 min (4 boxed-in recoveries). Forward: 200 m clear in 3.4 min, 0 N stand contact, 2 cm lateral drift.
+export const MISSION = { preSurveyRoute: false, crawlApproachM: 15, crawlDockM: 20, standExitM: 12, standExitSpeed: 0.5, standExitKap: 0.05, standExitDir: 1 };
+
+// [ASSUMED] navigation smoothing (autonomy.js navTo / replan): all sim tuning values.
+//   headingDeadbandDeg  inside +-this heading error to the lookahead point, on a gentle path (|k| < 0.02 /m), wz is commanded 0
+//                       (released again past 4 deg: hysteresis); lookaheadMin / lookaheadSpeedS  lookahead = max(min, v x s) m
+//   yawDampErrDeg / yawDampRate / yawDampGain  inside this heading error on a straight stretch, while still rotating TOWARD the target
+//                       faster than yawDampRate rad/s (an overshoot in the making), the commanded wz is cut by gain
+//   maxYawAccel         rad/s^2 slew limit on the navigation's yaw command (the rover's own limiter, ROVER.accel.yaw, still applies)
+//   unknownCoastSpeed / unknownCoastM / flatDeg  on ground tilted < flatDeg, unmapped cells ahead (LiDAR still integrating) hold at
+//                       least this speed for up to this many metres instead of the 0.3 m/s creep
+//   dropoutHoldS        a LiDAR dropout derates the leg only once it has lasted this long (transient dropouts are ignored)
+//   inflateEmpty / inflateLoaded  planner hard inflation, set by navTo from the payload state
+//   replanBlockM / replanCostGain / commitM  routine replans switch the path only for a lethal obstacle within replanBlockM
+//                       path points, or when the fresh plan is cheaper by replanCostGain (30 %); a switched path is held for commitM metres
+export const NAV = {
+  headingDeadbandDeg: 3, lookaheadMin: 10, lookaheadSpeedS: 3.5, yawDampErrDeg: 5, yawDampRate: 0.03, yawDampGain: 0.5, maxYawAccel: 0.1,
+  unknownCoastSpeed: 0.5, unknownCoastM: 12, flatDeg: 5, dropoutHoldS: 2.5, replanBlockM: 25, replanCostGain: 0.3, commitM: 15,
+  inflateEmpty: 5.8, inflateLoaded: 6.5, // m, planner hard obstacle inflation (AEGIS-V1 half width 4.9 m + margin); loaded = 6.5 for a swinging 23 t module
+  straightenRoutes: true, // straighten stored routes over mapped ground (planner.js straighten)
+  noSteerRatio: 0.1, // steering-authority check: 6 s mean yaw rate below this share of the command for 15 s = not steering (healthy 0.4-0.55, one wheel free-rolling 0.15-0.25)
+  upsetDeg: 25, // [ASSUMED] pitch or roll beyond this = vehicle upset: navigation stops, no autonomous retry
+  legRetries: 2, // [ASSUMED] autonomous recover-and-retry attempts per navigation leg before the operator is asked (autonomy.js navTo)
+};
+
 // [ASSUMED] integrator step (120 Hz) and catch-up limit; collision-group bitmasks are code conventions.
-export const PHYS = { dt: 1 / 120, maxSubSteps: 40 };
+//   warpBudgetMaxMs / warpMaxSteps: at time scale s the per-frame physics budget is min(budget x min(s, 2.5), warpBudgetMaxMs) and at most
+//   min(maxSubSteps x s, warpMaxSteps) steps are taken per frame (sim.js advance).
+//   railsMinScale: from this time scale up, long cruise legs whose next 30 m are mapped and clear run on the kinematic rails
+//   (sim.js warpStep); pick-up, docking, turns in tight ground and unmapped ground always run the full physics.
+//   posGuardMaxSpeed: m/s, the float64 position guard (sim.js _precisionPost) corrects the solver's 0.49 mm position grid up to this
+//   speed: it covers every precision manoeuvre (line-up, drive-under, stand exit, port approach). Was 0.1.
+export const PHYS = { dt: 1 / 120, maxSubSteps: 40, warpBudgetMaxMs: 50, warpMaxSteps: 240, railsMinScale: 5, posGuardMaxSpeed: 0.8 };
 
 export const GROUPS = { TERRAIN: 1, ROCK: 2, STRUCT: 4, ROVER: 8, CARGO: 16 };
 export function groups(member, filter) { return ((member & 0xffff) << 16) | (filter & 0xffff); }

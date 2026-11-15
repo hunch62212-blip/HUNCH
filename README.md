@@ -213,7 +213,7 @@ the wheels do not steer. All values below are [script] unless marked.
 | Avionics | flight computers A/B (hot standby), IMU A/B + voter gyro, primary + UHF radios, 4 corner omni antennas, locator beacon, E-STOP hard-wired loop [ASSUMED] |
 | Serviceability | every electronics unit in a bay at 1.0-1.6 m working height with the rover knelt; field kit + dock spares (docs/SURVIVABILITY.md) |
 | Cargo handling | 2 ring clamps (dual-winding jaw motors); lift by strut ride height (no hoist travel, no docking stage) |
-| Sensors | 16-channel LiDAR (90 m, 5 Hz, 10° nose-down; port head prime, starboard head cold spare), 70° camera (blinded within 12° of the sun, headlight range 35 m at night), IMU, sun sensor, wheel encoders, strut load cells, cradle alignment suite, docking-ring camera; health sensors on every unit (heartbeats, phase currents, resolvers, thermistors, string voltages, insulation monitor, louver encoders, vent gas) |
+| Sensors | 32-beam 360° LiDAR (90 m, 10° nose-down, front deck-corner mount per the team CAD; port head prime, starboard head cold spare; two interleaved sets of 16 beams on alternate sweeps at 5-12 Hz; returns on the chassis and the carried module are masked), 90° stereo depth camera (0.18 m baseline, depth to 35 m; depth points with sigma ≤ 0.10 m fill map cells the LiDAR has not measured and are replaced by its first return; blinded within 12° of the sun, headlight range 35 m at night), IMU, sun sensor, wheel encoders, strut load cells, cradle alignment suite, docking-ring camera; health sensors on every unit (heartbeats, phase currents, resolvers, thermistors, string voltages, insulation monitor, louver encoders, vent gas) |
 | Climb limit | 0.90 m edge height [script; test: rocks] |
 
 **Static stability.** The force-angle tip margin is computed live from the wheel contact polygon and the
@@ -244,12 +244,17 @@ combined CG. Autonomy slows when it drops below 25°. Loaded margin: see Measure
 3. **Mapping & traversability.** 0.5 m elevation tiles; slope, step, crater classes.
 4. **Global planning.** Weighted A* on a 2 m costmap; geofences lethal; remembered-route cells cheaper; unmapped ground priced
    at the median cost of mapped ground; a new plan must be clearly cheaper (and is held 20 s) before the rover switches to it.
-5. **Teach & repeat** (after Furgale & Barfoot). Proven legs stored and re-validated; persisted on disk in the rover memory
-   store (`~/.hunch22-data/memory`, one file per site + 10 snapshots; `memory` command, `?site=last`), IndexedDB as fallback.
+5. **Teach & repeat** (after Furgale & Barfoot). Proven legs stored and re-validated; each stored route is straightened over
+   ground it has mapped (chords that pass the full loaded footprint check; 6-10 % shorter); a route proven with this load is
+   kept through close obstacles. Persisted on disk in the rover memory store (`~/.hunch22-data/memory`, one file per site +
+   10 snapshots; `memory` command, `?site=last`), IndexedDB as fallback.
 6. **Local planning.** 25 constant-curvature arcs (gentle set: inner side >= 50-65 % of the outer; full set only in tight spots),
    wheel-footprint checks; speed from free distance, tip margin, curve and heading change, faults. Bends up to 115° are
    driven as moving arcs; pivots only for a target behind the rover.
 7. **Terminal guidance.** Fiducials → cradle alignment sensors → docking-ring camera.
+8. **Recovery.** A leg the navigation gives up on (boxed in, no progress, steering not answering) is re-tried twice after
+   an autonomous recovery (back out, keep what it learned, re-localise, other route source) before the operator is asked;
+   a vehicle whose wheels turn while the LiDAR scene stands still is detected as pinned and its estimate held.
 
 ## Safety
 

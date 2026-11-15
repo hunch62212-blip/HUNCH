@@ -37,7 +37,7 @@ export class Slam {
     const k = this.tileKey(tx, tz);
     let t = this.tiles.get(k);
     if (!t && create) {
-      t = { tx, tz, born: this.sim.time, h: new Float32Array(TILE * TILE), h0: new Float32Array(TILE * TILE), t0: new Float32Array(TILE * TILE), v: new Float32Array(TILE * TILE), n: new Uint8Array(TILE * TILE), haz: new Uint8Array(TILE * TILE), cls: new Uint8Array(TILE * TILE), dirty: true, ver: 0 };
+      t = { tx, tz, born: this.sim.time, h: new Float32Array(TILE * TILE), h0: new Float32Array(TILE * TILE), t0: new Float32Array(TILE * TILE), v: new Float32Array(TILE * TILE), n: new Uint8Array(TILE * TILE), st: new Uint8Array(TILE * TILE), haz: new Uint8Array(TILE * TILE), cls: new Uint8Array(TILE * TILE), dirty: true, ver: 0 }; // st: > 0 = a provisional stereo-depth cell holding that many samples (integrate)
       this.tiles.set(k, t);
     }
     return t;
@@ -90,7 +90,8 @@ export class Slam {
     const i = (iz - tz * TILE) * TILE + (ix - tx * TILE);
     const n = t.n[i];
     const now = this.sim.time;
-    if (n === 0) { t.h[i] = y; t.h0[i] = y; t.t0[i] = now || 1e-3; t.v[i] = 0; t.n[i] = 1; this.cellsKnown++; }
+    // (a provisional stereo cell, st > 0, is replaced by the first LiDAR return as if the cell had been empty)
+    if (n === 0 || t.st[i]) { if (n === 0) this.cellsKnown++; t.h[i] = y; t.h0[i] = y; t.t0[i] = now || 1e-3; t.v[i] = 0; t.n[i] = 1; t.st[i] = 0; }
     else {
       // running mean/variance capped at 8 samples: settles noise but adapts if the world changes.
       // High variance marks vertical faces (rocks, structures) whose heights are view-dependent.
@@ -227,7 +228,7 @@ export class Slam {
       const t = this.tiles.get(this.tileKey(Math.floor(ix / TILE), Math.floor(iz / TILE)));
       if (!t) continue;
       const i = (iz - Math.floor(iz / TILE) * TILE) * TILE + (ix - Math.floor(ix / TILE) * TILE);
-      if (t.n[i]) { t.n[i] = 0; this.cellsKnown--; t.dirty = true; }
+      if (t.n[i]) { t.n[i] = 0; t.st[i] = 0; this.cellsKnown--; t.dirty = true; }
     }
     this.version++;
   }
@@ -293,6 +294,35 @@ export class Slam {
       }
       this.version++;
     }
+  }
+
+  // Stereo depth fusion (sensors.js _doStereo), alongside the LiDAR. Stereo is noisier than the LiDAR (sigma grows with depth
+  // squared), so its cells are PROVISIONAL (tile.st = number of stereo samples, n held at 1):
+  //   - a point is fused only if its depth sigma is within fuseSigma and the cell has no LiDAR measurement;
+  //   - further stereo points on a provisional cell average into it (up to 8), so its noise falls as the rover closes in;
+  //   - the first LiDAR return on the cell replaces it outright (insert);
+  //   - with n = 1 a provisional cell is never a reference for scan matching (matchMinN 3) or loop closure (n >= 2).
+  // What it adds: ground the LiDAR rings step over (they are 1-2 m apart 12-18 m out) in the 90 deg ahead of the rover, without ever
+  // changing a cell the LiDAR has measured. Same self / payload filter and attitude levelling as onScan. Returns the points fused.
+  integrate(scan, fuseSigma = ROVER.camera.fuseSigma) {
+    if (!this.mapping || !scan.n) return 0;
+    const e = this.est, q0 = this.attitudeQuat(0, scan.roll, scan.pitch), v = new THREE.Vector3(), c = Math.cos(e.yaw), s = Math.sin(e.yaw), now = this.sim.time;
+    let fused = 0;
+    for (let k = 0; k < scan.n; k++) {
+      if (scan.sigma && scan.sigma[k] > fuseSigma) continue;
+      const bx = scan.body[k * 3], by = scan.body[k * 3 + 1], bz = scan.body[k * 3 + 2];
+      if (Math.abs(bx) < 6.8 && Math.abs(bz) < 6.0 && by > -0.4) continue;
+      v.set(bx, by, bz).applyQuaternion(q0);
+      const x = e.x + v.x * c + v.z * s, z = e.z - v.x * s + v.z * c, y = e.y + v.y;
+      const ix = Math.floor(x / RES), iz = Math.floor(z / RES), tx = Math.floor(ix / TILE), tz = Math.floor(iz / TILE);
+      const t = this.getTile(tx, tz, true), i = (iz - tz * TILE) * TILE + (ix - tx * TILE);
+      if (t.n[i] === 0) { t.h[i] = y; t.h0[i] = y; t.t0[i] = now || 1e-3; t.v[i] = 0; t.n[i] = 1; t.st[i] = 1; this.cellsKnown++; }
+      else if (t.st[i]) { const w = Math.min(t.st[i] + 1, 8), d = y - t.h[i]; t.h[i] += d / w; t.v[i] += (d * d - t.v[i]) / w; if (now - t.t0[i] < 20) t.h0[i] = t.h[i]; if (t.st[i] < 255) t.st[i]++; }
+      else continue; // measured by the LiDAR: stereo never touches it
+      t.dirty = true; fused++;
+    }
+    if (fused) this.version++;
+    return fused;
   }
 
   _match(lev, m) {
@@ -712,22 +742,22 @@ export class Slam {
         const nx = Math.floor(wx / RES), nz = Math.floor(wz / RES);
         const dyyN = dyAtPos(nx, nz, t.t0[i]);
         if (nx === ix && nz === iz) { if (dyyN) { t.h[i] += dyyN; t.h0[i] += dyyN; } continue; }
-        moved.push(nx, nz, t.h[i] + dyyN, t.h0[i] + dyyN, t.t0[i], t.v[i], t.n[i]);
-        t.n[i] = 0; this.cellsKnown--;
+        moved.push(nx, nz, t.h[i] + dyyN, t.h0[i] + dyyN, t.t0[i], t.v[i], t.n[i], t.st[i]);
+        t.n[i] = 0; t.st[i] = 0; this.cellsKnown--;
       }
     }
-    for (let k = 0; k < moved.length; k += 7) {
+    for (let k = 0; k < moved.length; k += 8) {
       const ix = moved[k], iz = moved[k + 1], tx = Math.floor(ix / TILE), tz = Math.floor(iz / TILE);
       const t = this.getTile(tx, tz, true), i = (iz - tz * TILE) * TILE + (ix - tx * TILE);
       if (t.n[i] && !(t.t0[i] > A.t)) continue; // a trusted older cell already holds this spot
       if (!t.n[i]) this.cellsKnown++;
-      t.h[i] = moved[k + 2]; t.h0[i] = moved[k + 3]; t.t0[i] = moved[k + 4]; t.v[i] = moved[k + 5]; t.n[i] = moved[k + 6];
+      t.h[i] = moved[k + 2]; t.h0[i] = moved[k + 3]; t.t0[i] = moved[k + 4]; t.v[i] = moved[k + 5]; t.n[i] = moved[k + 6]; t.st[i] = moved[k + 7];
     }
     for (const t of this.tiles.values()) t.dirty = true;
     // breadcrumbs and route points recorded since the anchor
     const shiftPts = (pts) => { for (const p of pts) if (p.t > A.t) { const [wx, wz] = warp(p.x, p.z, p.t); p.x = wx; p.z = wz; } };
     shiftPts(this.trajectory);
-    for (const r of this.routes) shiftPts(r.pts);
+    for (const r of this.routes) { shiftPts(r.pts); if (r.rawPts) shiftPts(r.rawPts); }
     if (this.recording) shiftPts(this.recording.pts);
     // keyframes themselves take their relaxed poses (the sighting node ends on the surveyed pose)
     for (let i = 0; i < chain.length; i++) { chain[i].x = rel.P[i].x; chain[i].z = rel.P[i].z; chain[i].yaw = rel.P[i].yaw; }
@@ -737,7 +767,19 @@ export class Slam {
     if (dy) this._yAnchorT = this._fixAnchor.t;
     // the same rigid correction for state that lives at the current pose (planned path, port estimates)
     const apply = (p) => { const [wx, wz] = warpBy(c0, p.x, p.z); p.x = wx; p.z = wz; };
-    this.lastFix = { t: now, dx, dz, dyaw, dy, cells: moved.length / 7, nodes: chain.length, iters: rel.iters, apply, dyawEnd: c0.dyaw, pre };
+    // landmark estimates (cargo, ports) are placed in the map at the time they were seen: they move exactly as the map cells
+    // seen at that time do (warp at their time stamp), and not at all if seen before the previous fix. (The rigid `apply`
+    // rotates about the current pose: a 0.7 deg heading fix at the habitat swung a cargo estimate at the pad, 2 km away, by
+    // 25-35 m, and the next sightings restarted it, "disagreed by 28.7 m".) Returns the heading change to add, or null.
+    const warpAt = (p) => {
+      const t = p.t;
+      if (!(t > tFirst)) return null;
+      const [wx, wz] = warp(p.x, p.z, t); p.x = wx; p.z = wz;
+      if (t >= tLast) return c0.dyaw;
+      const j = seg(t), a = (t - tAt[j]) / Math.max(1e-6, tAt[j + 1] - tAt[j]);
+      return corr[j].dyaw + wrap(corr[j + 1].dyaw - corr[j].dyaw) * a;
+    };
+    this.lastFix = { t: now, dx, dz, dyaw, dy, cells: moved.length / 8, nodes: chain.length, iters: rel.iters, apply, warpAt, dyawEnd: c0.dyaw, pre };
     this.version++;
     this.sim.emit('routes');
     return this.lastFix;
@@ -764,7 +806,7 @@ export class Slam {
       for (let i = 0; i < t.n.length; i++) if (t.n[i]) this.cellsKnown++;
     }
     // stored routes are in the saved map's frame: drop point times so a fix in this session never moves them
-    this.routes = (d.routes || []).map((r) => ({ ...r, pts: r.pts.map((p) => ({ x: p.x, z: p.z })) }));
+    this.routes = (d.routes || []).map((r) => ({ ...r, pts: r.pts.map((p) => ({ x: p.x, z: p.z })), ...(r.rawPts ? { rawPts: r.rawPts.map((p) => ({ x: p.x, z: p.z })) } : {}) }));
     this.version++;
     this.sim.emit('routes');
     return true;

@@ -84,6 +84,7 @@ export class Rover {
     this.limits = { rpmCeil: ROVER.motor.protoNoLoadRpm, speed: 99, torquePct: 100 };
     this.rpm = { mode: 'auto', fixed: ROVER.motor.protoCapRpm, tier: 'crawl', proto: ROVER.motor.protoCrawlRpm, wheel: ROVER.motor.crawlRpmWheel, rough: 0, why: 'starting', want: ROVER.motor.protoCrawlRpm };
     this.turboOk = true; // set by the autonomy / driver when the way ahead is clear and straight
+    this.crawlZone = false; // set by the autonomy inside precision zones (cargo approach, kneel / lift, port entry): holds the 120 rpm crawl cap
     this._smart = { rough: 0, turboT: 0, slope: 0, slip: 0, curv: 0 };
     this.leveling = true;
     this.rideOffset = 0;
@@ -102,6 +103,9 @@ export class Rover {
   }
 
   get mass() { return ROVER.sprungMass + ROVER.corners.length * ROVER.unsprungMassPerBogie; }
+  // Ride height the struts have actually reached (mean strut extension from nominal, from the strut position sensors), as opposed to
+  // lift.pos, which is the commanded set point. They differ while the body is still moving and by the sag under a new load.
+  get rideActual() { let s = 0; for (const b of this.bogies) s += b.L; return s / this.bogies.length - ROVER.bogie.Lnom; }
   get loaded() { return !!(this.lift.cargo && this.lift.joint); }
 
   pose() {
@@ -163,6 +167,7 @@ export class Rover {
       [lerp(hot, 95, 120, C, 150), () => `motor ${hot.toFixed(0)} C`],
       [this.power.soc < 0.15 ? 160 : C, () => 'battery low'],
       [this.thermalRpm ?? C, () => 'thermal rev-down'], // thermal brain (thermal.js)
+      [this.crawlZone ? c0 : C, () => 'precision zone crawl'], // MISSION.crawlApproachM / crawlDockM (autonomy.js)
     ];
     let want = C, why = 'clear ground';
     for (const [r, label] of lims) if (r < want - 0.5) { want = r; why = label(); }
@@ -537,6 +542,9 @@ export class Rover {
     if (!this.leveling || this.estop) return;
     const Lavg = this.bogies.reduce((a, b) => a + b.L, 0) / this.bogies.length;
     const Ltarget = B.Lnom + this.rideOffset;
+    // m/s, from _liftStep on the previous step. The strut is a spring and a damper in parallel, so at stroke speed v the strut trails the
+    // actuator by (c / k) v; the lead term (c / k) x stroke acceleration cancels that lag, so the trim term has nothing to wind up on.
+    const rideFF = (this.lift.rateNow || 0) + (S.c / S.k) * (this.lift.accNow || 0);
     // damping only while moving (full above 0.4 m/s): near standstill (docking) the seats must settle roll crisply
     const sp = this.body.linvel(), tdGate = Math.max(0, Math.min(1, (Math.hypot(sp.x, sp.z) - 0.1) / 0.3));
     for (const b of this.bogies) {
@@ -548,7 +556,11 @@ export class Rover {
       // roll-over; the rate term (S.levelTd s) stops them chasing a roll that is already recovering (CHANGES.md §9)
       const hdot = b.z * Math.cos(roll) * rollRate * tdGate;
       const rate = Math.max(-S.levelRate, Math.min(S.levelRate, 0.6 * (err - S.levelTd * 0.85 * hdot)));
-      b.level = Math.max(-S.levelRange, Math.min(S.levelRange, b.level + rate * dt));
+      // Ride-height feedforward: the commanded stroke rate (the S-curve of _liftStep) goes straight to the actuators and the
+      // rate-limited levelling term above only trims what is left (roll, sag). Without it the body followed the command through
+      // that 0.30 m/s, 0.6 /s servo alone: a kneel-to-carry lift took 8.6 s of body motion whatever the command did, starting with
+      // a step in speed, and the body trailed the command by up to 0.9 m on the way.
+      b.level = Math.max(-S.levelRange, Math.min(S.levelRange, b.level + (rate + rideFF) * dt));
     }
   }
 
@@ -733,16 +745,51 @@ export class Rover {
       L.clampT = Math.max(0, L.clampT - dt / (LC.jawS * (L.clampSlow || 1)));
       if (L.clampT <= 0) { L.clamp = 'open'; L.msg = 'Ring jaws open'; }
     }
-    if (this.estop) return; // air valves closed: ride held
+    if (this.estop) { this._rs = null; L.rateNow = 0; L.accNow = 0; return; } // actuators locked: ride held, the S-curve (if any) is dropped
     if (this.sim.health?.isStrutKneelInhibited?.() && L.target < this.rideOffset) {
       L.target = this.rideOffset;
       L.msg = 'KNEEL INHIBITED: roller-screw strut < 65% response';
     }
     L.target = Math.max(ROVER.ride.kneel, Math.min(ROVER.ride.max, L.target));
-    const prev = this.rideOffset;
-    this.rideOffset += Math.max(-LC.rate * dt, Math.min(LC.rate * dt, L.target - this.rideOffset));
+    const prev = this.rideOffset, SC = LC.sCurve;
+    // Strokes longer than SC.trimBand follow a minimum-jerk S-curve (ease-in, ease-out) instead of a 0.5 m/s linear ramp that starts
+    // and stops instantly. It is re-planned from the present position / speed / acceleration when the target moves by more than the
+    // trim band (manual R / F keys), so it is always continuous. Small trims (the docking ride trim moves the target a few mm per
+    // tick) keep the fast rate-limited path: a 0.5 s lag there would destabilise that loop.
+    // Soft seat: an upward stroke that would run the saddles into a module resting overhead (pick-up) first stops SC.seatMargin under it,
+    // then lifts from rest. One stroke at full speed met the module at ~0.65 m/s: a 12 lunar-g jolt that bounced it off the saddles.
+    let rs = this._rs;
+    if ((!rs || Math.abs(L.target - rs.goal) > SC.trimBand) && Math.abs(L.target - this.rideOffset) > SC.trimBand) {
+      let xf = L.target, seat = false;
+      if (xf > this.rideOffset && !this.loaded) {
+        // grappleCheck reports the NEAREST module wherever it is: it is overhead only if the saddles are inside its plan outline.
+        // seatErr: how far it still is above its seat (cradle sensors)
+        const g = this.grappleCheck(), over = g.c && Math.abs(g.dx) < g.c.T.length / 2 && Math.abs(g.dz) < 0.5 * (g.c.T.adapterR || g.c.T.radius);
+        if (over && g.seatErr > 2 * SC.seatMargin && xf - this.rideOffset > g.seatErr - SC.seatMargin) { xf = this.rideOffset + g.seatErr - SC.seatMargin; seat = true; }
+      }
+      const d = xf - this.rideOffset;
+      // the rise to the seat moves the rover alone, so it may be brisker (SC.seatK) than a stroke that carries the module
+      const T = Math.max(SC.tMin, 1.875 * Math.abs(d) / SC.vPeak, (seat ? SC.seatK : 1) * SC.tFull * Math.min(1, Math.abs(d) / SC.fullAt));
+      rs = this._rs = { x0: this.rideOffset, v0: rs ? rs.v : 0, a0: rs ? rs.a : 0, xf, goal: L.target, T, t: 0, v: rs ? rs.v : 0, a: rs ? rs.a : 0 };
+      const D1 = d - rs.v0 * T - rs.a0 * T * T / 2, V1 = -rs.v0 - rs.a0 * T, A1 = -rs.a0;
+      rs.c3 = (10 * D1 - 4 * V1 * T + 0.5 * A1 * T * T) / T ** 3;
+      rs.c4 = (-15 * D1 + 7 * V1 * T - A1 * T * T) / T ** 4;
+      rs.c5 = (6 * D1 - 3 * V1 * T + 0.5 * A1 * T * T) / T ** 5;
+    }
+    if (rs) {
+      rs.t += dt;
+      if (rs.t >= rs.T) { this.rideOffset = rs.xf; rs.v = rs.a = 0; this._rs = null; }
+      else {
+        const t = rs.t;
+        this.rideOffset = rs.x0 + rs.v0 * t + rs.a0 * t * t / 2 + rs.c3 * t ** 3 + rs.c4 * t ** 4 + rs.c5 * t ** 5;
+        rs.v = rs.v0 + rs.a0 * t + 3 * rs.c3 * t * t + 4 * rs.c4 * t ** 3 + 5 * rs.c5 * t ** 4;
+        rs.a = rs.a0 + 6 * rs.c3 * t + 12 * rs.c4 * t * t + 20 * rs.c5 * t ** 3;
+      }
+    } else this.rideOffset += Math.max(-LC.rate * dt, Math.min(LC.rate * dt, L.target - this.rideOffset));
+    this.rideOffset = Math.max(ROVER.ride.kneel, Math.min(ROVER.ride.max, this.rideOffset));
     L.pos = this.rideOffset;
     L.rateNow = (this.rideOffset - prev) / dt;
+    L.accNow = this._rs ? this._rs.a : 0;
   }
 
   // ---- power ---------------------------------------------------------------------

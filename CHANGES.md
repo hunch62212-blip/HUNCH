@@ -661,3 +661,167 @@ check stopped the mission ("yaw rate < 25 % of command for 15 s"), one of three 
 survey drive completed. The failures are navigation / traction events on the long traverse that depend on the noise stream
 (the same area as the 14,999 s two-cargo run's box-in unwinds), not on docking: all three cargo types dock in their own tests.
 The 24,000 s limit in `tests/run-all.mjs` is therefore a guess that has not yet been met by a passing run.
+
+## 30. v1.7.0 work order (2026-11-13/14): straight-to-cargo mission, time warp, suspension and wheel drawing, sensors, HUD, navigation
+
+Source: the AEGIS-V1 "master system specification" (nine tasks), followed by a review pass (2026-11-14) in which every change was
+measured against the original code on a clean `git archive HEAD` copy. The review found that several first-pass changes followed the
+spec's stated root cause without checking it, and some were wrong; this section describes the tree as it is after the review, and says
+for each task what the real cause turned out to be. Constants are in `src/sim/config.js` (`MISSION`, `NAV`, `PHYS`, `ROVER.lift.sCurve`,
+`ROVER.lidar`, `ROVER.camera`), tagged `[ASSUMED]` unless noted. Measurement scripts: `tests/scratch/ab_departure.mjs`, `ab_nav.mjs`,
+`dbg_ride_body.mjs`, `dbg_wheel_visual.mjs`, `dbg_rise_impact.mjs`, `dbg_loaded_lift.mjs`, `dbg_stereo_quality.mjs`, `dbg_layout.mjs`.
+
+**Task 1: full-mission loop and rpm.** `missionCycle` no longer starts with `surveyRoute` (an empty 2 x 2 km survey drive and a 60 s fiducial
+hold before touching the cargo). It is opt-in: `MISSION.preSurveyRoute` (default false). The loop already re-planned for the next manifest
+item, drove back through `acquire`'s pre-grasp leg and recharged through `navTo`'s `checkPower`; an explicit SoC <= reserve check was added
+at the top of every leg. Turbo (300 rpm) stays empty-rover only: the loaded rover's speed cap (2.5 m/s) and tip governor, not the rpm ceiling,
+set its speed. New `Rover.crawlZone` (smart-rpm entry "precision zone crawl", 120 rpm): from the pre-grasp point through the lift and the stand
+exit, and for the last `MISSION.crawlDockM` = 20 m of the port approach through soft capture; cleared on exit, abort and mission end. (120 rpm
+is 3.3 m/s at full scale, above every speed used in those phases, so the cap changes the displayed tier, not the motion.)
+Trade-off kept on purpose: without the survey the first loaded leg explores unmapped ground (no point turns while loaded).
+
+**Task 2: time warp.** Measured cause: full physics tops out at ~3x real time on this machine (headless, one thread: 2.8x before, 3.1x now), so
+no frame budget can deliver 5x, 10x or 20x. What was done:
+- `PHYS.railsMinScale` = 5 (was 50): the kinematic transit warp the 50x mode always used now carries long cruise legs from 5x up;
+  `Sim.stepAuto(owed)` sizes each rails step to what the frame owes, so the rover moves every frame instead of in 0.5 s jumps.
+- `Sim.advance`: per-frame physics budget `min(budget x min(scale, 2.5), 50 ms)`, step cap `min(40 x scale, 240)`.
+- `main.js`: the auto-quality governor is frozen above 1x (it read warp load as a slow GPU and cut both the graphics and the physics budget);
+  a draw throttle acts only while the warp is CPU-limited, drawing every 2nd-4th frame if a drawn frame's non-physics time is large, never
+  less than ~8 draws a second.
+- First pass, since removed: a 160 ms budget (6 frames a second) and a fixed "draw 1 frame in floor(scale / 2)" (2-6 draws a second even
+  when the CPU was idle on rails).
+- HUD: 3x button, `.on` set at the click, `#warpIndicator` badge (`▶▶ 10× WARP`, `❚❚ PAUSED`, `◀ 0.5× SLOW`), "actual N×, transit warp /
+  CPU-limited" in both HUD layers. Pause stays the `paused` flag (keeps the scale for resume).
+- Measured in a software-rendered headless Chromium on an idle machine, empty leg to the habitat over unmapped ground (set -> actual):
+  2x -> 1.7x, 3x -> 2.1x, 5x -> 4.6x, 10x -> 6.6x, 20x -> 10x, ~20 draws a second throughout; rails carried 75-82 % of the sim time
+  from 5x up. The set speed is reached on rails legs only: pick-up, docking and unmapped or tight ground run full physics (~2-3x).
+
+**Task 3: sensors.**
+- LiDAR mount: NOT the spec's centre mast at y = k(0.35) = 5.7 m. That point is inside the carried module (underside 5.2 m at ride 0), and
+  the team's own trade study (`public/team/js/lidar_mount.js`, options A-D) rejected a mast for that reason and chose fixed deck-corner
+  scanners under the module, which is what the model draws and where the sim had it. The first pass moved it to the mast; the review moved
+  it back. One line in `ROVER.lidar.mountLocal` changes it if the team decides otherwise.
+- Scanner: 32 beams over -30..+15 deg (was 16 over -30..+10), same 10 deg nose-down pitch. Rated 10 Hz x 360 steps is 115 000 rays/s, 6x
+  the old cost; the first pass ran 35 000-115 000 rays/s and made `pickup_gt` time out and docking outcomes change. Now `tiers` is the old
+  scanner's own schedule (5 Hz x 240, 8 Hz x 150, 12 Hz x 100) and the 32 beams fire as two interleaved sets of 16 on alternate sweeps:
+  19 200 rays/s as before, all 32 rings in the map over two sweeps. At time scale s the scan rate is divided by s (min 1 Hz).
+- `_selfMask` drops returns inside the chassis box and (loaded) the carried module's enclosing cylinder. The ray queries already skipped the
+  rover's and the held cargo's colliders (collision groups); the mask is the explicit second line. Known simplification, unchanged: rays pass
+  through the vehicle instead of being blocked by it.
+- Camera: 90 deg HFOV stereo depth (`_doStereo`, 32 x 18 grid at 4 Hz, sigma_z = z^2 sigma_d / (f B)). `Slam.integrate`: stereo cells are
+  provisional (`tile.st`): fused only at sigma <= `fuseSigma` 0.10 m (~14 m) into cells with no LiDAR measurement, averaged over up to 8
+  stereo samples, replaced outright by the first LiDAR return, never used for scan matching or loop closure. Measured: stereo alone (LiDAR
+  off) maps 5 800 cells in 60 m with 0 false rock / slope / lethal cells and 4.7 cm height RMS (the first pass's 0.25 m gate gave 30 %
+  rough cells and false slopes). With the LiDAR on it adds almost nothing (15 provisional cells at most): its value is the map it keeps
+  building if the LiDAR is down. The LiDAR-fault speed policy was not changed to use it.
+- LiDAR and stereo range noise have their own random stream (`gaussRange`): they shared the IMU / camera / alignment-sensor stream, so any
+  change to the scan changed every precision sensor's noise and the millimetre docking outcome with it.
+- Planner hard inflation: 6.5 m loaded (`NAV.inflateLoaded`), 5.8 m empty; `navTo` sets it from the payload state.
+
+**Task 4: wheels and suspension.** Two real faults, neither the one the spec named:
+- Drawing (`aegis.js`). `const ride = cl(rover.rideOffset / K, -0.045, 0.065)`: `cl(v, m)` clamps to +-m and ignores a third argument, so
+  this was `max(0.045, min(-0.045, v))` = +0.045 for every input. The wheels were always drawn 0.73 m below their nominal position (0.73 m
+  into the ground at ride 0, 1.39 m at full kneel) and the strut graphics never moved. Now `drawnRide()`: a real range clamp, and fed
+  with the ACTUAL mean strut extension, not the commanded ride. Measured in the browser frame by frame (130-148 frames per move, terrain
+  clamp off): drawn hub within 0.1 cm of the physical hub through kneel, lift and squat; the only thing under the surface is the tyres' real
+  2 cm of sinkage. The terrain clamp from the first pass stays as a guard (it alone hid the sinking and left the cause in place).
+- Motion (`rover.js`). The body followed the ride command through the levelling servo only (0.30 m/s rate limit, 0.6 /s gain): a
+  kneel-to-carry lift took 8.6 s of body motion, started with a step in speed, and the body trailed the command by up to 0.9 m. The first
+  pass put an S-curve on the command and tested the command (3.73 s); the body then took 9.3 s. Now: the S-curve (minimum-jerk quintic; any
+  stroke >= 0.5 m takes at least 3.7 s) is fed forward to the actuators with a lead term for the dampers' velocity lag (c / k). Measured on
+  the body: squat-down settled within 2 cm in 3.1 s, lift in 3.4 s, peak 0.31 / 0.63 m/s^2, overshoot < 1 cm, body within 1.4 cm of the set point.
+- Soft seat. One fast stroke meets the module on its stand at ~0.65 m/s: a 19 m/s^2 (12 lunar g) jolt that bounces it off the saddles. The
+  lift controller now stops 3 cm under a module overhead (cradle sensors, `grappleCheck().seatErr`) and lifts from rest: jolt 2.6-3.7 m/s^2
+  (the old servo: 7.2), struts at carry 5.4 s after the command (old: 9.1 s), 0.8 cm strut overshoot. So a pick-up rise is two strokes,
+  ~2.4 s to the seat and 3.7 s of lift, not one 3-5 s stroke as the spec's acceptance line reads.
+- `acquire`'s `waitRide` and the stand-exit check now wait for the struts (`Rover.rideActual`), not the set point.
+
+**Task 5.** `docs/LUNAR_CARGO_RESEARCH.md` was already present and was not changed.
+
+**Task 6: stand exit.** The spec asked for a straight reverse. Measured: every stand on the pad points its module exactly at the habitat
+(`dbg_layout.mjs`: 0 deg), so forward is the direction of travel and the far end of the stand is open. The original forward exit: 11.9 m in
+26 s, 0.11 deg of heading change, 2 cm of drift, 0 N of stand contact on the module, 200 m from the stand 3.4 min after the clamp. The
+first-pass reverse exit: the loaded rover, which cannot point-turn, was left behind its own stand facing it and did not get 30 m away in
+25 min (4 boxed-in recoveries). Now: forward again (`MISSION.standExitDir` = +1; -1 is still there), heading held with curvature limited to
+0.05 /m, starting only when the struts are at carry and the jaws read closed. Measured: 0.03 deg, 1 cm, 0 N, 200 m in 2.9 min, 0 warnings.
+
+**Task 7: HUD.** Three layers on `#hud[data-layer]`, cycled 1 -> 2 -> 0 -> 1 by H, the `☰ HUD` button, or `Hide All HUD`; kept in localStorage.
+Layer 0: canvas, a faint ☰ and the E-STOP-latched banner (Esc still stops the rover; the E-STOP button is hidden with the rest). Layer 1: a slim
+control bar (clock, mode, time scale, M6 / resume / abort, HUD buttons, RESET / START / E-STOP), speed + rpm tier badge, battery bar / draw /
+endurance, phase -> destination | distance, warp status, a 200 x 200 route minimap, and an alarm banner only while something is wrong. Layer 2:
+every existing panel. The help panel moved to `?`.
+
+**Task 8: navigation.** Lookahead >= 10 m (`max(10, 3.5 v)`); +-3 deg heading deadband (hysteresis to 4 deg) on gentle paths; 0.1 rad/s^2
+slew on the navigation's yaw command; on ground tilted < 5 deg a 0.5 m/s floor (was 0.3) through up to 12 m of unmapped cells; a LiDAR dropout
+derates the leg only after 2.5 s; routine replans switch the path only for a lethal obstacle within 25 path points or a 30 % cheaper plan, and
+hold a switched path for 15 m (not a path whose cost is already infinite: fixed in the review). Yaw damping: the first pass halved the yaw command
+whenever the heading error was < 5 deg and the yaw rate > 0.03 rad/s, which also fired on every gentle curve; it now acts only on a straight
+stretch while still rotating toward the target. There was no "+-1 deg deadband" or "SLAM confidence watchdog" in the code as the spec assumed.
+Measured, empty rover, first 10 sim-min toward the habitat (original -> now): 857 -> 993 m, stops 1 -> 0, time under 0.4 m/s 121 -> 16 s, path
+switches 54 -> 27, yaw-command reversals 3.1 -> 2.0 /min, warnings 3 -> 0. The original showed ~2 yaw reversals a minute on this leg, so the
+"wiggle" itself was not reproduced; what improved is creeping and path thrash.
+
+**Found in the review: the solver's position grid (`sim.js _precisionPost`, `PHYS.posGuardMaxSpeed`).** A pre-existing fault, and the real
+cause of low-speed sideways drift. The physics engine moves a body in steps of 2^-11 m = 0.49 mm per axis (8 float32 ulps at these
+coordinates; `tests/scratch/dbg_quant.mjs`), so every step's displacement is v dt rounded to that grid: up to 0.03 m/s of error per axis at any
+speed, while the body's velocity (and so the wheel odometry) is unaffected. Commanded straight on the flat pad the rover travelled 6.2 deg left
+of its heading at 0.131 m/s for any command from 0.12 to 0.16 m/s, -4.2 deg at 0.3 m/s, -2.8 deg at 0.5 m/s (`dbg_crab_speed.mjs`). A float64
+guard already corrected this, but only below 0.1 m/s, and the pick-up's final squaring speed is 0.12 m/s: in the last metre under a module the
+rover slid ~10 cm sideways whatever the controller asked. The original code got away with it because its camera estimate left the rover ~6 cm
+to the right at the hand-off to the saddle rangefinders and the slide carried it through the centre; with the wider camera the rover arrives
+centred and the slide carried it out (pod rack: 7 of 12 first-attempt pick-ups, one outright failure). The guard now runs up to 0.8 m/s and
+integrates the velocity of the body origin (v + w x r; it used the centre-of-mass velocity). Its old limit came from a stale-broadphase fault
+(the chassis drove through a boulder) that the later fresh-rock refresh removed: with the guard always on, the 1.4 m boulder still blocks at
+0.3 and 0.6 m/s (`dbg_rock_shadow.mjs`), and `rocks`, `lander`, `physics`, `creep` pass. Measured after: 0.00 deg of crab from 0.06 to 0.7 m/s
+and the commanded speed; pod-rack pick-up first-attempt in 13 of 14 noise realisations (`ab_pickup_noise.mjs`; original code on the same 14: 12,
+and its other 2 failed outright), CM-40A and CC-20B 12 of 12.
+Not changed, noted: `acquire` retries with `RD.cruise`, which does not exist in `ROVER.ride`, so a retry re-approaches kneeled.
+
+**Tests.** `tests/v17_suite.mjs` (51 checks: body motion, drawn-vs-physical wheel height, LiDAR mount / interlace, mask, stereo cell semantics and
+false hazards, time-warp budget and rails step, crawl cap, no-survey start) and `tests/stand_exit.mjs` (soft-seat jolt, struts at carry before
+moving, forward distance, heading, drift, stand contact, 100 m clear, no boxed-in recovery); both in `npm run test:quick`. The first-pass versions
+tested the set point and a reverse exit, and passed while the behaviour was wrong.
+
+## 31. v1.7.0 release pass (2026-11-14): the full three-delivery cycle completes; navigation recovery, route straightening, landmark and pick-up fixes
+
+Starting point: the §30 tree passed `npm run test:quick` (23/23 files) but the M6 cycle (`node tests/autonomy.mjs cycle 24000`) failed: CM-40A
+delivered, CP-36C delivered after two box-ins on the loaded PORT-3 leg (89-119 min), then "no progress toward lead-in PORT-2 for 4 min" at
+187 min, 2 of 3 delivered. Each change below was found in that run or in a run of the change before it.
+
+| Item | Before | After |
+|---|---|---|
+| Leg failure (`autonomy.js navTo / _retryPrep`, `NAV.legRetries` = 2) | any navigation give-up (no progress 4 min, boxed in after 4 unwinds, moving away, steering not answering, pivot stall) ended the whole mission | the leg is retried twice after an autonomous recovery: back out of the pocket (unwind; reverse on a clear arc for steering / stall), keep the obstacle marks the failed attempt learned, force an orbital-map position check, and switch route source (a remembered route that failed is retried as fresh exploration and the other way round). Then the operator is asked. Not retried: "no path to goal". The drive to the charger gets one retry |
+| Proven route near an obstacle (`navTo` squeeze test) | a close obstacle (< 11 m free) beside a remembered route made the loaded rover leave the route and explore next to the obstacle: it boxed in at the same spot in every M6 run (§27, §29) | on a route already driven with this load the local planner steers past on the route; only a route that is actually blocked splices or replans |
+| Route memory (`planner.js straighten`, `NAV.straightenRoutes`) | routes were stored as driven: R1 kept every probe of the first loaded exploration (2.6-2.9 km for a 2.0 km straight line) and each repeat drove them again | when a route is stored, every stretch whose chord runs over ground already mapped, outside the hard margin, no costlier than the stretch, and passes the full wheel + belly footprint check with the route's load at every metre, is replaced by the chord; loaded corners rounded at R 18 m. Never over unmapped ground. The driven line is kept (`rawPts`, moved by frame corrections like the route itself, saved with it) and offered as the fallback: a chord crosses ground first seen from a distance, and closer scans later found rocks on two of R1's chords, so the loaded leg threw the whole route away until the driven line was kept; a candidate that needs no long bridging detour is preferred. Measured: R1 2,630 -> 2,376 m, R2 2,462 -> 2,324 m, R3 2,515 -> 2,343 m; the empty return to the pad 30.0 -> 20.8 min |
+| Landmark estimates after a position fix (`slam.js shiftFrame warpAt`, `autonomy.js applyFrameShift`) | port and cargo estimates got one rigid correction about the current pose: a 0.7 deg heading fix at the habitat swung a cargo estimate at the pad, 2 km away, by ~25 m ("CC-20B: cargo estimate disagreed with 10 sightings by 34.6 m"), and the next pick-up approached a wrong spot | estimates move exactly as the map cells seen at the same time do (warp at their time stamp); seen before the previous fix, not at all |
+| Sightings of the carried module (`updateEstimates`) | the cameras see the held module's tags the whole loaded leg; fusing them dragged its pad estimate 2 km with the rover ("disagreed ... by 2004.9 m") | tags of held, docked and delivered cargo are ignored |
+| Steering-authority check (`navTo`) | instantaneous: yaw rate < 25 % of the command for 15 s. The normal lag of a loaded skid-steer turn (the command reverses on an S-bend before the yaw rate has built) counted, and stopped a loaded leg 75 m from PORT-3 (§29) | compared on 6 s averages in the commanded direction, against `NAV.noSteerRatio` = 10 %: measured, a healthy rover achieves 40-55 % of the commanded yaw rate (skid-steer scrub) and one with a free-rolling wheel 15-25 % (`tests/scratch/dbg_steer.mjs`), so 25 % on averages stopped the five-wheel traverse of `tests/faults.mjs`. A body that really does not yaw still trips it in ~15 s, and now it leads to a retry, not an abort |
+| Back-out after a failed drive-under (`acquire backOut`, `backUp`) | reversed with the normal rear-hazard check, which stopped it part-way under the pod rack ("Reverse stopped: obstacle behind the vehicle"); the next attempt raised the struts and drove off wedged under the rack: no yaw response, wheels spinning, SLAM error 2.4 -> 16.6 m in a minute | reverses on the line the drive-under came in on with the heading held and the relaxed limits (as `unwindPath`), retries once; if the deck front is still past the module's aft end (geometry on the module axis, not the distance reversed: an attempt abandoned 4.7 m short of the module never had the deck under it) the pick-up stops for the operator instead of raising into it |
+| Pick-up retry ride height (`acquire`) | compared with `RD.cruise`, which does not exist: never raised, every retry re-approached the module kneeled (0.65 m lower) | raises to the driving ride (0) once out from under |
+| Pinned / spinning in place (`navTo`, `_scanSample`, `_scanSame`) | only the unwind could tell; while driving, wheel odometry carried the estimate away from a vehicle that was not moving | every 8 s: wheels turned > 2.5 m, heading unchanged, and >= 75 % of the LiDAR scene within 0.2 m of where it was -> the estimate is put back, the spot marked, recovery; 4 times in a leg -> retry / operator |
+| Thin posts (`planner.js buildCostmap`) | light masts and array posts (r 0.2-0.45 m) do not show in the LiDAR height map, so only the base-map stamp keeps the rover off them, and the hard inflation (5.8 / 6.5 m) is a disc sized for the half width: the 9.8 x 9.9 m frame's corners reach 6.95 m. On a second site (seed 20261114) a frame corner caught an apron light mast 6.8 m from the centre and pinned the loaded rover 20 m from PORT-1 for 10 min (found by the pinned detector below) | the local planner (which drives the arcs, and cuts inside the planned line on a bend) now tests every surveyed post against the rover's rectangle, grown to the carried module's when loaded: an arc is refused where a post comes within 0.6 m of it and closer than it is now (so a rover already touching one can still move off). A wider disc in the global costmap was tried first and dropped: it made the pad-apron masts close the start of the proven loaded route R1, and the loaded leg explored instead |
+| Tip safety in recovery (`unwindPath`, `navTo`, `NAV.upsetDeg` 25) | the unwind follows its entry trace even where the rear arcs read blocked, stopping when the FILTERED (0.8 s) tip margin fell under 10 deg; reversing a loaded rover over a crater rim it read 10+ deg until the vehicle had gone over (a v1.7.0 test run: tilt 36, then 64 deg), and the leg retry then kept trying to unwind | the unwind stops on the raw margin, at 15 deg loaded (10 empty); past 25 deg of pitch or roll navigation stops with the brakes set and no retry; no retry starts on a steep tilt (> 12 deg or tip margin < 18 deg loaded); after "boxed in again after 4 reverse recoveries" the retry does not unwind again |
+| Unwind after an earlier unwind (`_unwindTrace`) | the way back is the breadcrumb trail read backwards, and it held the earlier unwind's own reversing: read backwards that leads back INTO the first pocket. A second box-in near the first one reversed a loaded rover over the first pocket's rim until it tipped (36 deg, then 64 deg) | earlier unwinds are jumped over together with the stretch of entry path they retraced; the trace resumes at the pre-unwind breadcrumb nearest that unwind's end, or stops |
+| Route memory rejection (`routeFromMemory`) | "R1 is now blocked - exploring a new route", no reason; a stretch that could not be detoured locally threw the whole 2 km route away | the reason is logged (e.g. "no local detour around (-440, -342)"); a stretch the local repair cannot get round is bridged by a longer A* detour (larger search budget) to a point up to 300 m further on where the route is clear again; a route found obstructed mid-leg is re-joined through the same search (driven line, bridging) before the leg drops to exploration (up to 3 times a leg): exploring from there sent a loaded rover round the back of the habitat into the power-dock yard, where it boxed in 25 m from PORT-2's pre-dock point |
+| Orbital-fix log | "149941.7142857143 map cells re-placed" (8 values per moved cell, divided by 7) | divided by 8 |
+
+**Result.** M6 full cycle (`node tests/autonomy.mjs cycle 24000`), three deliveries, on two sites:
+
+| Site | CM-40A | CP-36C | CC-20B | Mission complete (incl. self-park, charge to 95 %) | Driven | Energy | Autonomous retries |
+|---|---|---|---|---|---|---|---|
+| default seed | 59.5 min | 125.5 min | 197.7 min | 286.3 min (17,177 s) | 13.8 km | 24.0 kWh | 0 |
+| seed 20261114 | 49.8 min | 107.4 min | 210.4 min | 302.4 min (18,147 s) | 15.0 km | 26.0 kWh | 1 (PORT-2 pre-dock) |
+
+Before this pass the same test failed on the default site with 2 of 3 (§30 tree) and, on v1.6.0, aborted on navigation events.
+Docking at the last port: 2.6 / 4.8 mm lateral, 0.67 / 0.78 deg, 754 / 751 N contact. Later loaded legs reuse and re-join their routes instead of
+re-exploring. Box-in unwinds over the whole cycle: 4 (default) and 6 (second site), mostly on the first loaded leg, which explores unmapped
+ground; all recovered without operator help (the §30 tree failed after 2). Still seen, not fixed: the loaded rover sometimes reaches a port's lead-in point
+from the side (the grid planner has no heading) and has to back off and retry the pre-dock line-up; the empty rover's pivot on a remembered
+route can stall (recovered by the retry). `npm run test:quick` 25/25 files; long set 6/6 (m3, drift, faults, fdir 65/65, power_dock, nav_bench), all on the final code.
+
+Also merged from the §30 review (another session, same day): the float64 position guard up to `PHYS.posGuardMaxSpeed` 0.8 m/s (`sim.js`).
+
+New tests (both in `npm run test:quick`): `tests/nav_retry.mjs` (13 checks: retry after a failed leg, learned obstacles kept, route source
+switched, retry limit, no retry for "no path", charger leg, unwind trace never leads back into an earlier pocket) and `tests/frame_shift.mjs` (4 checks: an estimate seen before the previous fix does
+not move under a 0.72 deg fix 2 km away; one seen now moves with the map). `tests/planner.mjs` +11 checks for route straightening (shorter,
+clears a boulder by the hard margin, mapped ground only, ends kept, loaded radius >= 18 m, no chord across unmapped ground).
