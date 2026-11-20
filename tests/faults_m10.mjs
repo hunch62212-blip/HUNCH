@@ -1,4 +1,4 @@
-// Mission 10, the six "something goes wrong" cases that tests/faults.mjs does not cover (REQUIREMENTS.md):
+// Mission 10, the six "something goes wrong" cases that tests/faults.mjs does not cover (docs/REQUIREMENTS.md):
 // LiDAR loss, camera loss, comms loss, low battery, cargo shift and an unavailable port.
 // Pass rules (one group per fault):
 //   lidar   unmapped ground, so the rover must not drive blind: stopped (<= 0.1 m/s) within 8 s of the fault and for as
@@ -80,7 +80,7 @@ function run(sim, T, each) { const t0 = sim.time; while (sim.time - t0 < T) { si
   let socMin = 1, tConn = null;
   run(sim, 1500, (t) => { socMin = Math.min(socMin, R.power.soc); if (tConn == null && D.connected && D.chargeW > 0) tConn = t; return !(tConn != null && t > tConn + 120); });
   check('battery: low-battery diversion announced', said(sim, /Low battery.*power dock/i, t0));
-  check('battery: coupled to the power dock and charging', tConn != null, tConn != null ? `after ${tConn.toFixed(0)} s, ${(D.chargeW / 1000).toFixed(0)} kW` : 'never connected');
+  check('battery: coupled to the power dock and charging', tConn != null, tConn != null ? `after ${tConn.toFixed(0)} s, ${D.chargeA.toFixed(2)} A` : 'never connected');
   atLeast('battery: lowest state of charge on the way', socMin * 100, 10, ' %', 1);
   atLeast('battery: state of charge 2 min into the charge', R.power.soc * 100, 12, ' %', 2);
 }

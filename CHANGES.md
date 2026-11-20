@@ -825,3 +825,35 @@ New tests (both in `npm run test:quick`): `tests/nav_retry.mjs` (13 checks: retr
 switched, retry limit, no retry for "no path", charger leg, unwind trace never leads back into an earlier pocket) and `tests/frame_shift.mjs` (4 checks: an estimate seen before the previous fix does
 not move under a 0.72 deg fix 2 km away; one seen now moves with the map). `tests/planner.mjs` +11 checks for route straightening (shorter,
 clears a boulder by the hard margin, mapped ground only, ends kept, loaded radius >= 18 m, no chord across unmapped ground).
+
+## 32. Slip-aware navigation (2026-11-17)
+
+**Why.** Baseline (default seed, empty rover, pad→hab, first 300 s): mean |slip| 9.9 %, and in turns the rover achieves only **0.51 of the commanded yaw rate**; cross-track error mean 1.55 m / max 6 m. The local planner collision-checked arcs at the *commanded* curvature while the rover drove about twice that radius, and the command was open loop.
+
+| File | Item | Before | After |
+|---|---|---|---|
+| `config.js` | `NAV.slip` | – | master switch (`SLIPNAV=0` = off), `etaInit/etaMin/etaTau`, `trackKp/Ki/LimK` (all `[ASSUMED]`) |
+| `autonomy.js` | yaw-efficiency `eta` | – | achieved / commanded yaw rate from the existing 6 s averages, low-passed, clamped to [0.3, 1] |
+| `autonomy.js` | `trackCurv` | open-loop `wz = v·k` | `wz = wzDes/eta` + gyro PI (authority 0.04 /m × v), capped to the 50–65 % inner-side-speed rule |
+| `autonomy.js` | navTo curve speed law | commanded k | "no skid" law uses commanded k = kGeo/eta (cornering not faster) |
+| `planner.js` | `LocalPlanner.evaluate` `opts.eta` | arcs rolled out at commanded k | arcs rolled out at geometric k = eta × commanded; fallback kmax sets scaled the same |
+
+**Loaded rover excluded.** With the feature on for the loaded rover, `stand_exit` (loaded exit from the stand) failed 3 checks (boxed in, 999 s) and `dock_pod4` needed a second capture attempt; with `SLIPNAV=0` they passed. Cause was not isolated further: disabling only the planner scaling did not fix it, so the loaded yaw feed-forward was excluded: eta estimation, `trackCurv` and the planner arc scaling apply to the empty rover only (`etaPlan()` floors the planner eta at `etaPlanMin` 0.6). Loaded steering is unchanged.
+
+**Status: OFF by default (opt-in, `SLIPNAV=1` in node).** With the feature on, `tests/faults_m10.mjs` regressed (51/53, then 48/53 after capping the feed-forward at `etaFFMin` 0.75: camera-fault and comms-loss distance checks too short, LiDAR-on-route following changed); with it off the suite is 53/53. The other 24 quick test files pass either way. The slip benefit itself was never measured, so there is no evidence yet that it helps. The browser build has no `process`, so it runs the old steering.
+
+**Not done yet (from the plan):** slip observer / visual odometry, traction governor and the two truth leaks (`rover.js _smartRpm`, navTo lookahead speed), dig-in escape and slip cost layer, slip-weighted odometry fusion, the `tests/scratch/slip_bench.mjs` A/B bench. **No before/after numbers are recorded for this change yet.**
+
+## 33. v1.8.0 arm-handled cargo (ACM), outer-wheel drive, actuator physics (WIP)
+- P0 constants (`src/sim/config.js`): new `DRIVE`, `ACT`, `ARM`, `ACM_PICK`, `DECK`, `ACM_SOIL`, `CARGO_TYPES.acm`; `handling: 'straddle'` on cyl40/box20 (pod4 inherits). Unsourced values tagged `[ASSUMED]`, placeholder sizes `[VERIFY]`. The `ROVER.motor.peakTorque` 5600 -> 8400 / `brakeTorque` 9000 -> 13500 raise (4 driven motors keep the 6-motor budget) is held back and ships with P1b: on 6 driven wheels it set off a false FDIR hub-temperature alarm (fdir 64/65). `config.js` therefore keeps 5600 / 9000 here (the comment above those lines describes the P1b target); nothing else consumes the new blocks yet.
+- P1a actuators (`src/sim/actuators.js`, `tests/actuators.mjs`): pure `DCMotor` (R = V/Is, back-EMF k, calibrated eta, Ilim clamp, regularised Coulomb/stiction loss, back-driven hold cap, TsV/w0V voltage tables, thermal state with derate above Tmax, gearLimitNm flag, regen clipped or fractional), `Servo` (PID on output pot with deadband, gear stage Jg with two-mass backlash contact, optional rate/acc slew, anti-windup, power-off brake after 0.5 s still), `Rail` (V_bus = Vsrc - Rsrc*sumI), `dz`, `fromSpec`. Unsourced internals tagged `[ASSUMED]` in the file (tau_m 0.03 s, zeta 0.7, holdFactor 1.3, derate span 30 K). Nothing consumes it yet; test not yet in `tests/run-all.mjs` (not owned by P1a).
+- P1b outer-wheel drive and P1c soil/ACM contact: in progress, not in this commit.
+
+## 34. Prototype-scale lunar power dock: 24 V 100 Ah bank, VSAT-style solar, inductive charging (2026-11-19)
+Research and sizing: `docs/LUNAR_CHARGING.md` (precedent table, mechanism, sizing arithmetic, sources).
+- Before -> after (`src/sim/config.js` `POWER_DOCK`, new `PROTO_PACK`, `PROTO_TO_FULL_WH`, `LFP_OCV`): electrics modelled in prototype units. Arrays 4 x 120 m2 (165 kW) -> 2 vertical masts x 0.2016 m2 (126 W); bank 1.5 MWh -> 24 V 100 Ah = 2.4 kWh; charger 60 kW contact coupler -> 1.4 A (0.14 C) inductive link (85 % at centre, 125 W limit); hotel 700 W + heaters -> 0.8 W + vault heater with 1 W RHU (night 2.0 W = 708 Wh per 354 h night); dock geometry drawn at 1:1 of the prototype dock.
+- Coupling rule: the rover pack is the 128 Wh prototype pack with the same SoC. `R.power.dockW = chargeW_proto x 3281.25` (420 kWh / 128 Wh). Same C-rate as the old charge, so charge times match and the `health.js` pack thermal model is unchanged.
+- `src/sim/powerDock.js` rewritten: LiFePO4 OCV curve, CC-CV in amps, link efficiency falling with lateral offset, bank thermal node (vault heater, RHU, bermed sink), no bank charge below 0 C (`curtailed`), night reserve SoC 0.50 at night, `nightLoadW`, `nightHours`, `refillHours`, `etaMin`. Consumers: `autonomy.js` charge detail, `commands.js` `dock`, `ui/hud.js` (new "Dock -> rover" row); `render/powerDock.js` (2 masts, 8 cell blocks, RHU placard, flush coil pad replaces shutters and contact pucks).
+- Tests: `tests/power_dock.mjs` now checks peak current <= 1.4 A and <= 70 kW full-scale, delivered Wh / 128 vs SoC gain, bank SoC after the charge, 24 h day refill from the floor (>= 99 %, <= 24 h), cold-bank hold, a 354 h night from the 50 % reserve. `tests/faults_m10.mjs`: display text only.
+- Docs: `docs/POWER_BUDGET.md` (prototype values with full-scale equivalents, scale coupling), `docs/REQUIREMENTS.md` (charge rate wording).
+- Follow-ups: `public/team/js/dock_station.js` still models a 12.8 V pack swap; `health.js` CPL "contact resistance" text; regenerate `docs/FAULT_PROCEDURES.md`; receiver-coil visual in the rover belly (`aegis.js`); the compressed `lunar` command does not scale dock energy.

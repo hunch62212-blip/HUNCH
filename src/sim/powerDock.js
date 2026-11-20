@@ -1,7 +1,9 @@
-// AEGIS power dock: sun-tracking vertical solar arrays + a night-rated battery bank + an underbody
-// charge coupler pad beside the supply building. The arrays charge the bank through the lunar day; the bank
-// carries its own survival heaters and recharges the rover through the ~354 h lunar night.
-import { POWER_DOCK, ROVER, MOON } from './config.js';
+// AEGIS power dock, PROTOTYPE-SCALE electrics (docs/LUNAR_CHARGING.md): two sun-tracking vertical solar masts (VSAT-style)
+// feed a 24 V 100 Ah LiFePO4 bank in a heated, bermed vault; an INDUCTIVE pad (no exposed contacts, dust tolerant, after the
+// Astrobotic / WiBotic lunar wireless charger) charges the rover. Everything here is in prototype units (V, A, W, Wh); the
+// rover pack is treated as the 128 Wh prototype pack with the same state of charge, and the only coupling to the 420 kWh sim
+// pack is R.power.dockW = chargeW x PROTO_TO_FULL_WH (config.js).
+import { POWER_DOCK, PROTO_PACK, PROTO_TO_FULL_WH, LFP_OCV, ROVER, MOON } from './config.js';
 import { heightAt } from './terrain.js';
 import { G_STRUCT, Q_SENSOR, yawQuat } from './world.js';
 
@@ -18,6 +20,13 @@ export function powerDockLayout(hab) {
     hab: { yaw: hab.yaw },
   };
 }
+
+const ocv = (soc) => { // per-cell LiFePO4 rest voltage, linear between table points
+  const T = LFP_OCV, s = Math.max(0, Math.min(1, soc));
+  for (let i = 1; i < T.length; i++) if (s <= T[i][0]) return T[i - 1][1] + (T[i][1] - T[i - 1][1]) * (s - T[i - 1][0]) / (T[i][0] - T[i - 1][0]);
+  return T[T.length - 1][1];
+};
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
 export class PowerDock {
   constructor(sim) {
@@ -36,12 +45,21 @@ export class PowerDock {
     { const p = L.pedestal, g = heightAt(sim.terrain, p.x, p.z);
       add(RAPIER.ColliderDesc.cuboid(0.5, 0.9, 0.5).setTranslation(p.x, g + 0.9, p.z).setRotation(yawQuat(L.hab.yaw))); }
     this.bankWh = D.bankWh * 0.85;
-    this.solarW = 0; this.loadW = 0; this.chargeW = 0; this.netW = 0;
+    this.Tbank = D.vault.initC; this.heaterW = 0; this.bankA = 0;
+    this.solarW = 0; this.loadW = 0; this.chargeW = 0; this.chargeA = 0; this.inW = 0; this.netW = 0;
+    this.packV = PROTO_PACK.cells * ocv(0.5); this.linkEff = D.linkEff;
+    this.night = false; this.bankCold = false; this.curtailed = false; this.coldHold = false;
     this.trackAz = 0; this.sunlit = 1; this._shadowT = 0;
     this.connected = false; this.genWh = 0; this.deliveredWh = 0;
+    this.scale = PROTO_TO_FULL_WH;
     this.status = 'standby';
   }
   get soc() { return this.bankWh / POWER_DOCK.bankWh; }
+  get bankAhRated() { return POWER_DOCK.bankAh; }
+  get bankAhNow() { return this.soc * POWER_DOCK.bankAh; }
+  get bankV() { return POWER_DOCK.bankCells * ocv(this.soc) + this.bankA * POWER_DOCK.bankR; }
+  get floorSoc() { return this.night ? POWER_DOCK.nightReserveSoc : POWER_DOCK.bankFloor; }
+  get atFloor() { return this.soc <= this.floorSoc + 1e-6; }
   roverOnPad() {
     const R = this.sim.rover, p = R.pose(), L = this.layout;
     const dyaw = Math.abs(Math.atan2(Math.sin(p.yaw - L.yaw), Math.cos(p.yaw - L.yaw)));
@@ -49,7 +67,7 @@ export class PowerDock {
     return aligned && Math.hypot(p.x - L.pad.x, p.z - L.pad.z) < POWER_DOCK.couplerTol && R.telemetry().speed < 0.08;
   }
   update(dt) {
-    const sim = this.sim, D = POWER_DOCK, sun = sim.sunDir, R = sim.rover;
+    const sim = this.sim, D = POWER_DOCK, V = D.vault, sun = sim.sunDir, R = sim.rover, cap = D.bankWh;
     // arrays: vertical panels on single-axis azimuth trackers (ideal for a low polar sun)
     this.trackAz = Math.atan2(-sun.z, sun.x);
     this._shadowT -= dt;
@@ -78,40 +96,69 @@ export class PowerDock {
       });
       this.sunlit = lit / A.length;
     }
-    const cosI = Math.sqrt(Math.max(0, 1 - sun.y * sun.y)); // panel normal horizontal, pointed at the sun azimuth
-    this.solarW = D.arrays.length * D.arrayArea * D.efficiency * (D.arrayDerate ?? 1) * MOON.solarConstant * cosI * this.sunlit;
-    const night = this.solarW < 500;
-    // survival load: avionics + vault thermal control (heaters work hardest at night, ~ -170 C)
-    this.loadW = D.hotelW + (night ? D.nightHeaterW : D.dayHeaterW);
-    // charging: underbody coupler engages when the rover is centred on the pad and knelt onto it
+    // 1. solar: AM0 flux x cell efficiency x derate x MPPT, on the prototype panel area (vertical panel facing the sun azimuth)
+    const cosI = Math.sqrt(Math.max(0, 1 - sun.y * sun.y));
+    this.solarW = D.arrays.length * D.panelAreaProto * D.cellEff * D.arrayDerate * D.mpptEff * MOON.solarConstant * cosI * this.sunlit;
+    const night = this.night = this.solarW < D.nightSolarW;
+    // 2. bank vault thermal node: heater (thermostat on the vault air), RHU, bank I^2 R, loss to the bermed sink
+    const atHard = this.bankWh <= D.bankFloor * cap;
+    this.heaterW = atHard ? 0 : clamp(V.heaterGain * (V.setC - this.Tbank), 0, V.heaterMaxW);
+    const sink = night ? V.sinkNightC : V.sinkDayC;
+    this.Tbank += dt * (this.heaterW + V.rhuW + this.bankA * this.bankA * D.bankR - V.G * (this.Tbank - sink)) / V.C;
+    // 3. survival load: avionics + vault heater (+ inductive pilot / foreign-object detection while a rover is on the pad)
     const onPad = this.roverOnPad();
+    this.loadW = D.hotelW + (onPad ? D.padStandbyW : 0) + this.heaterW;
+    // 4. charging: the inductive link engages when the rover is centred on the pad and knelt onto it (closes the coil gap)
     const coupled = onPad && R.lift.pos < ROVER.ride.kneel + 0.12 && !R.estop && !(sim.health && sim.health.fx.coupler); // coupler fault: no pilot signal
-    if (coupled && !this.connected) sim.log(`POWER DOCK: coupler engaged, charging at up to ${(D.chargeMaxW / 1000).toFixed(0)} kW`, 'ok');
-    if (!coupled && this.connected) sim.log(`POWER DOCK: coupler released (rover ${(R.power.soc * 100).toFixed(0)}%, bank ${(this.soc * 100).toFixed(0)}%)`, 'info');
+    if (coupled && !this.connected) sim.log(`POWER DOCK: inductive link engaged, up to ${D.chargeCC_A.toFixed(1)} A into the pack`, 'ok');
+    if (!coupled && this.connected) sim.log(`POWER DOCK: inductive link released (rover ${(R.power.soc * 100).toFixed(0)}%, bank ${(this.soc * 100).toFixed(0)}%)`, 'info');
     this.connected = coupled;
-    let want = 0;
+    let wantW = 0;
     if (coupled) {
       const s = R.power.soc;
-      // CC-CV: full power to 80 %, tapering to zero at 100 % (pack C-rate limited)
-      want = s >= 0.999 ? 0 : D.chargeMaxW * (s < 0.8 ? 1 : Math.max(0.08, (1 - s) / 0.2));
+      // CC-CV into the prototype pack: constant current to 80 %, tapering to zero at 100 %
+      let I = s >= 0.999 ? 0 : D.chargeCC_A * (s < 0.8 ? 1 : Math.max(0.08, (1 - s) / 0.2));
       // cell-temperature limits: no charge below chargeMinCellC (lithium plating; the pack heaters warm it first),
       // taper to zero between 40 C and the 50 C pack limit
       const Tb = sim.health ? sim.health.th.Tb : 20;
       this.coldHold = Tb < (D.chargeMinCellC ?? -99);
-      if (this.coldHold) want = 0; else want *= Math.max(0, Math.min(1, (48 - Tb) / 8));
-    }
-    const avail = Math.max(0, this.solarW - this.loadW) + (this.bankWh > D.bankWh * D.bankFloor ? D.bankMaxDischargeW : 0);
-    this.chargeW = Math.min(want, avail);
-    this.netW = this.solarW - this.loadW - this.chargeW / D.chargerEff;
-    const cap = D.bankWh;
-    const dWh = (this.netW > 0 ? this.netW * D.bankEff : this.netW / D.bankEff) * dt / 3600; // loss on the way in and on the way out
-    this.bankWh = Math.max(0, Math.min(cap, this.bankWh + dWh));
+      if (this.coldHold) I = 0; else I *= Math.max(0, Math.min(1, (48 - Tb) / 8));
+      this.packV = Math.min(PROTO_PACK.cells * PROTO_PACK.cvCell, PROTO_PACK.cells * ocv(s) + I * PROTO_PACK.R);
+      wantW = I * this.packV;
+      const p = R.pose(), d = Math.hypot(p.x - this.layout.pad.x, p.z - this.layout.pad.z);
+      this.linkEff = D.linkEff * (1 - D.linkOffsetLoss * (d / D.couplerTol) ** 2); // coil misalignment loss
+    } else this.coldHold = false;
+    // 6. what the dock can supply: solar surplus + bank discharge (down to the floor; the night reserve at night)
+    const canDis = this.bankWh > this.floorSoc * cap && this.Tbank > D.dischargeMinBankC;
+    const avail = Math.max(0, this.solarW - this.loadW) + (canDis ? D.bankMaxDischargeW : 0);
+    this.inW = Math.min(wantW / this.linkEff, avail, D.linkMaxW);
+    this.chargeW = this.inW * this.linkEff;                       // prototype W into the pack
+    this.chargeA = this.packV > 0 ? this.chargeW / this.packV : 0;
+    // 7. bank energy balance (LiFePO4 will not take charge below 0 C: the MPPT backs off until the vault heater warms it)
+    let netW = this.solarW - this.loadW - this.inW;
+    this.bankCold = this.Tbank < D.chargeMinBankC;
+    this.curtailed = false;
+    if (netW > 0 && this.bankCold) { this.curtailed = true; netW = 0; }
+    netW = Math.min(netW, D.bankMaxChargeA * D.bankV);
+    this.netW = netW;
+    const dWh = (netW > 0 ? netW * D.bankEff : netW / D.bankEff) * dt / 3600; // loss on the way in and on the way out
+    this.bankWh = clamp(this.bankWh + dWh, 0, cap);
+    this.bankA = netW / Math.max(1, this.bankV);
     this.genWh += this.solarW * dt / 3600; this.deliveredWh += this.chargeW * dt / 3600;
-    R.power.dockW = this.chargeW;
-    // (a coupled rover that gets no power is not always full: the bank may be at its floor at night, or the pack too hot)
+    // 9. the only coupling to the full-scale sim: the same C-rate into the 420 kWh pack
+    R.power.dockW = this.chargeW * PROTO_TO_FULL_WH;
+    // (a coupled rover that gets no power is not always full: the bank may be at its floor, or the pack too hot)
     const Tb1 = sim.health ? sim.health.th.Tb : 20;
-    this.status = coupled ? (this.chargeW > 0 ? 'CHARGING' : this.coldHold ? 'HOLD: pack below 0 C, warming' : R.power.soc >= 0.999 ? 'ROVER FULL' : Tb1 >= 50 ? 'HOLD: pack at 50 C, cooling' : 'HOLD: bank at floor, waiting for sun') : onPad ? 'rover on pad (kneel to couple)' : night ? 'NIGHT: bank supplying' : this.bankWh >= cap - 1 ? 'bank full' : 'charging bank';
+    const floorTxt = night ? `HOLD: bank at night reserve ${(D.nightReserveSoc * 100).toFixed(0)} %, waiting for sunrise` : `HOLD: bank at floor ${(D.bankFloor * 100).toFixed(0)} %, waiting for sun`;
+    this.status = coupled ? (this.chargeW > 0 ? 'CHARGING' : this.coldHold ? 'HOLD: pack below 0 C, warming' : R.power.soc >= 0.999 ? 'ROVER FULL' : Tb1 >= 50 ? 'HOLD: pack at 50 C, cooling' : floorTxt)
+      : onPad ? 'rover on pad (kneel to couple)' : night ? 'NIGHT: bank supplying' : this.curtailed ? 'bank cold: warming before charge' : this.bankWh >= cap - 1 ? 'bank full' : 'charging bank';
   }
-  // hours the bank can carry the dock's survival load through a night with no solar input
-  nightHours() { return this.bankWh * POWER_DOCK.bankEff / (POWER_DOCK.hotelW + POWER_DOCK.nightHeaterW); }
+  // dock survival load on a lunar night: avionics + the part of the vault heat loss the 1 W RHU does not cover
+  nightLoadW() { const D = POWER_DOCK; return D.hotelW + Math.max(0, D.vault.G * (D.vault.setC - D.vault.sinkNightC) - D.vault.rhuW); }
+  // hours the bank can carry that load with no solar input (from its current charge down to the BMS floor)
+  nightHours() { const D = POWER_DOCK; return (this.bankWh - D.bankFloor * D.bankWh) * D.bankEff / this.nightLoadW(); }
+  // hours of sun to refill the bank from the floor at the present solar input
+  refillHours() { const D = POWER_DOCK; return D.bankWh * (1 - D.bankFloor) / D.bankEff / Math.max(0.01, this.solarW - this.loadW); }
+  // minutes to charge the rover pack to `target` SoC at the present charge power (prototype Wh over prototype W)
+  etaMin(target) { return Math.max(0, target - this.sim.rover.power.soc) * PROTO_PACK.Wh / Math.max(0.1, this.chargeW) * 60; }
 }

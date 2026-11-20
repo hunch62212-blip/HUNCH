@@ -319,7 +319,7 @@ export function runCommand(sim, ui, line, _uplinked = false) {
     }
     case 'dock': {
       const D = sim.powerDock;
-      say(`POWER DOCK ${D.status} | bank ${(D.soc * 100).toFixed(1)}% (${(D.bankWh / 1e6).toFixed(2)} MWh) | solar ${(D.solarW / 1000).toFixed(1)} kW | dock load ${(D.loadW / 1000).toFixed(1)} kW | to rover ${(D.chargeW / 1000).toFixed(0)} kW | night endurance ${D.nightHours().toFixed(0)} h (lunar night 354 h)`);
+      say(`POWER DOCK ${D.status} | bank ${D.bankV.toFixed(1)} V ${D.bankAhNow.toFixed(1)}/${D.bankAhRated} Ah (${(D.soc * 100).toFixed(1)}%) ${D.bankA.toFixed(2)} A ${D.Tbank.toFixed(1)} C | solar ${D.solarW.toFixed(0)} W | load ${D.loadW.toFixed(1)} W | to rover ${D.chargeA.toFixed(2)} A ${D.chargeW.toFixed(1)} W (= ${(sim.rover.power.dockW / 1000).toFixed(0)} kW full-scale, x${D.scale.toFixed(0)}) | night endurance ${D.nightHours().toFixed(0)} h (lunar night 354 h) | refill ${D.refillHours().toFixed(1)} h`);
       break;
     }
     case 'day': sim.lunar.on = false; sim.setSun(sim.sunAz, 9); say('Sun up (el 9 deg)', 'ok'); break;

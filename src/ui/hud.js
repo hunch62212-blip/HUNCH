@@ -136,6 +136,7 @@ export class HUD {
       <div class="kv">
         <span class="k" title="Dock charge power / vehicle electrical load">Charge / load</span><span class="v" id="vPow">0</span>
         <span class="k">Power dock</span><span class="v" id="vDock">-</span>
+        <span class="k" title="Prototype (1:16.3) inductive charge into the 12.8 V 10 Ah pack; x3281 = full-scale">Dock → rover</span><span class="v" id="vDockChg">-</span>
         <span class="k">Drive power</span><span class="v" id="vDrive">0</span>
         <span class="k">Odometer / energy</span><span class="v" id="vOdo">0</span>
         <span class="k">Payload</span><span class="v" id="vLoad">none</span>
@@ -516,7 +517,8 @@ export class HUD {
     $('#vSoc').textContent = `${fmt(R.power.soc * 100, 1)} %  (${fmt(R.power.wh / 1000, 1)} kWh, ${fmt(R.power.voltage, 0)} V)`;
     const sb = $('#bSoc'); sb.style.width = R.power.soc * 100 + '%'; sb.style.background = R.power.soc < A.reserveSoc ? 'var(--err)' : R.power.soc < 0.4 ? 'var(--warn)' : 'var(--ok)';
     $('#vPow').textContent = `${fmt((R.power.dockW || 0) / 1000, 1)} / ${fmt(R.power.loadW / 1000, 2)} kW`;
-    { const D = sim.powerDock; $('#vDock').textContent = `bank ${fmt(D.soc * 100, 0)}% · sun ${fmt(D.solarW / 1000, 0)} kW · ${D.status}`; }
+    { const D = sim.powerDock; $('#vDock').textContent = `bank ${fmt(D.bankV, 1)} V · ${fmt(D.bankAhNow, 0)}/${D.bankAhRated} Ah (${fmt(D.soc * 100, 0)}%) · ${fmt(D.bankA, 1)} A · sun ${fmt(D.solarW, 0)} W · ${fmt(D.Tbank, 0)} °C · ${D.status}`;
+      $('#vDockChg').textContent = D.connected ? `${fmt(D.chargeA, 2)} A @ ${fmt(D.packV, 1)} V = ${fmt(D.chargeW, 1)} W · pack ${fmt(R.power.soc * 10, 1)} Ah · link ${fmt(D.linkEff * 100, 0)}% · ≙ ${fmt((R.power.dockW || 0) / 1000, 0)} kW` : 'not coupled'; }
     $('#vDrive').textContent = `${fmt(R.power.driveW / 1000, 2)} kW  regen ${fmt(R.power.regenWh, 1)} Wh`;
     $('#vOdo').textContent = `${fmt(R.odo.dist / 1000, 3)} km / ${fmt(R.power.energyUsedWh / 1000, 2)} kWh`;
     $('#vLoad').textContent = R.loaded ? `${R.lift.cargo.id} ${(R.lift.cargo.T.mass / 1000).toFixed(0)} t (${(R.lift.cargo.T.mass * MOON.g / 1000).toFixed(1)} kN)` : 'none';

@@ -1,0 +1,215 @@
+Name,Unit,Expression,Value,Comments,Favorite
+bed_max,mm,220 mm,220,Usable bed X/Y (256 for Bambu X1/P1) [VERIFY],FALSE
+bed_z,mm,250 mm,250,Usable bed height [VERIFY],FALSE
+clr_slip,mm,0.2 mm,0.2,Per-side slip-fit clearance (tune with 05 coupon),FALSE
+clr_snug,mm,0.1 mm,0.1,Per-side locating fit,FALSE
+clr_press,mm,0.0 mm,0,Per-side press fit (plus crush ribs),FALSE
+crush_rib,mm,0.3 mm,0.3,Crush rib height in press bores,FALSE
+wall_min,mm,2.0 mm,2,Minimum wall around holes and inserts,FALSE
+ins_m3_d,mm,4.0 mm,4,M3x5.7 heat-set insert hole dia (confirm with coupon),FALSE
+ins_m3_depth,mm,6.7 mm,6.7,M3 insert hole depth (insert length + 1),FALSE
+ins_m3_boss,mm,8.0 mm,8,M3 insert boss OD,FALSE
+ins_m25_d,mm,3.6 mm,3.6,M2.5 insert hole dia,FALSE
+ins_m25_depth,mm,5.0 mm,5,M2.5 insert hole depth,FALSE
+ins_m4_d,mm,5.6 mm,5.6,M4 insert hole dia [VERIFY],FALSE
+ins_m4_depth,mm,9.1 mm,9.1,M4 insert hole depth [VERIFY],FALSE
+ins_m4_boss,mm,10.0 mm,10,M4 insert boss OD,FALSE
+bolt_m3_clr,mm,3.4 mm,3.4,M3 clearance hole,FALSE
+bolt_m4_clr,mm,4.5 mm,4.5,M4 clearance hole,FALSE
+bolt_m25_clr,mm,2.9 mm,2.9,M2.5 clearance hole,FALSE
+bolt_m5_clr,mm,5.5 mm,5.5,M5 clearance hole (2020 T-nut bolts),FALSE
+ch_halfLen,mm,300 mm,300,Frame half length (= ROVER.frame / K),FALSE
+ch_halfWid,mm,302 mm,302,Frame half width,FALSE
+ch_deckY,mm,225 mm,225,Deck top height,FALSE
+ch_tubZ,mm,146 mm,146,Tub inner half-width,FALSE
+ch_tubY0,mm,65 mm,65,Tub floor (top) height,FALSE
+ch_deck_t,mm,4 mm,4,Deck sheet thickness,FALSE
+ext_size,mm,20 mm,20,2020 extrusion section,FALSE
+ch_tubL,mm,420 mm,420,"Tub length (x, centred on 0)",FALSE
+ch_tub_t,mm,4 mm,4,Tub wall / floor sheet thickness,FALSE
+ext_rail_L,mm,600 mm,600,Long rails (x),FALSE
+ext_cross_L,mm,560 mm,560,Cross rails (z),FALSE
+ch_cross_x,mm,290 mm,290,Cross rail centre |x| (end rails); middle rail at 0,FALSE
+ch_rail_z,mm,ch_halfWid - ext_size/2,292,Long rail centre |z|,FALSE
+ch_deck_L,mm,2*ch_halfLen,600,Deck length,FALSE
+ch_deck_W,mm,2*ch_halfWid,604,Deck width,FALSE
+ch_rail_y1,mm,ch_deckY - ch_deck_t,221,Rail top = deck underside,FALSE
+ch_brkt_t,mm,4 mm,4,Corner bracket plate thickness,FALSE
+ch_brkt_arm,mm,44 mm,44,Corner bracket arm length,FALSE
+ch_brkt_w,mm,18 mm,18,Corner bracket arm width,FALSE
+ch_deck_bolt_pitch,mm,100 mm,100,Deck M5 bolt pitch along rails,FALSE
+ch_angle_t,mm,9 mm,9,Tub angle bracket thickness (insert depth + wall),FALSE
+wb_x,mm,240 mm,240,Front/rear axle x,FALSE
+tr_z,mm,235 mm,235,Track half-width (wheel centre plane),FALSE
+wh_r,mm,65 mm,65,Wheel radius (incl. cleats) [VERIFY],FALSE
+wh_w,mm,75 mm,75,Wheel width [VERIFY],FALSE
+wh_cleat_h,mm,8 mm,8,Cleat height (sim TIRE.cleatM),FALSE
+wh_cleats,,20,20,Cleats per wheel,FALSE
+wh_rim_t,mm,3 mm,3,Hoop wall thickness,FALSE
+wh_disc_t,mm,5 mm,5,Printed wheel disc thickness,FALSE
+wh_outer_z,mm,tr_z + wh_w/2,272.5,Outer face of wheel,FALSE
+whub_d,mm,22 mm,22,Pololu 6 mm hub OD [VERIFY],FALSE
+whub_L,mm,12 mm,12,Pololu hub length [VERIFY],FALSE
+whub_bc,mm,16 mm,16,Hub bolt circle (4x M3) [VERIFY],FALSE
+mot_d,mm,37 mm,37,37D gearmotor body dia,FALSE
+mot_L,mm,68 mm,68,"37D gearmotor with encoder, body length",FALSE
+mot_shaft_d,mm,6 mm,6,D-shaft dia,FALSE
+mot_shaft_L,mm,16 mm,16,Shaft length,FALSE
+mot_bc_d,mm,31 mm,31,Face bolt circle [VERIFY],FALSE
+mot_holes,,6,6,Face M3 holes,FALSE
+mot_collar_d,mm,12 mm,12,Shaft collar dia [VERIFY],FALSE
+mot_ring_t,mm,3 mm,3,Mount face-ring thickness,FALSE
+mot_z_face,mm,wh_outer_z - wh_disc_t - mot_shaft_L,251.5,Motor gearbox face (world z of right side),FALSE
+mot_z0,mm,mot_z_face - mot_L,183.5,Motor back end z,FALSE
+mot_clamp_L,mm,30 mm,30,Clamp ring length,FALSE
+mot_clamp_wall,mm,4 mm,4,Clamp ring wall,FALSE
+mot_flange_t,mm,12 mm,12,Mount flange thickness (M4 insert depth + wall),FALSE
+mot_ear_off,mm,30 mm,30,"First ear hole distance from axle, along link",FALSE
+mot_ear_pitch,mm,32 mm,32,Ear hole pitch,FALSE
+mot_pinch_gap,mm,1.5 mm,1.5,Clamp slit width,FALSE
+brg_od,mm,22 mm,22,608 bearing OD,FALSE
+brg_id,mm,8 mm,8,608 bearing ID,FALSE
+brg_w,mm,7 mm,7,608 bearing width,FALSE
+idl_hub_d,mm,30 mm,30,Idler hub body OD,FALSE
+idl_flange_d,mm,48 mm,48,Idler hub flange OD,FALSE
+idl_bc,mm,36 mm,36,Idler disc bolt circle (4x M3),FALSE
+idl_boss_d,mm,18 mm,18,Idler axle boss OD,FALSE
+rb_P_x,mm,0 mm,0,Rocker pivot x (GEO.P),FALSE
+rb_P_y,mm,194 mm,194,Rocker pivot y,FALSE
+rb_B_x,mm,-120 mm,-120,Bogie pivot x (GEO.B),FALSE
+rb_B_y,mm,125 mm,125,Bogie pivot y,FALSE
+rb_tube,mm,12 mm,12,Link section thickness,FALSE
+rb_link_t,mm,rb_tube,12,Link bar thickness (z),FALSE
+rb_link_h,mm,18 mm,18,Link bar height (in plane),FALSE
+rb_rocker_z,mm,175 mm,175,Rocker link mid-plane |z|,FALSE
+rb_bogie_z,mm,159 mm,159,Bogie link mid-plane |z| (sim 157; +2 so the joint block keeps 2 mm walls),FALSE
+rb_face_z,mm,rb_rocker_z + rb_link_t/2,181,Rocker outer face = mounting face for pods,FALSE
+rb_pin_d,mm,8 mm,8,Pivot pin / idler axle dia,FALSE
+jb_w,mm,40 mm,40,Joint block boss OD,FALSE
+jb_web,mm,4 mm,4,Joint block web between bearing seats,FALSE
+jb_t,mm,2*brg_w + jb_web,18,Joint block thickness,FALSE
+jb_stub,mm,48 mm,48,Bogie block bar-stub length,FALSE
+bat_L,mm,155 mm,155,Battery length x [VERIFY],FALSE
+bat_W,mm,100 mm,100,Battery width z [VERIFY],FALSE
+bat_H,mm,100 mm,100,Battery height y [VERIFY],FALSE
+bat_x,mm,-80 mm,-80,Battery centre x (Option R),FALSE
+bat_y,mm,70 mm,70,Battery bottom y,FALSE
+bat_tray_wall,mm,3 mm,3,Tray wall,FALSE
+bat_tray_floor,mm,5 mm,5,Tray floor,FALSE
+bat_tray_wallH,mm,40 mm,40,Tray wall height above floor,FALSE
+bat_lid_t,mm,3 mm,3,Battery lid thickness,FALSE
+ele_x,mm,50 mm,50,Electronics tray centre x,FALSE
+ele_L,mm,96 mm,96,Electronics tray length x,FALSE
+ele_plate_t,mm,4 mm,4,Electronics plate thickness,FALSE
+ele_standoff_h,mm,8 mm,8,Board standoff height,FALSE
+ele_hole_inset,mm,3.5 mm,3.5,Generic board hole inset from edges,FALSE
+ele_upper_y,mm,96 mm,96,Upper electronics plate underside y,FALSE
+pi_L,mm,85 mm,85,Pi 5 length,FALSE
+pi_W,mm,56 mm,56,Pi 5 width,FALSE
+pi_H,mm,17 mm,17,Pi 5 height incl. headers,FALSE
+pi_hdx,mm,58 mm,58,Pi 5 hole pitch (long),FALSE
+pi_hdy,mm,49 mm,49,Pi 5 hole pitch (short),FALSE
+esp_L,mm,69 mm,69,ESP32-S3 DevKitC-1 length [VERIFY],FALSE
+esp_W,mm,26 mm,26,ESP32-S3 width,FALSE
+esp_H,mm,12 mm,12,ESP32-S3 height,FALSE
+mdd_L,mm,84 mm,84,MDD10A length [VERIFY],FALSE
+mdd_W,mm,62 mm,62,MDD10A width,FALSE
+mdd_H,mm,16 mm,16,MDD10A height,FALSE
+pca_L,mm,62.5 mm,62.5,PCA9685 length,FALSE
+pca_W,mm,25.4 mm,25.4,PCA9685 width,FALSE
+pca_H,mm,12 mm,12,PCA9685 height,FALSE
+ubec_L,mm,50 mm,50,UBEC length [VERIFY],FALSE
+ubec_W,mm,27 mm,27,UBEC width,FALSE
+ubec_H,mm,13 mm,13,UBEC height,FALSE
+ina_L,mm,25.4 mm,25.4,INA226 board length [VERIFY],FALSE
+ina_W,mm,22.8 mm,22.8,INA226 board width,FALSE
+ina_H,mm,8 mm,8,INA226 height,FALSE
+imu_L,mm,25.4 mm,25.4,BNO085 breakout length [VERIFY],FALSE
+imu_W,mm,20.3 mm,20.3,BNO085 breakout width,FALSE
+imu_H,mm,5 mm,5,BNO085 height,FALSE
+lidar_d,mm,70 mm,70,LiDAR placeholder dia [VERIFY],FALSE
+lidar_h,mm,50 mm,50,LiDAR placeholder height [VERIFY],FALSE
+sen_nose_y,mm,150 mm,150,Front LiDAR centre height,FALSE
+sen_nose_x,mm,257 mm,257,Front LiDAR centre x (inside the 610 mm footprint),FALSE
+sen_mast_x,mm,-270 mm,-270,Rear LiDAR mast x,FALSE
+sen_mast_top,mm,385 mm,385,Rear LiDAR top y,FALSE
+cam_L,mm,25 mm,25,OV5647 board length,FALSE
+cam_W,mm,24 mm,24,OV5647 board width,FALSE
+cam_H,mm,9 mm,9,OV5647 height incl. lens,FALSE
+cam_hx,mm,21 mm,21,OV5647 hole pitch,FALSE
+cam_hy,mm,12.5 mm,12.5,OV5647 hole pitch,FALSE
+tof_L,mm,13 mm,13,VL53L1X breakout length,FALSE
+tof_W,mm,18 mm,18,VL53L1X breakout width,FALSE
+srv_big_L,mm,65.5 mm,65.5,60 kg-class body length [VERIFY],FALSE
+srv_big_W,mm,30 mm,30,60 kg-class body width [VERIFY],FALSE
+srv_big_H,mm,48 mm,48,60 kg-class body height [VERIFY],FALSE
+srv_big_flangeL,mm,82 mm,82,Ear span [VERIFY],FALSE
+srv_big_flange_z,mm,36 mm,36,Ear height from bottom [VERIFY],FALSE
+srv_big_holeX,mm,74 mm,74,Ear hole pitch x [VERIFY],FALSE
+srv_big_holeY,mm,20 mm,20,Ear hole pitch y [VERIFY],FALSE
+srv_big_shaft_off,mm,15 mm,15,Spline offset from end [VERIFY],FALSE
+srv_std_L,mm,40.7 mm,40.7,MG996R / DS3218 body length,FALSE
+srv_std_W,mm,19.7 mm,19.7,Body width,FALSE
+srv_std_H,mm,42.9 mm,42.9,Body height,FALSE
+srv_std_flangeL,mm,54 mm,54,Ear span [VERIFY],FALSE
+srv_std_flange_z,mm,28 mm,28,Ear height [VERIFY],FALSE
+srv_std_holeX,mm,49.5 mm,49.5,Ear hole pitch [VERIFY],FALSE
+srv_std_holeY,mm,10 mm,10,Ear hole pitch y [VERIFY],FALSE
+srv_std_shaft_off,mm,10 mm,10,Spline offset [VERIFY],FALSE
+srv_mic_L,mm,22.8 mm,22.8,MG90S length,FALSE
+srv_mic_W,mm,12.2 mm,12.2,MG90S width,FALSE
+srv_mic_H,mm,28.5 mm,28.5,MG90S height,FALSE
+srv_mic_holeX,mm,27.8 mm,27.8,MG90S ear hole pitch,FALSE
+horn_bc,mm,14 mm,14,25T disc horn bolt circle [VERIFY],FALSE
+horn_holes,,4,4,Horn bolt count,FALSE
+arm_sh_x,mm,150 mm,150,Shoulder axis x (= ARM.shoulder / K),FALSE
+arm_sh_y,mm,275 mm,275,Shoulder axis y,FALSE
+arm_z,mm,175 mm,175,Shoulder axis |z|,FALSE
+arm_L1,mm,200 mm,200,Upper arm length,FALSE
+arm_L2,mm,200 mm,200,Forearm length,FALSE
+arm_plate_t,mm,5 mm,5,Link plate thickness,FALSE
+arm_plate_h,mm,28 mm,28,Link plate height,FALSE
+arm_plate_gap,mm,srv_big_H + 2*clr_slip,48.4,Twin-plate gap (servo shaft axis = H; plan said W - corrected) [VERIFY],FALSE
+hook_mouth,mm,30 mm,30,Hook mouth,FALSE
+hook_seat_ang,deg,90 deg,90,V-seat included angle,FALSE
+hook_cheek_ang,deg,30 deg,30,Lead-in cheek angle,FALSE
+latch_gap,mm,1.0 mm,1,Gate to trunnion,FALSE
+trun_d,mm,12 mm,12,ACM trunnion dia,FALSE
+trun_len,mm,15 mm,15,ACM trunnion length (20 -> 15: tip stays 0.7 mm clear of the forearm inner plate),FALSE
+dk_place_x,mm,-120 mm,-120,ACM centre on deck (balance rule),FALSE
+dk_pin_tip,mm,8 mm,8,Locating pin tip dia,FALSE
+dk_pin_base,mm,14 mm,14,Locating pin base dia,FALSE
+dk_pin_h,mm,15 mm,15,Locating pin height,FALSE
+dk_pin_span,mm,140 mm,140,Locating pin span,FALSE
+dk_bush_d,mm,dk_pin_base + 2*clr_slip,14.4,ACM bushing bore,FALSE
+acm_L,mm,180 mm,180,ACM x size [VERIFY with user],FALSE
+acm_W,mm,240 mm,240,ACM z size [VERIFY with user],FALSE
+acm_H,mm,140 mm,140,ACM y size [VERIFY with user],FALSE
+acm_wall,mm,2.4 mm,2.4,Shell wall,FALSE
+acm_trun_y,mm,90 mm,90,Trunnion height,FALSE
+acm_cg_y,mm,70 mm,70,CG height (ballast),FALSE
+acm_foot,mm,30 mm,30,Foot pad dia,FALSE
+acm_foot_h,mm,5 mm,5,Foot pad height,FALSE
+acm_mass,,1.0,1,ACM ballasted mass (kg),FALSE
+fid_size,mm,60 mm,60,AprilTag size,FALSE
+sweep_halfW,mm,150 mm,150,Keep-out half width,FALSE
+sweep_x0,mm,-210 mm,-210,Keep-out x min,FALSE
+sweep_x1,mm,300 mm,300,Keep-out x max,FALSE
+sweep_top,mm,560 mm,560,Keep-out top y (apex 515 + hook),FALSE
+rho_petg,,1.27,1.27,PETG density g/cc,FALSE
+infill_eff,,0.55,0.55,Effective infill for mass estimate,FALSE
+arm_cw,mm,8 mm,8,Servo cradle wall,FALSE
+arm_horn_t,mm,3 mm,3,Servo horn disc thickness,FALSE
+arm_horn_d,mm,25 mm,25,Servo horn disc dia,FALSE
+arm_pin_d,mm,8 mm,8,Elbow / shoulder pivot pin boss dia,FALSE
+hook_off,mm,34 mm,34,Hook seat offset from wrist axis (plan: coincident; 22 keeps load torque < 0.1 N.m),FALSE
+hook_t,mm,6 mm,6,Hook plate thickness,FALSE
+gate_t,mm,4 mm,4,Latch gate thickness,FALSE
+acm_split_dy,mm,25 mm,25,ACM shell split plane above trunnion axis,FALSE
+acm_post_d,mm,18 mm,18,ACM interior corner post dia,FALSE
+keeper_d,mm,6 mm,6,ACM keeper bar dia,FALSE
+dk_latch_gap,mm,12 mm,12,Latch hook to keeper clearance when open,FALSE
+stow_x,mm,50 mm,50,Stow cradle pin x,FALSE
+stow_y,mm,305 mm,305,Stow cradle pin y,FALSE
+pick_x,mm,420 mm,420,ACM centre x at the ground pick pose,FALSE
+dk_latch_x,mm,dk_place_x - acm_L/2 - 16 mm,-226,Deck latch servo axis x,FALSE

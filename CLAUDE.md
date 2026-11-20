@@ -12,3 +12,6 @@ This repo is the browser simulator of the full-scale rover:
 - Vehicle: AEGIS-V1, 6-wheel rocker-bogie skid steer at 1:1 (prototype is 1:16.3). Constants: `src/sim/config.js`.
 - Verification: `npm run test:quick` before marking sim work complete; long runs with `npm run test:long`.
 - Record every behaviour change in `CHANGES.md`; values without a source are tagged `[ASSUMED]` in `config.js`.
+
+# Docs (read on demand, only when relevant)
+`docs/`: AI_COPILOT(_PLAN), FAULT_PROCEDURES, POWER_BUDGET, THERMAL_BRAIN, SURVIVABILITY, SPACE_SURVIVAL_PARTS, GRAPHICS_PHYSICS_RESEARCH, LUNAR_CARGO_RESEARCH, REQUIREMENTS, agent-prompts/.

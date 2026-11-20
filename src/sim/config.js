@@ -110,6 +110,8 @@ export const ROVER = {
   motor: {
     protoNoLoadRpm: 300, protoCapRpm: 280, protoCrawlRpm: 120, turboRpmWheel: +(300 / Math.sqrt(K)).toFixed(2), crawlRpmWheel: +(120 / Math.sqrt(K)).toFixed(2),
     noLoadSpeed: 300 / Math.sqrt(K) * 2 * Math.PI / 60, capRpmWheel: +(280 / Math.sqrt(K)).toFixed(2),
+    // v1.8.0 (ARM plan s0/s6.1): 4 driven wheels keep the old 6-motor budget: peakTorque 5600 -> 8400, brakeTorque 9000 -> 13500 (x1.5).
+    // NOTE: until the P1b rover.js drive change, the two middle (idler) wheels still read these values too.
     peakTorque: 5600, efficiency: 0.86,
     kp: 9000, ki: 5000, brakeTorque: 9000, thermalR: 0.05, thermalC: 30000,
   },
@@ -176,13 +178,14 @@ export const ROVER = {
 export const CARGO_TYPES = {
   cyl40: {
     label: '40-ft cargo module (team design, 12.19 x 7.96 m)', shape: 'cylinder',
+    handling: 'straddle', // ARM plan s6.1
     length: k(0.747), radius: k(0.244), mass: 14940, color: 0xd8dde3,
     standY: k(0.310), lugXs: [-k(0.21), k(0.21)], lugZ: k(0.345), lugR: k(0.010), bands: [-k(0.085), k(0.085)], bandW: k(0.050), carryX: 0,
     lugX: k(0.21),
   },
   // 20 ft ISO container in a ring-adapter sled, so the same ring clamps carry it (Mission 8)
   box20: {
-    label: '20-ft ISO container in ring-adapter sled', shape: 'box',
+    label: '20-ft ISO container in ring-adapter sled', shape: 'box', handling: 'straddle', // ARM plan s6.1
     length: 6.06, height: 2.59, width: 2.44, mass: 8500, color: 0xc9a227,
     adapterR: k(0.244), adapterRings: [-k(0.085) - 0.15, k(0.085) - 0.15], adapterLen: 8.4, adapterX: -1.0,
     standY: k(0.310), lugXs: [-5.2, 2.2], lugZ: k(0.345), lugR: k(0.010), carryX: 0.15, lugX: 3.7,
@@ -198,6 +201,72 @@ CARGO_TYPES.pod4 = {
   ...CARGO_TYPES.box20,
   label: '36 x 4-ft cargo pods on a 20-ft flat rack, ring-adapter sled', mass: 5900, color: 0xe8e8e2,
   visual: 'podrack', pods: { length: 1.22, dia: 0.61, along: 4, across: 3, tiers: 3, massEach: 110 },
+};
+
+// ---------------------------------------------------------------------------------------------------------------
+// ARM-HANDLED CARGO + OUTER-WHEEL DRIVE (docs/ARM_CARGO_BUILD_PLAN.md, v1.8.0 / CHANGES.md s33). Full-scale SI (Moon g).
+// Prototype (Earth bench, 1:16.32) values are in ACT.proto. [ASSUMED] = no source. [VERIFY] = placeholder size/datasheet.
+// ---------------------------------------------------------------------------------------------------------------
+
+// Plan s0, s5.7: FL/FR/RL/RR driven; ML/MR passive idlers (Tm = 0, never braked). ROVER.motor torque/brake raised x1.5 above.
+export const DRIVE = {
+  driven: ['FL', 'FR', 'RL', 'RR'],
+  idlerDragNm: 15,   // [ASSUMED] bearing Coulomb drag per idler wheel, N*m
+  idlerViscous: 4,   // [ASSUMED] bearing viscous drag, N*m*s/rad
+};
+
+// Plan s5.1/s5.2/s6.1: actuator model parameters. Torques are joint-output. Full-scale values scale the prototype
+// shoulder/elbow/wrist/latch stalls from the s4.3 torque table; all [ASSUMED] unless noted.
+export const ACT = {
+  shoulder: { V: 400, Ts: 26000, w0: 0.35, Is: 40, I0: 0.8, Ilim: 32, backlash: 0.0017, fs: 4, Rth: 0.6, Cth: 9000, Tmax: 120, brake: true }, // [ASSUMED] s4.3: 10.39 kN*m static = 40 % of stall
+  elbow:    { V: 400, Ts: 18000, w0: 0.35, Is: 28, I0: 0.6, Ilim: 22, backlash: 0.0017, fs: 4, Rth: 0.8, Cth: 6000, Tmax: 120, brake: true }, // [ASSUMED]
+  wrist:    { V: 400, Ts: 1200,  w0: 0.6,  Is: 4,  I0: 0.2, Ilim: 3.2, backlash: 0.003, fs: 6, brake: true },                                // [ASSUMED]
+  latch:    { V: 28,  Ts: 300,   w0: 1.5,  Is: 6,  I0: 0.3, Ilim: 5 },                                                                       // [ASSUMED]
+  // Earth bench values used by tests and the calculator (s1.5 datasheets, s5.2)
+  proto: {
+    big60:   { V: 7.4, Ts: 5.39, w0: 6.0,  Is: 5.0, I0: 0.25, backlash: 0.0087 },                       // [VERIFY datasheet] 60 kg*cm-class HV servo (~55 kg*cm at 7.4 V)
+    ds3218:  { V: 6.8, Ts: 2.11, w0: 7.48, Is: 2.5, I0: 0.15, TsV: [[5, 1.77], [6.8, 2.11]] },          // DS3218 datasheet (s1.5)
+    mg996r:  { V: 6.0, Ts: 1.08, w0: 7.48, Is: 2.5, I0: 0.17 },                                         // MG996R datasheet (s1.5); I0 [ASSUMED]
+    mg90s:   { V: 6.0, Ts: 0.216, w0: 13.1, Is: 0.7, I0: 0.1 },                                         // MG90S 2.2 kg*cm; I0 [ASSUMED]
+    gm37d30: { V: 12,  Ts: 1.37, w0: 34.6, Is: 5.5, I0: 0.2, gearLimitNm: 0.98 },                       // Pololu 37D 30:1 (s1.5); I0 [ASSUMED]
+  },
+};
+
+// Plan s4, s5.3, s6.1: two mirrored 3-DOF arms (shoulder/elbow/wrist pitch). Prototype mm x K = full scale.
+export const ARM = {
+  enabled: true, arms: 2,
+  shoulder: { x: k(0.15), y: k(0.275), z: k(0.175) },   // [VERIFY] +-z per side; prototype (150, 275, +-175) mm
+  L1: k(0.20), L2: k(0.20),                              // [VERIFY] prototype 200 mm links
+  links: { m1: 120, lc1: k(0.10), I1: 110, mElbow: 110, m2: 120, lc2: k(0.10), I2: 110, mWrist: 40, mHook: 40 }, // [ASSUMED] s4.2 masses x ~K^3-ish budget, kg / kg*m^2
+  fixedMassPerArm: 210,                                  // [ASSUMED] s3.3 (tower + shoulder servo), kg; added to rover sprung mass
+  limits: { q1: [-1.05, 2.8], q2: [-2.8, 0.05], q3: [-2.6, 2.6] }, // [ASSUMED] rad
+  rateMax: 0.12, accMax: 0.05, substeps: 8,              // s4.3 full-scale rates (rad/s, rad/s^2); dt = 1/960 s
+  stow: { q: [2.35, -2.55, 1.2] }, apex: { dy: k(0.24) },// s4.1 [VERIFY]
+  pick: { xBody: k(0.42), clearance: k(0.02), preBelow: k(0.02), preFwd: k(0.03), seatV: 0.02 }, // s4.1 / s6.4 (seatV m/s)
+  hook: { mouth: k(0.030), seatHalf: 0.785, mu: 0.3, fh: 3, zeta: 0.5, latchMaxN: 2.5e4 }, // s5.4: V-seat 45 deg, f_h 3 Hz; mu, zeta, latchMaxN [ASSUMED]
+  ctrl: { kp: 1 / 0.087, ki: 0.2, kd: 0.05, deadband: 0.0017, gravityFF: true }, // s5.2: kp = 1/theta_sat (5 deg) [ASSUMED]; ki, kd [ASSUMED]
+  tipRatioMax: 0.75, minMarginDeg: 8, ratedKg: 3000, peakW: 6000, hotelW: 120,   // s0 / s4.3 (ASME B30.5-style 75 %); peakW, hotelW [ASSUMED]
+};
+
+// Plan s6.4: acquireArm thresholds (full scale). [ASSUMED] unless noted.
+export const ACM_PICK = { standoff: k(0.25), creepV: 0.05, latTol: k(0.007), yawTolDeg: 3, alongTol: k(0.04),
+  retries: 2, overloadK: 1.6, seatTimeout: 20 };
+
+// Plan s3.3, s5.4: deck interface. placeX is computed at sim init from the balance rule (loaded CG -> x = 0; about -0.734 m).
+export const DECK = { placeX: null /* computed at init */, capture: k(0.006),
+  pinSpan: k(0.14), latchTime: 0.6, seatedEps: k(0.002) };                // [VERIFY] pin geometry; latchTime [ASSUMED]
+
+// Plan s5.5: ACM foot-regolith contact. Ku = 10x secant stiffness, creep = 1.15-1 settling, tauSettle s, cAdhK x REGOLITH cohesion.
+export const ACM_SOIL = { foot: k(0.03), nFeet: 4, Ku: 10, zeta: 0.7, creep: 0.15, tauSettle: 120, cAdhK: 0.3, bristleK: 3e5 }; // [ASSUMED] Ku, creep, tauSettle, cAdhK; bristleK = parked-brake value
+
+// Plan s0, s6.1: ACM = Arm-handled Cargo Module (sits on regolith; prototype 180 x 240 x 140 mm, 1.0 kg).
+CARGO_TYPES.acm = {
+  label: 'ACM arm-handled cargo module', name: 'ACM arm-handled cargo module', handling: 'arm',
+  dims: [k(0.18), k(0.14), k(0.24)],                                  // [VERIFY with user] x, y, z (m)
+  mass: 2400,                                                         // [ASSUMED] default ACM, kg (rated 3,000 kg)
+  trunnion: { r: k(0.006), len: k(0.02), y: k(0.09) },                // s0: 2 x D12 mm trunnions on the +-z faces [VERIFY]
+  cgY: k(0.07),                                                       // 20 mm below trunnion (pendulum, s4.3)
+  twistMax: 2e4, stand: false,                                        // [ASSUMED] twistMax N*m
 };
 
 // Docking interface: the module's berthing ring meets the supply-building port at the carried axis height.
@@ -217,26 +286,54 @@ export const DOCK = {
   bellows: { free: 0.06, k: 31000, c: 20000 }, captureGap: 0.036,
 };
 
-// AEGIS power dock beside the supply building (positions in the habitat frame: u along the building face,
-// v out from it toward the pad). Sized for the lunar night: ~354 h with zero solar input.
-//  - night survival load (vault heaters + avionics) 2.2 kW x 354 h = 0.78 MWh
-//  - rover parked on the coupler all night in survival mode (~0.3 kW heaters, tests/fdir.mjs) = 0.11 MWh
-//  - 20 night delivery legs at ~6 kWh each (2 km loaded + return, tests) = 0.12 MWh, / 0.95 charger
-//    -> 1.03 MWh needed; bank 1.5 MWh with the 15 % floor leaves ~20 % margin (was 4.0 MWh, sized for six full
-//    0.42 MWh rover recharges a night that no mission needs: ~20 t of cells to land instead of ~7.5 t)
-//  - arrays: 4 vertical sun-tracking masts x 120 m^2, 30 % cells x 0.85 derate (dust, cell temperature, wiring,
-//    ageing) -> ~165 kW unshaded at a low sun; the masts shade each other when the sun lines up with a row
-//    (powerDock.js). Refills the bank in well under a day.
-//  - charger 60 kW (0.14 C): the limit is heat. Charge current I^2 R ends up in the pack, and the pack can only
-//    radiate ~1 kW (THERMAL.battery); 350 kW (875 A) put ~15 kW into it. At 60 kW (150 A) it is 0.45 kW.
-//    No charging below 0 C cell temperature (lithium plating): the heaters warm the pack first.
+// PROTOTYPE-SCALE LUNAR POWER DOCK (CHANGES.md, docs/LUNAR_CHARGING.md). Electrical values are PROTOTYPE units
+// (V, A, Ah, W, Wh). Geometry is world metres: the dock is drawn at 1:1 of the 1:16.3 prototype dock (k()), like the rover.
+// Coupling to the 420 kWh sim pack is by state of charge: 1 Wh into the 128 Wh prototype pack = PROTO_TO_FULL_WH Wh
+// (W -> W) into the sim pack. Rover charge current is the same C-rate (0.14 C) as the old 60 kW heat-limited charge,
+// so charge times match at both scales and the full-scale pack thermal model (health.js) stays valid.
+//  - array: 2 vertical azimuth-tracking masts (NASA VSAT-style), 2 x 0.2016 m^2 of 30 % triple-junction cells
+//    = 165 W AM0 x 0.80 derate x 0.96 MPPT = 126 W. Refills the bank from the 10 % floor in ~18 h of sun (~22 h with the
+//    rover charging): < 7 % of a 354 h lunar day, margin for intermittent polar illumination.
+//  - night: 0.8 W avionics + ~1.2 W vault heater (0.04 W/K x 55 K - 1 W RHU) = 2.0 W x 354 h = 708 Wh = 30 % of the bank.
+//    nightReserveSoc 0.50 = 0.10 floor + 0.30 + 0.10 margin. The rover may draw the bank down to it at night
+//    (~1.2 kWh = ~12 prototype 30->90 % charges).
+export const PROTO_PACK = {
+  chem: 'LiFePO4 4S', cells: 4, Ah: 10, Vnom: 12.8, Wh: 128, // public/team/js/rover_bom.js BATTERY; ARM_CARGO_BUILD_PLAN BOM #7
+  cvCell: 3.65,  // LiFePO4 CV limit, V/cell (typical datasheet)
+  R: 0.04,       // [ASSUMED] pack + BMS + harness, ohm
+};
+export const PROTO_TO_FULL_WH = ROVER.battery.capacityWh / PROTO_PACK.Wh; // 3281: prototype Wh (or W) -> full-scale
+export const LFP_OCV = [[0, 2.50], [0.05, 3.00], [0.10, 3.20], [0.20, 3.25], [0.50, 3.30], [0.80, 3.33], [0.90, 3.35], [1, 3.40]]; // [ASSUMED] typical LiFePO4 rest OCV per cell
 export const POWER_DOCK = {
   padT: 44, padV: 22, couplerTol: 3.0,
-  arrays: [[60, 8], [60, 28], [70, 12], [70, 32]], arrayArea: 120, efficiency: 0.30, mastH: 22, panelW: 8, panelH: 15,
-  bank: { w: 14, d: 7, h: 4.2 }, bankWh: 1.5e6, bankFloor: 0.15, bankEff: 0.95, bankMaxDischargeW: 80000,
-  arrayDerate: 0.85,
-  chargeMaxW: 60000, chargerEff: 0.95, chargeMinCellC: 0,
-  hotelW: 700, nightHeaterW: 1500, dayHeaterW: 200,
+  arrays: [[60, 10], [70, 30]],                        // [ASSUMED] 2 masts (habitat u, v)
+  mastH: k(1.35), panelW: k(0.42), panelH: k(0.48),    // [ASSUMED] prototype 1.35 m mast, 0.42 x 0.48 m wing (world 22.0 / 6.85 / 7.83 m)
+  bank: { w: k(0.56), d: k(0.34), h: k(0.26) },        // [ASSUMED] MLI vault round a ~522 x 268 x 220 mm 24 V 100 Ah module [VERIFY datasheet]
+  panelAreaProto: 0.42 * 0.48,                         // m^2 per mast (prototype)
+  cellEff: 0.30,                                       // triple-junction AM0 BOL (Spectrolab XTJ-class ~30 %)
+  arrayDerate: 0.80,                                   // [ASSUMED] dust 0.93 x cell temp 0.90 x wiring/mismatch 0.97 x ageing 0.98
+  mpptEff: 0.96,                                       // [ASSUMED]
+  nightSolarW: 2,                                      // [ASSUMED] below this the dock is in night mode
+  bankV: 24, bankAh: 100, bankWh: 2400,                // USER DECISION (nameplate; 8S LiFePO4 is 25.6 V nominal, so 2.4 kWh is ~6 % conservative)
+  bankCells: 8,
+  bankR: 0.02,                                         // [ASSUMED] ohm
+  bankEff: 0.97,                                       // [ASSUMED] each way
+  bankFloor: 0.10,                                     // [ASSUMED] BMS low-voltage cutoff margin
+  nightReserveSoc: 0.50,                               // derived above
+  bankMaxDischargeW: 1200,                             // [ASSUMED] 0.5 C BMS limit
+  bankMaxChargeA: 50,                                  // [ASSUMED] 0.5 C
+  chargeMinBankC: 0, dischargeMinBankC: -20,           // LiFePO4 typical datasheet
+  hotelW: 0.8,                                         // [ASSUMED] BMS + MPPT + controller sleep + beacon
+  padStandbyW: 0.5,                                    // [ASSUMED] inductive pilot / foreign-object detection while a rover is on the pad
+  vault: { C: 25000, G: 0.04, rhuW: 1.0, setC: 5, heaterGain: 2, heaterMaxW: 10, sinkDayC: -10, sinkNightC: -50, initC: 10 },
+  //   C: [ASSUMED] J/K, ~22 kg of cells + box;  G: [ASSUMED] W/K, MLI box under a regolith berm (4 sigma T^3 x eps 0.02 x 0.6 m^2 ~ 0.04)
+  //   rhuW: 1 W LWRHU-class radioisotope heater (Lunokhod / Yutu precedent; electric-only option: set 0)
+  //   sinks: [ASSUMED] bermed-vault sink temperatures, day / night
+  chargeCC_A: 1.4,                                     // 0.14 C = old 60 kW / 420 kWh (C-rate similarity)
+  linkEff: 0.85,                                       // [ASSUMED] inductive DC-DC at centre
+  linkOffsetLoss: 0.25,                                // [ASSUMED] efficiency loss fraction at full couplerTol, quadratic
+  linkMaxW: 125,                                       // Astrobotic/WiBotic UFPC commercial 125 W model
+  chargeMinCellC: 0,                                   // no charge below 0 C cell temperature (lithium plating): the pack heaters warm it first
 };
 
 // [ASSUMED] AEGIS-V1 thermal control (src/sim/health.js), after the VIPER "warm box" layout: avionics on a
@@ -343,6 +440,12 @@ export const NAV = {
   straightenRoutes: true, // straighten stored routes over mapped ground (planner.js straighten)
   noSteerRatio: 0.1, // steering-authority check: 6 s mean yaw rate below this share of the command for 15 s = not steering (healthy 0.4-0.55, one wheel free-rolling 0.15-0.25)
   upsetDeg: 25, // [ASSUMED] pitch or roll beyond this = vehicle upset: navigation stops, no autonomous retry
+  // Slip-aware navigation (CHANGES.md §32). A skid-steer rover on regolith achieves ~0.5 of the commanded yaw rate (measured 0.51 in turns).
+  slip: {
+    enabled: typeof process !== 'undefined' && !!process.env && process.env.SLIPNAV === '1', // [ASSUMED] master switch, OFF by default until it passes faults_m10 (env SLIPNAV=1 = on, for A/B benches)
+    etaInit: 0.6, etaMin: 0.3, etaTau: 4, etaPlanMin: 0.6, etaFFMin: 0.75, // [ASSUMED] yaw-efficiency estimate: start, floor (a free-rolling wheel reads ~0.2), low-pass s
+    trackKp: 1.5, trackKi: 0.6, trackLimK: 0.04, // [ASSUMED] gyro PI on the yaw-rate error; authority 0.04 /m x speed (as cmdCurv)
+  },
   legRetries: 2, // [ASSUMED] autonomous recover-and-retry attempts per navigation leg before the operator is asked (autonomy.js navTo)
 };
 

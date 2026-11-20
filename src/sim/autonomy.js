@@ -53,6 +53,7 @@ export class Autonomy {
     this.manifest = sim.cargo.map((c, i) => ({ id: c.id, cargo: c, port: c.dest, category: c.category || (i === 0 ? 'life-support' : 'habitat-supplies'), priority: i === 0 ? 5 : 3, status: 'waiting' }));
     this.docking = null;
     this.lastTick = 0;
+    this.eta = NAV.slip.etaInit; // estimated yaw efficiency (achieved/commanded yaw rate) of the skid-steer on the current ground
   }
 
   _newMetrics() { return { start: this.sim.time, dist0: this.sim.rover.odo.dist, e0: this.sim.rover.power.energyUsedWh, deliveries: 0, accuracy: [], legs: [] }; }
@@ -72,6 +73,20 @@ export class Autonomy {
     const wDes = v * kap, err = wDes - this.sensors.imu.yawRate, lim = 0.04 * Math.abs(v) + 0.001;
     this._wzI = clamp(this._wzI + 1.2 * err * (this.dt || 0.1), -lim, lim);
     this.cmd(v, 0, wDes + clamp(2.0 * err + this._wzI, -lim, lim));
+  }
+  // Slip-compensated curvature tracking for navTo (CHANGES.md §32): the planner rolls arcs out at the GEOMETRIC curvature kGeo,
+  // the command is wzDes / eta (feed-forward for the skid-steer yaw loss) plus a gyro PI on the remaining yaw-rate error.
+  // eta used to shrink the planner's arc set: floored so a loaded / low-eta rover keeps enough arcs to get out of a tight spot
+  etaPlan() { return NAV.slip.enabled && !this.sim.rover.loaded ? Math.max(this.eta, NAV.slip.etaPlanMin) : 1; }
+  trackCurv(v, kGeo, wzDes = v * kGeo, reset = false) {
+    const S = NAV.slip;
+    if (reset || this._trkI == null) this._trkI = 0;
+    const err = wzDes - (this.sensors.imu.yawRate || 0), lim = S.trackLimK * Math.abs(v) + 0.001;
+    this._trkI = clamp(this._trkI + S.trackKi * err * (this.dt || 0.1), -lim, lim);
+    const half = Math.abs(ROVER.corners[0][1]);
+    let w = wzDes / Math.max(this.eta, S.etaFFMin) + clamp(S.trackKp * err + this._trkI, -lim, lim);
+    const wMax = (Math.abs(v) < 1 ? 0.5 : Math.abs(v) > 3 ? 0.35 : 0.5 - 0.075 * (Math.abs(v) - 1)) * Math.abs(v) / half; // keep the inner side >= 50-65 % of the outer
+    return clamp(w, -wMax, wMax);
   }
   relBody(p, e = this.est()) { // world(est) point -> body (fwd, right)
     const dx = p.x - e.x, dz = p.z - e.z, c = Math.cos(e.yaw), s = Math.sin(e.yaw);
@@ -455,9 +470,9 @@ export class Autonomy {
     const s0 = R.power.soc, ts = this.sim.time;
     while (R.power.soc < target && PD.connected) {
       this.stop();
-      const rem = (target - R.power.soc) * ROVER.battery.capacityWh / Math.max(1, PD.chargeW);
-      this.detail = `SoC ${(R.power.soc * 100).toFixed(1)}% -> ${(target * 100).toFixed(0)}% @ ${(PD.chargeW / 1000).toFixed(0)} kW | bank ${(PD.soc * 100).toFixed(1)}% | solar ${(PD.solarW / 1000).toFixed(0)} kW | ~${(rem * 60).toFixed(0)} min left`;
-      if (!(PD.chargeW > 0) && PD.soc <= POWER_DOCK.bankFloor) this.detail += ' (bank at floor: waiting for sunrise)';
+      const rem = PD.etaMin(target);
+      this.detail = `SoC ${(R.power.soc * 100).toFixed(1)}% -> ${(target * 100).toFixed(0)}% @ ${PD.chargeA.toFixed(2)} A / ${PD.chargeW.toFixed(1)} W proto (${(R.power.dockW / 1000).toFixed(0)} kW full-scale) | bank ${(PD.soc * 100).toFixed(1)}% ${PD.bankV.toFixed(1)} V | solar ${PD.solarW.toFixed(0)} W | ~${rem.toFixed(0)} min left`;
+      if (!(PD.chargeW > 0) && PD.atFloor) this.detail += PD.night ? ' (bank at night reserve: waiting for sunrise)' : ' (bank at floor: waiting for sun)';
       yield;
     }
     this.log(`Charged ${(s0 * 100).toFixed(0)}% -> ${(R.power.soc * 100).toFixed(0)}% in ${((this.sim.time - ts) / 60).toFixed(1)} min (bank ${(PD.soc * 100).toFixed(0)}%)`, 'ok');
@@ -843,6 +858,9 @@ export class Autonomy {
         const sg = f && f.wz ? Math.sign(f.wz) : 0;
         this._yawCmdAvg = (this._yawCmdAvg || 0) + a * ((on ? Math.abs(f.wz) : 0) - (this._yawCmdAvg || 0));
         this._yawActAvg = (this._yawActAvg || 0) + a * ((on ? yrS * sg : 0) - (this._yawActAvg || 0));
+        if (NAV.slip.enabled && on && !R.loaded && this._yawCmdAvg > 0.04) { // yaw efficiency: achieved / commanded yaw rate (skid-steer scrub), CHANGES.md §32
+          const e1 = clamp(this._yawActAvg / this._yawCmdAvg, NAV.slip.etaMin, 1); this.eta = this.eta + Math.min(1, this.dt / NAV.slip.etaTau) * (e1 - this.eta);
+        }
         if (on && this._yawCmdAvg > 0.04 && this._yawActAvg < NAV.noSteerRatio * this._yawCmdAvg) this._noSteerT = (this._noSteerT || 0) + this.dt;
         else this._noSteerT = Math.max(0, (this._noSteerT || 0) - 2 * this.dt);
         if (this._noSteerT > 15) { this._noSteerT = 0; return fail(`vehicle is not responding to steering (yaw rate < ${(NAV.noSteerRatio * 100).toFixed(0)} % of command for 15 s): stopped, operator assistance required`); } }
@@ -1040,12 +1058,12 @@ export class Autonomy {
           stuckT = this.sim.time; stuckPos = this.est(); blockedT = 0;
           yield; continue;
         } }
-      let lp = this.local.evaluate(e, tgt, v, loaded);
+      let lp = this.local.evaluate(e, tgt, v, loaded, { eta: this.etaPlan() });
       // the gentle-turn arc set (|k| b <= 0.35-0.5) is the normal choice; in a tight spot try the full skid-steer arc
       // set at walking pace before declaring a block (v1.5.0: without this, the gentler arcs turned squeezes into
       // 25 m reverse "unwinds")
-      if (!lp.ok) { const lp2 = this.local.evaluate(e, tgt, Math.min(v, 0.5), loaded, { kmax: loaded ? 0.11 : 0.2 }); if (lp2.ok) { lp = lp2; v = Math.min(v, 0.5); } }
-      if (!lp.ok) { const lp3 = this.local.evaluate(e, tgt, Math.min(v, 0.35), loaded, { horizon: 6, kmax: loaded ? 0.13 : 0.25 }); if (lp3.ok) { lp = lp3; v = Math.min(v, 0.35); } }
+      if (!lp.ok) { const lp2 = this.local.evaluate(e, tgt, Math.min(v, 0.5), loaded, { kmax: (loaded ? 0.11 : 0.2) * this.etaPlan() }); if (lp2.ok) { lp = lp2; v = Math.min(v, 0.5); } }
+      if (!lp.ok) { const lp3 = this.local.evaluate(e, tgt, Math.min(v, 0.35), loaded, { horizon: 6, kmax: (loaded ? 0.13 : 0.25) * this.etaPlan() }); if (lp3.ok) { lp = lp3; v = Math.min(v, 0.35); } }
       if (!lp.ok) {
         this.stop();
         const firstBlock = !blockedT;
@@ -1113,7 +1131,7 @@ export class Autonomy {
         vCmd = Math.min(vCmd, Math.max(0.35, Math.sqrt(aOK / Math.max(Math.abs(lp.k), 0.004))));
         // ride comfort / no skid in curves (v1.5.0): lateral acceleration <= 0.3 m/s^2 empty, 0.15 loaded (a skid-steer
         // turn scrubs the tyres sideways; slower = less scrub), and slow into a bend in proportion to the heading change
-        vCmd = Math.min(vCmd, Math.max(0.5, Math.sqrt((loaded ? 0.15 : 0.3) / Math.max(Math.abs(lp.k), 0.002))));
+        vCmd = Math.min(vCmd, Math.max(0.5, Math.sqrt((loaded ? 0.15 : 0.3) / Math.max(Math.abs(lp.k) / (NAV.slip.enabled ? this.eta : 1), 0.002))));
         vCmd = Math.min(vCmd, Math.max(0.6, vCmd * (0.35 + 0.65 * Math.max(0, Math.cos(headErr)))));
         if (loaded) {
           // ground slope under the footprint from the map, not the body attitude: braking pitches the loaded body
@@ -1138,6 +1156,7 @@ export class Autonomy {
       { const yr = this.sensors.imu.yawRate || 0;
         if (hAbs < NAV.yawDampErrDeg * DEG && Math.abs(lp.k) < 0.02 && Math.abs(yr) > NAV.yawDampRate && yr * headErr > 0) wzCmd *= NAV.yawDampGain; }
       { const w0 = R.cmd.wz, dw = NAV.maxYawAccel * this.dt; wzCmd = w0 + clamp(wzCmd - w0, -dw, dw); }
+      if (NAV.slip.enabled && !loaded) wzCmd = this.trackCurv(vCmd, lp.k, wzCmd); // wzCmd (shaped) is now the DESIRED yaw rate
       this.cmd(vCmd, 0, wzCmd);
       this.detail = `${R.rpm.proto.toFixed(0)} rpm ${R.rpm.tier} | ${this.pathSource} | ${dGoal.toFixed(0)} m to go | v ${vCmd.toFixed(2)} m/s${lp.knownDist < 6 ? ' (creeping: unmapped ground ahead)' : ''} | ${Math.abs(lp.k) < 0.004 ? "straight" : `turn ${lp.k > 0 ? "L" : "R"} R=${Math.abs(1 / lp.k).toFixed(0)} m`}`;
       // stuck detection (embedding / slip / hidden obstacle)

@@ -507,7 +507,10 @@ export class LocalPlanner {
     // |k| b <= 0.5 slow and <= 0.35 above 3 m/s (inner side >= 50 / 65 % of the outer), so turns scrub less and the
     // rover arcs round a bend instead of skidding into it
     const half = Math.abs(ROVER.corners[0][1]), sideMax = Math.abs(vDes) < 1 ? 0.5 : Math.abs(vDes) > 3 ? 0.35 : 0.5 - 0.075 * (Math.abs(vDes) - 1);
-    const kmax = opts.kmax ?? Math.min(Math.abs(vDes) < 0.6 ? 0.16 : 0.11, sideMax / half);
+    // slip-aware (CHANGES.md §32): arcs are rolled out at the GEOMETRIC curvature the rover really drives = eta x the commanded one,
+    // so the collision check covers the arc actually driven (before: the commanded k, ~2x the real radius on regolith)
+    const eta = opts.eta ?? 1;
+    const kmax = opts.kmax ?? Math.min(Math.abs(vDes) < 0.6 ? 0.16 : 0.11, sideMax / half) * eta;
     const nK = 14;
     const ks = []; for (let i = -nK; i <= nK; i++) ks.push(kmax * i / nK);
     const horizon = opts.horizon ?? Math.max(9, Math.min(30, Math.abs(vDes) * 6 + 6)); // (max 18 m capped speed at ~4.2 m/s via the stopping-distance governor)

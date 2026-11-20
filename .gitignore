@@ -4,3 +4,5 @@ dist/
 *.log
 tests/out/
 .claude/settings.local.json
+
+.cc-writes/

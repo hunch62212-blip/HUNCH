@@ -60,7 +60,7 @@ TEST_JOBS=2 npm test   # limit parallel sims (each needs ~0.5-1 GB RAM)
 | fdir | fdir.mjs | all 24 hardware failure modes detected and isolated from sensor data, automatic responses, field + dock repairs, random failures, 0 false alarms, lunar-night survival energy, keep-alive array |
 | nav_bench | nav_bench.mjs | 2 km there and back, zero warnings, route reuse on return |
 
-Requirement traceability: [REQUIREMENTS.md](REQUIREMENTS.md). Ad-hoc debug scripts: `tests/scratch/` (not in `npm test`).
+Requirement traceability: [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md). Ad-hoc debug scripts: `tests/scratch/` (not in `npm test`).
 
 ## AI copilot (local LLM, optional)
 
@@ -186,7 +186,7 @@ Useful commands: `limit rpm 20`, `limit speed 0.8`, `speed 1.5`, `rpm 240`, `mem
 | **M6** Full logistics cycle | Logistics manager orders requests → acquire → deliver → return → next load. [test: cycle] |
 | **M7** 2 km autonomous route | 2.000 km pad–habitat separation [script]; SLAM mapping, hazard avoidance, geofences, route memory. [test: nav_bench, drift, faults] |
 | **M8** Different cargo systems | Three cargo systems on the same ring clamps: 40-ft cylinder (PORT-1), 20-ft ISO box (PORT-2), and a 20-ft rack of 36 Astrobotic-style 4 ft x 2 ft pods (PORT-3). [test: pickup_*_box20, pickup_*_pod4, dock_box20, dock_pod4] |
-| **M10** Something goes wrong | Blocked road, LiDAR failure, camera failure, comms loss, low battery, wheel motor failure (5 of 6 wheels driven, speed −25 %), cargo shift, port unavailable [test: faults: blocked road + wheel]. Plus 24 hardware failure modes with sensor-based detection, automatic response and repair, and a random-failure switch [test: fdir]; see REQUIREMENTS.md and docs/FAULT_PROCEDURES.md. |
+| **M10** Something goes wrong | Blocked road, LiDAR failure, camera failure, comms loss, low battery, wheel motor failure (5 of 6 wheels driven, speed −25 %), cargo shift, port unavailable [test: faults: blocked road + wheel]. Plus 24 hardware failure modes with sensor-based detection, automatic response and repair, and a random-failure switch [test: fdir]; see docs/REQUIREMENTS.md and docs/FAULT_PROCEDURES.md. |
 | **M11** AI logistics manager | Scores requests by category priority, ETA, energy. `plan`, `priority B life-support`. UNVERIFIED by test beyond the cycle order. |
 | **M12** Our own capability | Teach-and-repeat route memory [test: nav_bench], model-based slip estimation [test: odo], active load leveling. (The SPAN-40 sun-tracking solar mast is not on AEGIS-V1: 0 panels [script].) |
 
@@ -314,5 +314,12 @@ src/ui/hud.js            operator HUD
 public/team/js/*         team CAD scripts (r128-era, global THREE)
 scripts/readme_facts.mjs prints config-derived README numbers
 scripts/fault_procedures.mjs writes docs/FAULT_PROCEDURES.md from the FDIR catalogue
+scripts/launch.sh        versioned launcher (see VERSIONS.md)
+scripts/memory-plugin.mjs Vite plugin for the rover memory store
+scripts/ai_probe.mjs     AI provider probe
 tests/*.mjs              headless pass/fail tests; tests/run-all.mjs runner
+tests/lib/check.mjs      shared test helpers
+tests/scratch/           debug scripts (not run by npm test)
+docs/                    design docs, requirements, agent prompts
+_archive/                retired files (see _archive/README.md)
 ```

@@ -1,5 +1,6 @@
-// AEGIS power dock visuals: 4 sun-tracking vertical solar masts, the battery vault (POWER_DOCK.bankWh), the underbody
-// charge-coupler pad and the charger pedestal. Geometry mirrors the colliders in sim/powerDock.js.
+// AEGIS power dock visuals (prototype scale): 2 VSAT-style sun-tracking vertical solar masts, the 24 V 100 Ah LiFePO4
+// battery vault with its RHU, the flush inductive charge pad (sealed coil under a glass-ceramic cover, no exposed contacts)
+// and the charger pedestal. Geometry mirrors the colliders in sim/powerDock.js.
 import * as THREE from 'three';
 import { POWER_DOCK } from '../sim/config.js';
 import { heightAt } from '../sim/terrain.js';
@@ -29,7 +30,7 @@ function cellTexture() {
 }
 
 function padTexture() {
-  // sintered-regolith pad: hazard border, lane chevrons, coupler target cross
+  // sintered-regolith pad: hazard border, lane chevrons, coil target cross
   const N = 1024, c = document.createElement('canvas'); c.width = c.height = N; const g = c.getContext('2d');
   g.fillStyle = '#5f5b54'; g.fillRect(0, 0, N, N);
   const id = g.getImageData(0, 0, N, N); for (let i = 0; i < id.data.length; i += 4) { const n = (Math.random() - 0.5) * 22; id.data[i] += n; id.data[i + 1] += n; id.data[i + 2] += n; } g.putImageData(id, 0, 0);
@@ -42,7 +43,7 @@ function padTexture() {
   for (let k = 0; k < 4; k++) { const y = 140 + k * 70; g.beginPath(); g.moveTo(N / 2 - 90, y + 40); g.lineTo(N / 2, y); g.lineTo(N / 2 + 90, y + 40); g.lineTo(N / 2 + 90, y + 58); g.lineTo(N / 2, y + 18); g.lineTo(N / 2 - 90, y + 58); g.fill(); }
   g.strokeStyle = 'rgba(235,235,225,0.9)'; g.lineWidth = 10; g.beginPath(); g.arc(N / 2, N / 2, 120, 0, Math.PI * 2); g.stroke();
   g.beginPath(); g.moveTo(N / 2 - 170, N / 2); g.lineTo(N / 2 + 170, N / 2); g.moveTo(N / 2, N / 2 - 170); g.lineTo(N / 2, N / 2 + 170); g.stroke();
-  g.font = 'bold 54px system-ui, sans-serif'; g.fillStyle = 'rgba(235,235,225,0.9)'; g.textAlign = 'center'; g.fillText('POWER DOCK  PD-1', N / 2, N - 90);
+  g.font = 'bold 54px system-ui, sans-serif'; g.fillStyle = 'rgba(235,235,225,0.9)'; g.textAlign = 'center'; g.fillText('PD-1  INDUCTIVE CHARGE PAD', N / 2, N - 90);
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; return t;
 }
 
@@ -65,10 +66,11 @@ export class PowerDockModel {
       for (let y = 1; y < D.mastH; y += 1.6) { const ring = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.035, 4, 3), lattice); ring.rotation.x = Math.PI / 2; ring.position.y = y; ring.castShadow = true; m.add(ring); }
       const head = new THREE.Group(); head.position.y = D.mastH - D.panelH / 2 - 0.6; m.add(head);
       const gimbal = cyl(0.5, 0.5, 0.8, MAT.steel, 16); gimbal.position.y = D.panelH / 2 + 0.3; head.add(gimbal);
-      // panel wing: 3 x 5 hinged sub-panels on a white truss backing
+      // panel wing: nx x ny hinged sub-panels on a white truss backing
       const wing = new THREE.Group(); wing.position.x = 0.75; head.add(wing);
-      const pw = D.panelW / 3, ph = D.panelH / 5;
-      for (let i = 0; i < 3; i++) for (let j = 0; j < 5; j++) {
+      const nx = Math.max(1, Math.round(D.panelW / 2.3)), ny = Math.max(1, Math.round(D.panelH / 2.6));
+      const pw = D.panelW / nx, ph = D.panelH / ny;
+      for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) {
         const p = new THREE.Mesh(new THREE.BoxGeometry(0.06, ph - 0.12, pw - 0.12), [cellMat, backMat, backMat, backMat, backMat, backMat]);
         p.position.set(0, -D.panelH / 2 + ph * (j + 0.5), -D.panelW / 2 + pw * (i + 0.5)); p.castShadow = p.receiveShadow = true; wing.add(p);
       }
@@ -78,18 +80,22 @@ export class PowerDockModel {
       this.heads.push(head);
     }
 
-    // ---- battery vault: 6 insulated cell containers under a radiator roof, half-bermed in regolith
+    // ---- battery vault: 8 LiFePO4 cell blocks (24 V, 100 Ah) in an insulated, RHU-heated box under a radiator roof, half-bermed in regolith
     const b = L.bank, gb = heightAt(T, b.x, b.z);
     const vault = new THREE.Group(); vault.position.set(b.x, gb, b.z); vault.rotation.y = yaw; root.add(vault);
     const shell = box(b.d, b.h, b.w, MAT.offwhite); shell.position.y = b.h / 2; vault.add(shell);
-    for (let k = 0; k < 6; k++) { const pod = box(b.d * 0.42, b.h * 0.7, b.w / 6 - 0.35, MAT.foil); pod.position.set(b.d / 2 + 0.05, b.h * 0.42, -b.w / 2 + (k + 0.5) * b.w / 6); pod.scale.x = 0.02; vault.add(pod); }
+    const nc = D.bankCells;
+    for (let k = 0; k < nc; k++) { const pod = box(b.d * 0.42, b.h * 0.7, b.w / nc - 0.25, MAT.foil); pod.position.set(b.d / 2 + 0.05, b.h * 0.42, -b.w / 2 + (k + 0.5) * b.w / nc); pod.scale.x = 0.02; vault.add(pod); }
     const roofMat = new THREE.MeshStandardMaterial({ color: 0xf4f4f2, roughness: 0.15, metalness: 0.2 });
-    for (let k = 0; k < 14; k++) { const fin = box(b.d + 0.6, 0.05, 0.7, roofMat); fin.position.set(0, b.h + 0.5, -b.w / 2 + 0.5 + k * (b.w - 1) / 13); fin.rotation.x = 0.35; vault.add(fin); }
+    const nf = Math.max(6, Math.round(b.w / 1.0));
+    for (let k = 0; k < nf; k++) { const fin = box(b.d + 0.6, 0.05, 0.7, roofMat); fin.position.set(0, b.h + 0.5, -b.w / 2 + 0.5 + k * (b.w - 1) / (nf - 1)); fin.rotation.x = 0.35; vault.add(fin); }
     for (const s of [-1, 1]) { const post = box(0.2, 0.6, 0.2, MAT.steel); post.position.set(s * (b.d / 2), b.h + 0.25, 0); vault.add(post); }
     const bermMat = new THREE.MeshStandardMaterial({ color: 0x77726a, roughness: 1 });
     const berm = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, b.w + 3, 4, 1), bermMat); berm.rotation.x = Math.PI / 2; berm.rotation.y = Math.PI / 4; berm.scale.set(1.6, 1, 1.2); berm.position.set(-b.d / 2 - 0.6, 0.2, 0); berm.receiveShadow = true; vault.add(berm);
-    const sign = new THREE.Mesh(new THREE.PlaneGeometry(6.5, 1.0), new THREE.MeshBasicMaterial({ map: labelTexture(`BATTERY BANK  ${(D.bankWh / 1e6).toFixed(1)} MWh`, { color: '#141414' }), transparent: true }));
+    const sign = new THREE.Mesh(new THREE.PlaneGeometry(Math.min(b.w - 1, 8), 1.0), new THREE.MeshBasicMaterial({ map: labelTexture(`BATTERY BANK  ${D.bankV} V ${D.bankAh} Ah LiFePO4 (${D.bankWh / 1000} kWh)`, { color: '#141414' }), transparent: true }));
     sign.position.set(b.d / 2 + 0.03, b.h - 0.55, 0); sign.rotation.y = Math.PI / 2; vault.add(sign);
+    const rhu = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 0.45), new THREE.MeshBasicMaterial({ map: labelTexture('RHU', { color: '#e2ad1f', bg: '#141414' }), transparent: true }));
+    rhu.position.set(b.d / 2 + 0.03, b.h - 1.25, b.w / 2 - 1.2); rhu.rotation.y = Math.PI / 2; vault.add(rhu); // radioisotope heater unit placard
     // state-of-charge bar: 20 segments
     this.socSegs = [];
     const segOn = new THREE.MeshStandardMaterial({ color: 0x002a10, emissive: 0x33ff88, emissiveIntensity: 2.2 });
@@ -98,22 +104,23 @@ export class PowerDockModel {
     for (let k = 0; k < 20; k++) { const s = box(0.05, 0.28, 0.42, segOff); s.position.set(b.d / 2 + 0.03, 1.0, -b.w / 2 + 2 + k * (b.w - 4) / 19); s.castShadow = false; vault.add(s); this.socSegs.push(s); }
     this.segMats = { segOn, segLow, segOff };
 
-    // ---- shuttered blind-mate charge coupler pedestal (replaces exposed bare floor copper rails)
+    // ---- inductive charge pad: sealed transmitter coil flush in the sintered-regolith pad (no exposed contacts, no shutters)
     const gp = sim.powerDock.ground, P = L.pad;
     const padG = new THREE.Group(); padG.position.set(P.x, gp, P.z); padG.rotation.y = L.yaw; root.add(padG);
     const pad = new THREE.Mesh(new THREE.BoxGeometry(17, 0.18, 17), [MAT.dark, MAT.dark, new THREE.MeshStandardMaterial({ map: padTexture(), roughness: 0.92 }), MAT.dark, MAT.dark, MAT.dark]);
     pad.rotation.y = -Math.PI / 2; pad.position.y = 0.06; pad.receiveShadow = true; padG.add(pad);
     const shroud = box(4.6, 0.14, 3.0, MAT.dark); shroud.position.y = 0.18; padG.add(shroud);
-    const housing = box(3.4, 0.16, 2.2, MAT.steel); housing.position.y = 0.25; padG.add(housing);
-    this.shutterMat = new THREE.MeshStandardMaterial({ color: 0x2a2f36, roughness: 0.55, metalness: 0.65 });
     for (const s of [-1, 1]) {
       const curb = box(5.4, 0.14, 0.22, MAT.yellow || MAT.dark); curb.position.set(0, 0.19, s * 1.45); padG.add(curb); // alignment wheel guide curb
-      const door = box(3.2, 0.04, 0.95, this.shutterMat); door.position.set(0, 0.34, s * 0.48); padG.add(door);          // spring-wiped sliding dust shutter
     }
-    this.railMat = new THREE.MeshStandardMaterial({ color: 0xb87333, roughness: 0.3, metalness: 1, emissive: 0x33ccff, emissiveIntensity: 0 });
-    for (const sx of [-0.7, 0.7]) for (const sz of [-0.45, 0.45]) {
-      const contact = cyl(0.14, 0.14, 0.08, this.railMat, 16); contact.position.set(sx, 0.31, sz); padG.add(contact);   // shielded spring-wiped blind-mate contact puck
+    const coilHousing = cyl(1.6, 1.7, 0.12, MAT.dark, 48); coilHousing.position.y = 0.22; padG.add(coilHousing);
+    this.coilMat = new THREE.MeshStandardMaterial({ color: 0xb87333, roughness: 0.3, metalness: 1, emissive: 0x33ccff, emissiveIntensity: 0 });
+    for (let k = 0; k < 6; k++) {
+      const r = 0.35 + k * 0.2, ring = new THREE.Mesh(new THREE.TorusGeometry(r, 0.025, 6, 48), this.coilMat);
+      ring.rotation.x = Math.PI / 2; ring.position.y = 0.285; padG.add(ring);       // transmitter coil winding, flat spiral
     }
+    const cover = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 1.5, 0.03, 48), new THREE.MeshStandardMaterial({ color: 0xe8e6df, roughness: 0.35, metalness: 0.1, transparent: true, opacity: 0.55 }));
+    cover.position.y = 0.31; cover.receiveShadow = true; padG.add(cover);            // glass-ceramic cover over the coil
     // ---- charger pedestal + cable to the vault
     const pe = L.pedestal, gpe = heightAt(T, pe.x, pe.z);
     const ped = new THREE.Group(); ped.position.set(pe.x, gpe, pe.z); ped.rotation.y = yaw; root.add(ped);
@@ -149,7 +156,7 @@ export class PowerDockModel {
     this.socSegs.forEach((s, i) => { s.material = i < n ? (D.soc < 0.25 ? this.segMats.segLow : this.segMats.segOn) : this.segMats.segOff; });
     this._t += dt;
     const charging = D.chargeW > 0;
-    this.railMat.emissiveIntensity = charging ? 1.2 + 0.6 * Math.sin(this._t * 4) : D.connected ? 0.4 : 0;
+    this.coilMat.emissiveIntensity = charging ? 1.2 + 0.6 * Math.sin(this._t * 4) : D.connected ? 0.4 : 0;
     this.ledMat.emissive.setHex(charging ? 0x33ff88 : D.connected ? 0x35d0ff : 0xffa31a);
     this.screenMat.emissiveIntensity = charging ? 1.4 : 0.6;
     const night = sun.y < 0.02;

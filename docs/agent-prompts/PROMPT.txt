@@ -1,0 +1,44 @@
+AEGIS-V1 HUNCH SIMULATOR — MASTER AGENT DIRECTIVE
+
+Refer to full markdown at: docs/agent-prompts/AGENT_PROMPT.md
+or docs/LUNAR_CARGO_RESEARCH.md for Task 5.
+
+================================================================================
+TASKS SUMMARY
+================================================================================
+1. Fix "Do Full Mission" Autonomy Loop & RPM Profile
+   - In src/sim/autonomy.js *missionCycle(), remove/bypass yield* this.surveyRoute(item.cargo);
+   - Go straight to acquire() -> deliver() -> return for next cargo if battery > 20%
+   - 280-300 RPM turbo on open ground; 120 RPM crawl cap only during final 15m of pickup & docking.
+
+2. Time-Warp Multipliers (2x, 3x, 5x, 10x, 20x, 50x)
+   - In src/sim/sim.js advance(), dynamically scale budgetMs and maxSubSteps with timeScale.
+   - Throttle rendering at >= 5x (render every floor(timeScale/2) frames).
+   - Add active button indicator and warp badge in HUD.
+
+3. Sensor Suite Upgrade (Stereo Depth Camera + 360 Lidar)
+   - In src/sim/config.js, upgrade camera to stereo (90 deg FOV, baseline 0.18m, depth 35m).
+   - In src/sim/config.js, upgrade lidar to 360 deg, 32 channels, 10Hz, mountLocal at (0, 5.71m, 0).
+   - Add dynamic self-occlusion mask for carried module in src/sim/sensors.js.
+
+4. Fix Wheel & Fender Sinking Visual Bug During Kneel
+   - In src/render/aegis.js lines 206-210, clamp visual wheel Y to terrain height.
+   - Smooth suspension animation to 3-5 seconds with S-curve easing in src/sim/rover.js.
+
+5. Lunar Cargo Research Report
+   - Already completed and saved at docs/LUNAR_CARGO_RESEARCH.md!
+
+6. Fix Loading Bay Stand Exit
+   - In src/sim/autonomy.js, enforce 10-12m straight reverse departure before any yaw steering.
+
+7. Three-Layer HUD Overhaul
+   - Clean (Layer 0), Essential (Layer 1), Engineering (Layer 2), toggled with 'H' key and top-right button.
+
+8. Navigation Smoothness
+   - Eliminate phantom stops on unknown cells (coast 0.5 m/s on flat ground).
+   - Fix heading wiggling with +-3 deg deadband, pure pursuit lookahead >= 10m, yaw-rate damping.
+   - Prevent replan thrash by locking committed segments for 15m.
+
+9. Chrome & Headless Verification
+   - Verify npm run test:quick passes.
+   - End-to-end check in Chrome.
