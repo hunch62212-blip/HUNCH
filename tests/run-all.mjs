@@ -4,7 +4,8 @@
 //   npm run test:quick   skips the long autonomy runs (marked long below)
 //   node tests/run-all.mjs dock0 rock   run only the named entries
 import { spawn } from 'node:child_process';
-import { mkdirSync, createWriteStream } from 'node:fs';
+import { mkdirSync, createWriteStream, writeFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { cpus } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -54,7 +55,8 @@ const TESTS = [
   ['fdir', 'fdir.mjs', [], true, 3600],
   ['power_dock', 'power_dock.mjs', [], true, 3600],
   ['nav_bench', 'nav_bench.mjs', ['hab,pad'], true, 5400],
-  ['cycle', 'autonomy.mjs', ['cycle', '24000'], true, 7200],
+  // M6 is 12,000 s sim (docs/REQUIREMENTS.md). v1.7.0 passed only with the cap raised to 24,000 s; the test now uses the requirement.
+  ['cycle', 'autonomy.mjs', ['cycle', '12000'], true, 7200],
 ];
 
 const argv = process.argv.slice(2);
@@ -90,7 +92,7 @@ function runOne([name, script, args, , timeout]) {
       const fails = checks.filter((c) => c.startsWith('FAIL')).length;
       const pass = code === 0 && fails === 0 && checks.length > 0;
       if (!checks.length) console.log(`[${name}] FAIL no checks reported (exit ${code})`);
-      results.push({ name, pass, checks: checks.length, fails, code, wall: (Date.now() - start) / 1000 });
+      results.push({ name, pass, checks: checks.length, fails, code, wall: (Date.now() - start) / 1000, lines: checks });
       resolve();
     });
   });
@@ -105,4 +107,8 @@ results.sort((a, b) => order.get(a.name) - order.get(b.name));
 for (const r of results) console.log(`${r.pass ? 'PASS' : 'FAIL'} ${r.name.padEnd(18)} ${String(r.checks - r.fails).padStart(2)}/${r.checks} checks  exit ${r.code}  ${r.wall.toFixed(0)} s`);
 const failed = results.filter((r) => !r.pass);
 console.log(`${results.length - failed.length}/${results.length} test files passed in ${((Date.now() - t0) / 1000).toFixed(0)} s (logs: tests/out/)`);
+// Machine-readable record for scripts/record-results.mjs (fills the Result column of docs/REQUIREMENTS.md).
+let commit = 'unknown', dirty = false;
+try { commit = execSync('git rev-parse --short HEAD', { cwd: root }).toString().trim(); dirty = execSync('git status --porcelain -- src tests', { cwd: root }).toString().trim().length > 0; } catch { /* not a git checkout */ }
+writeFileSync(join(outDir, 'results.json'), JSON.stringify({ date: new Date().toISOString(), commit, dirty, seed: process.env.SEED ? Number(process.env.SEED) : null, results }, null, 1));
 if (failed.length) process.exitCode = 1;

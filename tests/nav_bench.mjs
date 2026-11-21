@@ -5,7 +5,7 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { Sim } from '../src/sim/sim.js';
 import { runCommand } from '../src/sim/commands.js';
 await RAPIER.init();
-const sim = new Sim(RAPIER);
+const sim = new Sim(RAPIER, process.env.SEED ? { seed: Number(process.env.SEED) } : {}); // SEED=n: map seed (tests/seed_sweep.mjs)
 const A = sim.autonomy, R = sim.rover;
 let warns = 0, lc = 0, reused = 0;
 sim.on('log', (e) => { if (/SLAM loop closure/.test(e.msg)) lc++; if (/Route memory: reusing/.test(e.msg)) reused++; if (e.level !== 'info') { if (e.level === 'warn') warns++; console.log(`[${(e.t / 60).toFixed(1).padStart(5)} min] ${e.level.padEnd(4)} ${e.msg}`); } });

@@ -154,14 +154,17 @@ S.lidarAuto = true;
   R.cmd.vx = 0; run(2);
 }
 
-// ---- 7. "Do Full Mission" goes straight to the cargo
+// ---- 7. "Do Full Mission": pre-survey drive (on since the review pass: loaded tip margin too low to explore) or straight to the cargo
 {
-  equal('pre-survey drive is opt-in (off by default)', MISSION.preSurveyRoute, false);
+  equal('pre-survey drive is on (loaded trips use routes driven empty first)', MISSION.preSurveyRoute, true);
   equal('stand exit is forward (toward the habitat)', MISSION.standExitDir, 1);
   A.start('cycle', A.missionCycle());
   let seen = ''; for (let i = 0; i < 120 * 20 && A.gen; i++) { sim.stepOnce(); if (A.goal && !seen) seen = A.goal.name || ''; }
-  check('first navigation goal is the cargo pre-grasp point', /pre-grasp/.test(seen), `goal "${seen}"`);
-  check('no survey phase', !/survey/i.test(A.phase) && !/survey/i.test(seen), `phase "${A.phase}"`);
+  if (MISSION.preSurveyRoute) check('first navigation goal is the survey approach to the port (route driven empty)', /survey/i.test(seen) || /survey/i.test(A.phase), `goal "${seen}", phase "${A.phase}"`);
+  else {
+    check('first navigation goal is the cargo pre-grasp point', /pre-grasp/.test(seen), `goal "${seen}"`);
+    check('no survey phase', !/survey/i.test(A.phase) && !/survey/i.test(seen), `phase "${A.phase}"`);
+  }
   A.abort('test over');
 }
 // ---- 8. navigation constants (smoothing)

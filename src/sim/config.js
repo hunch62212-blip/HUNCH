@@ -443,9 +443,11 @@ export const FAILURES = {
 };
 
 // [ASSUMED] mission-executive tuning (autonomy.js). All sim choices, none traced to a source.
-//   preSurveyRoute   drive the empty rover to the port and back before the first pick-up (the old behaviour of
-//                    surveyRoute). Off: "Do Full Mission" goes straight to the cargo; the loaded leg then explores or
-//                    reuses a remembered route. Enable it to teach the route empty before a loaded transit.
+//   preSurveyRoute   drive the empty rover to the port and back before the first pick-up (surveyRoute). ON since the
+//                    review pass (2026-11-21): the loaded rover's tip margin is only ~26-27 deg in manoeuvres (static ~28 deg),
+//                    so autonomy stops it at 14 deg tilt; a loaded trip must therefore only use a route driven empty first
+//                    (empty limit 17 deg). Turn it off again only when stability.js reports >= 35 deg on the design slope
+//                    (review item 1, branch review/04-stability).
 //   crawlApproachM / crawlDockM  m from the cargo / the port inside which the drive is held to the 120 rpm crawl cap
 //                    (ROVER.motor.protoCrawlRpm): cargo approach + kneel + lift, and habitat vestibule entry + soft capture
 //   standExitM       m of straight departure from the loading stand along the module axis, heading held (autonomy.js _deliver); the
@@ -455,7 +457,7 @@ export const FAILURES = {
 //                    direction of travel and the far end of the stand is open. Reverse was measured (tests/scratch/ab_departure.mjs):
 //                    the loaded rover, which cannot point-turn, is left behind its own stand facing it, and it did not get 30 m away
 //                    in 25 min (4 boxed-in recoveries). Forward: 200 m clear in 3.4 min, 0 N stand contact, 2 cm lateral drift.
-export const MISSION = { preSurveyRoute: false, crawlApproachM: 15, crawlDockM: 20, standExitM: 12, standExitSpeed: 0.5, standExitKap: 0.05, standExitDir: 1 };
+export const MISSION = { preSurveyRoute: true, crawlApproachM: 15, crawlDockM: 20, standExitM: 12, standExitSpeed: 0.5, standExitKap: 0.05, standExitDir: 1 };
 
 // [ASSUMED] navigation smoothing (autonomy.js navTo / replan): all sim tuning values.
 //   headingDeadbandDeg  inside +-this heading error to the lookahead point, on a gentle path (|k| < 0.02 /m), wz is commanded 0

@@ -6,7 +6,7 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { Sim } from '../src/sim/sim.js';
 import { WORLD } from '../src/sim/config.js';
 await RAPIER.init();
-const sim = new Sim(RAPIER); const A = sim.autonomy, R = sim.rover;
+const sim = new Sim(RAPIER, process.env.SEED ? { seed: Number(process.env.SEED) } : {}); const A = sim.autonomy, R = sim.rover; // SEED=n: map seed (tests/seed_sweep.mjs)
 const H = sim.terrain.hab;
 sim.on('log', (e) => { if (e.level !== 'info') console.log(`[${(e.t / 60).toFixed(2)}] ${e.level} ${e.msg}`); });
 A.speedSetting = +(process.env.VMAX || 99);
