@@ -141,6 +141,15 @@ def run(_context: str):
         zs = sorted((sd * bz0, sd * (bz0 + l)))
         A.add_body(c, nm, A.box(x0 + bx0, x0 + bx0 + w, yb, yb + h, zs[0], zs[1]), 'buy', 'placeholder [VERIFY size]')
 
+    # Pi 5 Active Cooler placeholder on top of the Pi (about 40 x 40 x 9 over the SoC; the cooler fan inlet needs pi_cool_clear
+    # of free air above it, checked in tests/cad_params.mjs against the deck underside) [VERIFY size]
+    for (pl, sd, bx0, bz0, w, l, h, holes, nm) in boards:
+        if nm == 'RASPBERRY_PI5':
+            yb = up_y + pt + sh + h
+            zc = sd * (bz0 + l / 2)
+            A.add_body(c, 'BUY_PI5_ACTIVE_COOLER', A.box(x0 + bx0 + w / 2 - 20, x0 + bx0 + w / 2 + 20, yb, yb + 9.0, zc - 20, zc + 20),
+                       'buy', 'Raspberry Pi 5 Active Cooler placeholder [VERIFY size]; keep pi_cool_clear free above it')
+
     seen = set()
     for cc in asm.occurrences:
         if cc.component.name not in seen:

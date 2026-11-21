@@ -4,10 +4,15 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { Sim } from './sim/sim.js';
 import { ROVER, K, WORLD } from './sim/config.js';
 import { heightAt } from './sim/terrain.js';
+import { runCommand, requestEstop } from './sim/commands.js';
+import { LosMonitor, DelayLine } from './sim/commsLink.js';
+import { COMMS } from './sim/lunarParams.js';
 import { createScene } from './render/scene.js';
 import { TerrainMesh } from './render/terrainMesh.js';
 import { RockField, buildLander, buildHabitat, buildCargo, buildGeofences, MAT, tagMesh, labelTexture as labelTex } from './render/props.js';
 import { AegisModel, buildTeamCargo, buildTeamStands } from './render/aegis.js';
+import { ArmModel, acmPose } from './render/arm.js';
+import { CARGO_TYPES } from './sim/config.js';
 import { loadTeamModels } from './render/teamModels.js';
 import { Dust, Tracks, LidarCloud, PathOverlay, Pebbles } from './render/effects.js';
 import { HUD } from './ui/hud.js';
@@ -41,6 +46,10 @@ async function main() {
   // thermal scenarios happen at random in the browser (?noscen turns them off); headless tests opt in
   const sim = new Sim(RAPIER, { seed, thermalScenarios: !qs.has('noscen') });
   sim.idleSolar = !qs.has('noidlesolar');
+  // operator link (lunar audit B4): Earth one-way delay >= 2.6 s (light time + ground segment); COMMS LOS raised from the
+  // mast's line of sight to the habitat antenna / Earth (sim.losMonitor, once a second; "comms auto off" to disable)
+  sim.comms.earthDelayS = Math.max(sim.comms.earthDelayS || 0, COMMS.earthDelayS);
+  if (sim.comms.autoLos == null) sim.comms.autoLos = !qs.has('nolos');
   sim.log(`Terrain seed ${seed}: crater and boulder layout is random each load (add ?seed=${seed} to the URL to repeat this map, or type "newmap")`, 'info');
   await step(45, 'Building renderer, lunar sky and lighting…');
   const canvas = document.getElementById('view');
@@ -65,6 +74,7 @@ async function main() {
   const fences = buildGeofences(sim.terrain); scene.add(fences);
   const cargoVis = [];
   for (const c of sim.cargo) {
+    if (c.T.handling === 'arm') continue;   // ACM meshes are made by syncAcmVis
     let g;
     if (c.T.shape === 'cylinder') {
       g = await buildTeamCargo(c);
@@ -77,6 +87,21 @@ async function main() {
     }
     g.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
     scene.add(g); cargoVis.push({ c, g });
+  }
+  // ACM (arm-handled cargo module) visuals. sim.cargo entries with T.handling === 'arm' get a mesh as soon as they exist (sim.spawnACM,
+  // P3a wiring); until the sim owns one, a ghost ACM is shown while rover.arm.payload is set, hanging from the hook trunnions.
+  const acmVis = new Map(); let acmGhost = null;
+  const _ap = new THREE.Vector3(), _aq = new THREE.Quaternion();
+  function syncAcmVis(R) {
+    for (const c of sim.cargo) if (c.T.handling === 'arm' && !acmVis.has(c)) { const g = buildCargo(c); scene.add(g); acmVis.set(c, g); }
+    const real = [...acmVis.keys()];
+    const pl = R.arm.payload;
+    if (!real.length && pl) {
+      if (!acmGhost) { acmGhost = { c: { id: 'ACM', T: CARGO_TYPES.acm, mode: 'GROUND' }, g: buildCargo({ id: 'ACM', T: CARGO_TYPES.acm }) }; scene.add(acmGhost.g); }
+      acmGhost.g.visible = true;
+      if (acmPose(R, acmGhost.c, _ap, _aq)) { acmGhost.g.position.copy(_ap); acmGhost.g.quaternion.copy(_aq); }
+    } else if (acmGhost) acmGhost.g.visible = false;
+    for (const [c, g] of acmVis) { if (acmPose(R, c, _ap, _aq)) { g.position.copy(_ap); g.quaternion.copy(_aq); } }
   }
   // receiving stand (team pallet) rises out of the apron under the docked module during berthing step 6
   const jackVis = new Map();
@@ -108,6 +133,7 @@ async function main() {
   }
   await step(80, 'Assembling AEGIS-V1 rover model…');
   const roverModel = await new AegisModel(scene).init();
+  const armVis = new ArmModel(roverModel);   // two 3-DOF ACM arms + deck pins / latch / stow cradles, posed from rover.arm every frame
   // SCOUT-1 (team tracked-rover CAD, 3x scale)
   const scoutVis = trackedRoverCAD(3); scene.add(scoutVis);
   const scoutTag = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTexture('SCOUT-1', { color: '#35d0ff', size: 70, w: 512, h: 128 }), transparent: true, depthWrite: false }));
@@ -174,6 +200,8 @@ async function main() {
   }
 
   const hud = new HUD(sim, ui);
+  sim.losMonitor = new LosMonitor(sim, { onRestore: () => runCommand(sim, ui, 'clear comms', true) });
+  const camDelay = new DelayLine(256);   // onboard view: camera pose ring buffer, shown sim.comms.delayS late
   sim.on('routes', () => { overlay.setRoutes(sim.slam.routes); ui.saveMap(true); }); // quiet: this fires on every SLAM correction and filled the console with "memory saved" lines
   sim.on('path', () => overlay.setPath(sim.autonomy.path));
   sim.on('scan', (s) => { if (ui.overlays.lidar && lidar.points.visible) lidar.set(s, sim.rover.pose().y); });
@@ -217,7 +245,7 @@ async function main() {
   window.addEventListener('keydown', (e) => {
     if (document.activeElement && document.activeElement.id === 'cmd') return;
     const k = e.key.toLowerCase();
-    if (k === 'escape') { sim.emergencyStop('keyboard (Esc)'); e.preventDefault(); return; }
+    if (k === 'escape') { requestEstop(sim, 'keyboard (Esc)'); e.preventDefault(); return; }
     if (k === 'enter') { document.getElementById('cmd').focus(); e.preventDefault(); return; }
     keys.add(k);
     if (k === 'c') { const v = ['chase', 'orbit', 'top', 'cam', 'free']; ui.setView(v[(v.indexOf(ui.view) + 1) % v.length]); }
@@ -247,7 +275,7 @@ async function main() {
       if (!gp) continue;
       const dz = (v) => (Math.abs(v) < 0.12 ? 0 : v);
       if (dz(gp.axes[1])) thrIn = -gp.axes[1]; if (dz(gp.axes[0])) steerIn = -gp.axes[0];
-      if (gp.buttons[1]?.pressed) sim.emergencyStop('gamepad');
+      if (gp.buttons[1]?.pressed) requestEstop(sim, 'gamepad');
     }
     if (touchDrive.on && (touchDrive.thr || touchDrive.steer)) { thrIn = touchDrive.thr; steerIn = touchDrive.steer; }
     const active = thrIn || steerIn;
@@ -344,9 +372,12 @@ async function main() {
     if (warpT.drew && rawDt < 0.25) warpT.over += (Math.max(0, rawDt * 1000 - warpT.phys) - warpT.over) * 0.15;
     const tPhys = performance.now();
     const simDt = sim.advance(dt, simBudget); // sim seconds this frame (many at 50x)
+    sim.losMonitor.update();
     warpT.phys = performance.now() - tPhys;
     const R = sim.rover, p = R.pose();
     roverModel.update(R, sim.time);
+    armVis.update(R);
+    syncAcmVis(R);
     powerDockVis.update(dt);
     { const sc = sim.scout; scoutVis.visible = true; scoutVis.position.set(sc.x, sc.y, sc.z);
       scoutVis.rotation.set(0, 0, 0); scoutVis.rotateY(sc.yaw); scoutVis.rotateZ(sc.pitch); scoutVis.rotateX(-sc.roll);
@@ -354,6 +385,7 @@ async function main() {
       if (sc.lastScan && ui.overlays.lidar && sc.enabled) { scoutCloud.geometry.setAttribute('position', new THREE.Float32BufferAttribute(sc.lastScan, 3)); scoutCloud.visible = true; sc.lastScan = null; }
       if (!sc.enabled || !ui.overlays.lidar) scoutCloud.visible = false; }
     for (const v of cargoVis) {
+      if (v.c.T.handling === 'arm') continue;   // ACM: posed by syncAcmVis (ground body / hook trunnions / deck pins)
       const cad = v.g.userData.cad; if (cad && cad.userData.xray !== ui.overlays.xray) { cad.userData.setXray(ui.overlays.xray); v.g.traverse((o) => { if (o.userData.xrayable) { o.material = o.material.clone(); o.material.transparent = true; o.material.opacity = ui.overlays.xray ? 0.15 : 1; o.material.depthWrite = !ui.overlays.xray; } }); }
       const t = v.c.body.translation(), r = v.c.body.rotation();
       v.g.position.set(t.x, t.y, t.z); v.g.quaternion.set(r.x, r.y, r.z, r.w);
@@ -390,7 +422,10 @@ async function main() {
     }
     lastTarget.copy(target);
     if (ui.view === 'cam') {
-      const cp = sim.sensors.cameraPose();
+      // the onboard view is video downlinked over the operator link: it arrives one light time late
+      const cpNow = sim.sensors.cameraPose();
+      camDelay.push(sim.time, { pos: cpNow.pos, q: cpNow.q });
+      const cp = sim.comms.delayS > 0 ? camDelay.at(sim.time - sim.comms.delayS) : cpNow;
       camera.position.copy(cp.pos); camera.quaternion.copy(cp.q).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2));
       camera.fov = 52;
     } else { camera.fov = 52; controls.update(); }
@@ -464,7 +499,7 @@ async function main() {
     frame++;
   }
   loop();
-  window.sim = sim; window.app = { camera, controls, ui, scene, renderer, roverModel, warpT, applyRung: (r) => { auto = false; applyRung(r); } }; // for debugging in the browser console
+  window.sim = sim; window.app = { armVis, camera, controls, ui, scene, renderer, roverModel, warpT, applyRung: (r) => { auto = false; applyRung(r); } }; // for debugging in the browser console
 }
 
 main().catch((e) => { console.error(e); loadMsg.textContent = 'Error: ' + e.message; loadMsg.style.color = '#ff4d3a'; });

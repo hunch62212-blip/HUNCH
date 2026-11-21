@@ -1,7 +1,7 @@
 # 20_drive_pods.py - ASM_DRIVE: four driven pods (FL, FR, RL, RR) and two passive idler pods (ML, MR).
 # Pod frame: origin = wheel centre, +z outboard, local +x = arm toward the link pivot (rocker P for F*, bogie B for M*/R*).
 # Components (each instanced with A.pod_mat, never mirrored):
-#   PRT_MOTOR_MOUNT (orange)  clamp ring (mot_d + 2 clr_slip) with pinch slit + M3 insert/clearance, 12 mm flange arm with
+#   PRT_MOTOR_MOUNT (orange, printed in ASA)  clamp ring (mot_d + 2 clr_slip) with pinch slit + M3 insert/clearance, 12 mm flange arm with
 #                             2 x M4 heat-set inserts (bolts pass through the link bar), face ring with 6 x M3 on mot_bc_d,
 #                             two struts, wire notch.
 #   BUY_MOTOR_37D             Pololu 37D + encoder (68 mm), D-shaft, collar, 6 face holes.
@@ -78,7 +78,7 @@ def run(_context: str):
         x = off + k * pitch
         A.union(body, A.cylz(zl, zl + ft, x, 0, P('ins_m4_boss') / 2))
         A.cut(body, A.insert_hole((x, 0, zl), (0, 0, 1), 'm4'))
-    A.add_body(c, 'MOTOR_MOUNT', body, 'orange', 'PETG 5 walls, load plane parallel to bed; PA-CF optional')
+    A.add_body(c, 'MOTOR_MOUNT', body, 'orange', 'ASA 5 walls, load plane parallel to bed (motor can runs 70-90 C; PETG creeps above ~70 C); PA-CF optional')
     A.place_pods(asm, occ, c, 'PRT_MOTOR_MOUNT', ['FL', 'FR', 'RL', 'RR'], W)
 
     # ================= idler pod =========================================================================

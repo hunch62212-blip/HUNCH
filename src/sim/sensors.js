@@ -7,6 +7,7 @@ import { Q_SENSOR, LANDER_SCALE, LANDER_TAG } from './world.js';
 import { mulberry32, heightAt } from './terrain.js';
 import { powerDockLayout } from './powerDock.js';
 import { wheelSoil } from './terramechanics.js';
+import { LIGHT } from './lunarParams.js';
 
 const rand = mulberry32(777);
 export function gauss() { let u = 0, v = 0; while (u === 0) u = rand(); while (v === 0) v = rand(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
@@ -135,6 +136,18 @@ export class Sensors {
     return { pos, q, fwd: new THREE.Vector3(1, 0, 0).applyQuaternion(q), up: new THREE.Vector3(0, 1, 0).applyQuaternion(q), right: new THREE.Vector3(0, 0, 1).applyQuaternion(q) };
   }
 
+  // Is the surface point (x, y, z) in sunlight? One ray toward the sun (lunar audit B3), started a little off the
+  // surface so it does not hit the face it starts on. Long shadows at the ~9 deg polar sun come from rocks, rims and the
+  // structures; LIGHT.shadowRayM caps the cost (the far ridges are covered by the rover's own sunlit test).
+  _sunlitAt(x, y, z, nx = 0, ny = 1, nz = 0) {
+    const sun = this.sim.sunDir;
+    if (sun.y <= 0) return false;
+    const o = this._shO || (this._shO = { x: 0, y: 0, z: 0 });
+    o.x = x + nx * 0.08 + sun.x * 0.25; o.y = y + ny * 0.08 + sun.y * 0.25; o.z = z + nz * 0.08 + sun.z * 0.25;
+    this.shadowRays = (this.shadowRays || 0) + 1;
+    return !this._castRay(o, sun, LIGHT.shadowRayM);
+  }
+
   _castRay(o, d, max, excludeBody) {
     const r = this.ray;
     r.origin.x = o.x; r.origin.y = o.y; r.origin.z = o.z; r.dir.x = d.x; r.dir.y = d.y; r.dir.z = d.z;
@@ -205,6 +218,17 @@ export class Sensors {
       const f = driving ? 1 - Math.abs(sEst) : 1 / Math.max(0.88, 1 - Math.abs(sEst));
       ux *= f; uz *= f;
     }
+    // 4WD: the two passive idlers (ML / MR) roll at the true ground speed (no torque, no slip) and their +-w*z yaw terms cancel in the mean,
+    // so they replace the slip-inverted driven-wheel estimate (which over-reads in skid turns). Lateral velocity is ~0 for a skid-steer
+    // rover on a firm surface (uz = 0, as the driven-wheel branch gives it). Falls back to the slip model if either idler is lifted,
+    // seized, or its resolver has failed (health 'enc:n' active).
+    { let iv = 0, ik = 0;
+      const H = this.sim.health;
+      for (const b of R.bogies) for (const w of b.wheels) {
+        if (w.driven || !w.contact || w.load <= 50 || w.fault === 'seized' || (H && H.active && H.active.has(`enc:${w.id + 1}`))) continue;
+        iv += w.omega * ROVER.wheel.radius * (1 + 0.004 * gauss()); ik++;
+      }
+      if (ik === 2) { ux = iv / 2; uz = 0; } }
     const cp = Math.cos(this.imu.pitch);
     const lvlAvg = R.bogies.reduce((a, b) => a + b.level, 0) / R.bogies.length;
     const dLvl = this._prevLvl == null ? 0 : lvlAvg - this._prevLvl;
@@ -316,20 +340,29 @@ export class Sensors {
     const [nu, nv] = C.stereoGrid, hf = C.hFovDeg * Math.PI / 360, tu = Math.tan(hf), tv = tu * 0.75;
     const f = (C.imagePx / 2) / tu, zMin = f * C.baselineM / 64;            // 64 px disparity search window
     const body = new Float32Array(nu * nv * 3), sigma = new Float32Array(nu * nv), qi = p.q.clone().invert(), d = new THREE.Vector3(), w = new THREE.Vector3();
-    let m = 0;
+    // lighting (lunar audit B3): a pixel needs light. Inside the lamp range with the lamps on it is lit; otherwise it
+    // needs the sun up and the hit point not in shadow (one shadow ray, only for pixels the lamps do not cover).
+    // Nothing within LIGHT.glareDeg of the sun can be matched (sun glare), as for the mono camera.
+    const sun = this.sim.sunDir, lamps = !!R.lights, glareCos = Math.cos(LIGHT.glareDeg * Math.PI / 180), camLit = sun.y > 0 && R.power.sunlit;
+    let m = 0, dark = 0, glare = 0;
     for (let iv = 0; iv < nv; iv++) for (let iu = 0; iu < nu; iu++) {
       const u = ((iu + 0.5) / nu * 2 - 1) * tu, vv = ((iv + 0.5) / nv * 2 - 1) * tv;
       d.copy(cam.fwd).addScaledVector(cam.right, u).addScaledVector(cam.up, -vv).normalize();
+      if (camLit && d.dot(sun) > glareCos) { glare++; continue; }
       const cosA = d.dot(cam.fwd), hit = this._castRay(cam.pos, d, C.depthRange / cosA);
       if (!hit) continue;
       const z = hit.timeOfImpact * cosA;                                    // depth along the optical axis
       if (z < zMin) continue;
+      if (!(lamps && hit.timeOfImpact <= LIGHT.lampRangeM)) {
+        const T = hit.timeOfImpact;
+        if (!this._sunlitAt(cam.pos.x + d.x * T, cam.pos.y + d.y * T, cam.pos.z + d.z * T, -d.x, -d.y, -d.z)) { dark++; continue; }
+      }
       const sig = z * z * C.disparityNoise / (f * C.baselineM), t = hit.timeOfImpact + gaussRange() * sig / cosA;
       w.copy(cam.pos).addScaledVector(d, t);
       w.x -= p.x; w.y -= p.y; w.z -= p.z; w.applyQuaternion(qi);
       body[m * 3] = w.x; body[m * 3 + 1] = w.y; body[m * 3 + 2] = w.z; sigma[m] = sig; m++;
     }
-    this.stereo = { t: this.sim.time, n: m, fused: 0 };
+    this.stereo = { t: this.sim.time, n: m, fused: 0, dark, glare };
     if (m) this.stereo.fused = this.sim.slam.integrate({ n: m, body: body.subarray(0, m * 3), sigma: sigma.subarray(0, m), roll: this.imu.roll, pitch: this.imu.pitch }, C.fuseSigma);
   }
   _finishScan(p) {
@@ -368,15 +401,19 @@ export class Sensors {
     // Lighting (a camera, unlike the LiDAR, needs light and cannot look into the sun):
     //  - sun in the frame (low polar sun, no atmosphere to soften it): veiling glare halves the usable range, and
     //    nothing within glareDeg of the sun's direction can be decoded
-    //  - night or the rover in shadow: cargo fiducials and rocks are seen only in the rover's own headlights
-    //    (lampRange); port and surveyed beacons are floodlit by the base
+    //  - a target not in sunlight itself (night, or in a shadow: checked per target below) is seen only in the rover's
+    //    own lamps (lampRange); port and surveyed beacons are floodlit by the base
     const sun = this.sim.sunDir, R0 = this.sim.rover, lit = sun.y > 0 && R0.power.sunlit;
     const sunFx = sun.dot(cam.fwd), sunInFrame = lit && sunFx > 0 && Math.abs(Math.atan2(sun.dot(cam.right), sunFx)) < hf && Math.abs(Math.atan2(sun.dot(cam.up), sunFx)) < vf;
-    const glareCos = Math.cos(12 * Math.PI / 180), lampRange = 35, glareK = sunInFrame ? 0.5 : 1;
+    const glareCos = Math.cos(LIGHT.glareDeg * Math.PI / 180), lampRange = LIGHT.lampRangeM, glareK = sunInFrame ? 0.5 : 1;
     this.camLight = { lit, sunInFrame, lamps: !!R0.lights };
-    const visible = (dirx, diry, dirz, range, floodlit) => {
-      if (lit) return !(dirx * sun.x + diry * sun.y + dirz * sun.z > glareCos);
-      return floodlit || (R0.lights && range <= lampRange);
+    // Each target is checked for its OWN light (lunar audit B3): the mast being in sun says nothing about a fiducial in a
+    // rock's shadow 20 m away. Order: glare cone, base floodlights, rover lamps (<= lampRange), then one shadow ray
+    // from the target toward the sun (skipped at night: nothing is sunlit).
+    const visible = (dirx, diry, dirz, range, floodlit, px, py, pz, nx, ny, nz) => {
+      if (lit && dirx * sun.x + diry * sun.y + dirz * sun.z > glareCos) return false;   // camera sees the sun: glare cone
+      if (floodlit || (R0.lights && range <= lampRange)) return true;
+      return this._sunlitAt(px, py, pz, nx, ny, nz);
     };
     for (const tg of this.targets) {
       let wpos, wn;
@@ -391,13 +428,13 @@ export class Sensors {
       const range = v.length();
       const maxR = tg.size * 85 * glareK;
       if (range > maxR || range < 0.8) continue;
-      if (!visible(v.x / range, v.y / range, v.z / range, range, tg.kind !== 'cargo')) continue;
       const fx = v.dot(cam.fwd), rx = v.dot(cam.right), uy = v.dot(cam.up);
       if (fx <= 0) continue;
       const ax = Math.atan2(rx, fx), ay = Math.atan2(uy, fx);
       if (Math.abs(ax) > hf || Math.abs(ay) > vf) continue;
       const facing = -wn.dot(v) / range;
       if (facing < 0.25) continue; // too oblique to decode
+      if (!visible(v.x / range, v.y / range, v.z / range, range, tg.kind !== 'cargo', wpos.x, wpos.y, wpos.z, wn.x, wn.y, wn.z)) continue;
       // line of sight
       const dir = v.clone().divideScalar(range);
       const hit = this._castRay(cam.pos, dir, range - 0.05);
@@ -420,12 +457,12 @@ export class Sensors {
       v.set(r.x, r.top, r.z).sub(cam.pos);
       const range = v.length();
       if (range > C.range * (this.camRangeK ?? 1) * glareK) continue; // camRangeK < 1: dusty window (health.js 'cdust')
-      if (!visible(v.x / range, v.y / range, v.z / range, range, false)) continue;
       const fx = v.dot(cam.fwd), rx = v.dot(cam.right), uy = v.dot(cam.up);
       if (fx <= 0) continue;
       const ax = Math.atan2(rx, fx), ay = Math.atan2(uy, fx);
       if (Math.abs(ax) > hf || Math.abs(ay) > vf) continue;
       if (r.d / range < 0.012) continue;
+      if (!visible(v.x / range, v.y / range, v.z / range, range, false, r.x, r.top, r.z, 0, 1, 0)) continue;
       // Line-of-sight occlusion raycast (do not detect boulders hidden behind terrain rims, walls, or other obstacles)
       const dir = v.clone().divideScalar(range);
       const hit = this._castRay(cam.pos, dir, range);
@@ -518,7 +555,9 @@ export class Sensors {
         // relative yaw: the camera sees the ring as an ellipse, whose aspect / orientation gives its tilt
         // (+ = turn left to square the module axis onto the port axis; 0.03 deg noise, ASSUMED)
         const into = new THREE.Vector3(-bestP.nx, 0, -bestP.nz).applyQuaternion(q.clone().invert());
-        res.ring = { port: bestP, along: rel.x, lateral: rel.z + 0.003 * gauss(), vertical: rel.y + 0.003 * gauss(), yaw: Math.atan2(-into.z, into.x) + 0.0005 * gauss() };
+        res.ring = { port: bestP, along: rel.x, lateral: rel.z + 0.003 * gauss(), vertical: rel.y + 0.003 * gauss(), yaw: Math.atan2(-into.z, into.x) + 0.0005 * gauss(),
+                    // relative pitch (+ = module nose up), same ellipse measurement and 0.03 deg noise as yaw; the port normal is horizontal
+                    pitch: -Math.atan2(into.y, Math.hypot(into.x, into.z)) + 0.0005 * gauss() };
       }
     }
     return res;

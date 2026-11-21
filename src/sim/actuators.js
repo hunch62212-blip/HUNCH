@@ -55,7 +55,10 @@ export class DCMotor {
     this.thermal = spec.Rth != null && spec.Cth != null;
     this.Rth = spec.Rth; this.Cth = spec.Cth; this.Tmax = spec.Tmax ?? Infinity;
     this.Tamb = opts.Tamb ?? 20;
-    this.T_w = this.Tamb;
+    // opts.mech: a MechNode (the gearbox / housing). With it the winding sheds heat into that node, which radiates to
+    // the lunar sky and regolith and cold-soaks; without it, the old fixed Tamb sink (bench / prototype in air).
+    this.mech = opts.mech ?? null;
+    this.T_w = this.mech ? this.mech.T : this.Tamb;
     this.wEps = 0.005 * w0;                             // below this |omega| the Coulomb loss becomes stiction
     this.E_el = 0; this.E_mech = 0;                    // integrated energies (J), for sanity checks
     this.last = { tau: 0, I: 0, P_el: 0, T_w: this.T_w };
@@ -68,6 +71,12 @@ export class DCMotor {
     if (s.TsV) mT = interp(s.TsV, Vbus) / (this.Ts * Vbus / this.Vnom);
     if (s.w0V) mW = interp(s.w0V, Vbus) / (this.w0 * Vbus / this.Vnom);
     return [mT, mW];
+  }
+  // winding node: I^2 R in, conduction Rth out to the housing (MechNode) or the fixed ambient
+  _heat(I, h) {
+    const Ta = this.mech ? this.mech.T : this.Tamb, qOut = (this.T_w - Ta) / this.Rth;
+    this.T_w += ((I * I * this.R - qOut) / this.Cth) * h;
+    if (this.mech) this.mech.qInJ += qOut * h;
   }
   derate() { return this.thermal ? clamp(1 - (this.T_w - this.Tmax) / T_DERATE_SPAN, 0, 1) : 1; }
 
@@ -97,10 +106,7 @@ export class DCMotor {
 
   _finish(tau, I, Praw, omega, dt) {
     const P_el = Praw < 0 ? Praw * this.regen : Praw;    // regen clipped (prototype) or partially recovered
-    if (this.thermal) {
-      const dT = (I * I * this.R - (this.T_w - this.Tamb) / this.Rth) / this.Cth;
-      this.T_w += dT * dt;
-    }
+    if (this.thermal) this._heat(I, dt);
     const P_mech = tau * omega;
     this.E_el += P_el * dt; this.E_mech += P_mech * dt;
     const gearOver = Math.abs(tau) > this.gearLimitNm;
@@ -134,7 +140,7 @@ export class Servo extends DCMotor {
 
   reset(q = 0) {
     this.thG = q; this.wG = 0; this.integ = 0; this.ref = q; this.refV = 0;
-    this.braked = false; this.still = 0; this.brakeSlip = false; this.T_w = this.Tamb;
+    this.braked = false; this.still = 0; this.brakeSlip = false; this.T_w = this.mech ? this.mech.T : this.Tamb;
     this.tau = 0;
   }
 
@@ -199,10 +205,34 @@ export class Servo extends DCMotor {
     // semi-implicit Euler on the gear stage
     this.wG += (m.tau - tauT) / this.Jg * h;
     this.thG += this.wG * h;
-    if (this.thermal) this.T_w += ((I * I * this.R - (this.T_w - this.Tamb) / this.Rth) / this.Cth) * h;
+    if (this.thermal) this._heat(I, h);
     const Praw = u * Vbus * I, P_el = Praw < 0 ? Praw * this.regen : Praw;
     this.E_el += P_el * h; this.E_mech += m.tau * this.wG * h;
     return { tau: tauT, I, P_el, P_mech: m.tau * this.wG, sat, u };
+  }
+}
+
+// Exposed-mechanism thermal node (gearbox / latch / roller-screw housing) on the lunar surface. Pure, no globals.
+//   C dT/dt = Q_in(winding) + alphaA*S*sunlit*cosI + heater - epsA*sigma*(T^4 - Tsink^4)
+// The thermostat runs the film heater below heaterOnC (off heaterHystK above); `locked` is true below lockC (grease
+// too stiff to move the joint: the project's -65 C PFPE limit). spec: MECH.joint | .latch | .strut (lunarParams.js).
+const SIGMA = 5.670e-8, K0 = 273.15;
+export class MechNode {
+  constructor(spec, lockC = -65) {
+    this.C = spec.C; this.epsA = spec.epsA; this.alphaA = spec.alphaA ?? 0;
+    this.heaterW = spec.heaterW ?? 0; this.onC = spec.heaterOnC ?? -45; this.hyst = spec.heaterHystK ?? 5;
+    this.lockC = lockC; this.T = spec.T0 ?? 20; this.qInJ = 0; this.heaterOn = false; this.heatW = 0;
+  }
+  get locked() { return this.T < this.lockC; }
+  // env: { sinkK (effective radiative sink, K), solarWm2 (S x sunlit x mean cos incidence), heaterOK (bus up) }
+  step(dt, env = {}) {
+    const sinkK = env.sinkK ?? 60, heaterOK = env.heaterOK !== false;
+    this.heaterOn = heaterOK && (this.T < this.onC || (this.heaterOn && this.T < this.onC + this.hyst));
+    this.heatW = this.heaterOn ? this.heaterW : 0;
+    const qIn = dt > 0 ? this.qInJ / dt : 0; this.qInJ = 0;
+    const rad = this.epsA * SIGMA * ((this.T + K0) ** 4 - sinkK ** 4);
+    this.T += dt * (qIn + this.alphaA * (env.solarWm2 || 0) + this.heatW - rad) / this.C;
+    return this.T;
   }
 }
 

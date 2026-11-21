@@ -1,7 +1,8 @@
 // Operator HUD: telemetry, SLAM map, camera feed overlay, missions, faults, console, E-STOP.
-import { ROVER, WORLD, MOON, K, FAILURES } from '../sim/config.js';
+import { ROVER, WORLD, MOON, K, FAILURES, ARM, CARGO_TYPES } from '../sim/config.js';
 import { CLS, RES, TILE } from '../sim/slam.js';
-import { runCommand } from '../sim/commands.js';
+import { runCommand, requestEstop } from '../sim/commands.js';
+import { DelayLine } from '../sim/commsLink.js';
 import { PRIORITY } from '../sim/autonomy.js';
 import P1 from '../sim/lunar_logistics_manifest.json';
 import { MODE, BAYS, LRUS, bayOf, unitLabel } from '../sim/health.js';
@@ -145,6 +146,18 @@ export class HUD {
         <span class="k" title="Smart rpm limit and the reason for it">Smart rpm</span><span class="v" id="vLim">0</span>
       </div>
       <table class="wheels"><thead><tr><th>whl</th><th>mtr rpm</th><th>T Nm</th><th>slip</th><th>sink mm</th><th>load kN</th><th>°C</th></tr></thead><tbody id="wheelRows"></tbody></table>
+      <div class="sect" id="armSect"><div class="t">Arms · ACM handling</div>
+        <div class="kv small">
+          <span class="k">Mode</span><span class="v" id="aMode">—</span>
+          <span class="k">Deck latch</span><span class="v" id="aDeck">—</span>
+          <span class="k">Payload</span><span class="v" id="aLoad">none</span>
+          <span class="k" title="ASME B30.5 style: lifts are refused above 0.75">Tip ratio</span><span class="v" id="aTip">—</span>
+          <span class="k" title="available joint torque / required, at the current pose">Lift margin</span><span class="v" id="aMargin">—</span>
+          <span class="k">Faults</span><span class="v" id="aFault">none</span>
+        </div>
+        <table class="wheels" id="armTable"><thead><tr><th style="text-align:left">joint</th><th>angle °</th><th title="joint torque as % of servo stall">τ % stall</th><th>I A</th><th>T °C</th></tr></thead><tbody id="armRows"></tbody></table>
+        <div class="kv small" style="margin-top:4px"><span class="k">Hook · gate · load (port)</span><span class="v" id="aHookP">—</span><span class="k">Hook · gate · load (stbd)</span><span class="v" id="aHookS">—</span></div>
+      </div>
       <div class="sect"><div class="t">Live trends (last 5 min)</div><canvas id="trend" width="560" height="200" style="width:280px;height:100px;display:block"></canvas>
         <div class="btnrow" style="margin-top:4px"><button class="btn" id="csvBtn">export telemetry CSV</button><button class="btn" id="repBtn">mission report</button></div></div>
       <div class="sect"><div class="t">Rocker-bogie wheel stations (height above axle mm)</div><div class="mono small" id="bogieRow"></div></div>
@@ -248,7 +261,7 @@ export class HUD {
       const p = h.parentElement; p.classList.toggle('collapsed');
       if (phone.matches && !p.classList.contains('collapsed') && side.includes(p)) side.forEach((q) => { if (q !== p) q.classList.add('collapsed'); });
     }));
-    $('#estop').addEventListener('click', () => sim.emergencyStop('HUD button'));
+    $('#estop').addEventListener('click', () => requestEstop(sim, 'HUD button'));
     $('#resetBtn').addEventListener('click', () => sim.resetEstop());
     $('#startBtn').addEventListener('click', () => sim.startUp());
     $('#helpBtn').addEventListener('click', () => this.toggleHelp());
@@ -314,7 +327,7 @@ export class HUD {
       if (e.key === 'Enter') { const v = cmd.value; cmd.value = ''; if (v.trim()) { this.history.unshift(v); this.hIdx = -1; this.exec(v); } }
       else if (e.key === 'ArrowUp') { this.hIdx = Math.min(this.history.length - 1, this.hIdx + 1); cmd.value = this.history[this.hIdx] || ''; e.preventDefault(); }
       else if (e.key === 'ArrowDown') { this.hIdx = Math.max(-1, this.hIdx - 1); cmd.value = this.hIdx >= 0 ? this.history[this.hIdx] : ''; e.preventDefault(); }
-      else if (e.key === 'Escape') { if (cmd.value) cmd.value = ''; else { cmd.blur(); sim.emergencyStop('keyboard (Esc)'); } }
+      else if (e.key === 'Escape') { if (cmd.value) cmd.value = ''; else { cmd.blur(); requestEstop(this.sim, 'keyboard (Esc)'); } }
     });
     cmd.addEventListener('keyup', (e) => e.stopPropagation());
   }
@@ -368,8 +381,9 @@ export class HUD {
     $('#eRpmWhy').textContent = `${R.rpm.proto.toFixed(0)} rpm · ${R.rpm.why}`;
     { const rails = sim.warp.active && sim.timeScale >= sim.warp.minScale; // say why the actual rate is what it is
       $('#eWarp').textContent = sim.paused ? 'PAUSED' : `${sim.timeScale}×${sim.timeScale > 1 ? ` (actual ${sim.actualRate >= 10 ? sim.actualRate.toFixed(0) : sim.actualRate.toFixed(1)}×${rails ? ', transit warp' : sim.lagging ? ', CPU-limited' : ''})` : ''}`; }
-    $('#eSoc').textContent = `${fmt(R.power.soc * 100, 0)} %  ·  ${fmt(R.power.wh / 1000, 0)} kWh`;
-    const sb = $('#eSocBar'); sb.style.width = R.power.soc * 100 + '%'; sb.style.background = R.power.soc < A.reserveSoc ? 'var(--err)' : R.power.soc < 0.4 ? 'var(--warn)' : 'var(--ok)';
+    const seen = this.seen || R.power;
+    $('#eSoc').textContent = `${fmt(seen.soc * 100, 0)} %  ·  ${fmt(seen.wh / 1000, 0)} kWh`;
+    const sb = $('#eSocBar'); sb.style.width = seen.soc * 100 + '%'; sb.style.background = seen.soc < A.reserveSoc ? 'var(--err)' : seen.soc < 0.4 ? 'var(--warn)' : 'var(--ok)';
     const loadW = R.power.loadW || 0;
     $('#ePow').textContent = `${fmt(loadW / 1000, 2)} kW`;
     // endurance: energy above the reserve at the present electrical load (drive + hotel)
@@ -478,28 +492,56 @@ export class HUD {
 
   camRect() { const r = $('#camFrame').getBoundingClientRect(); return $('#camPanel').classList.contains('collapsed') || getComputedStyle($('#camPanel')).display === 'none' ? null : r; }
 
+  // Arms panel: everything from rover.telemetry().arm (arm.js telemetry()); lift margin is asked of the arm model at the current pose
+  updateArm(R) {
+    const A = R.arm; if (!A || !$('#armRows')) return;
+    const T = A.telemetry(), cls = (el, c) => { el.className = 'v' + (c ? ' ' + c : ''); };
+    $('#aMode').textContent = `${T.mode}${T.plan ? ' · ' + T.plan : ''}${T.status && T.status !== T.mode ? ' · ' + T.status : ''}`;
+    $('#aDeck').textContent = T.deckLatch;
+    const pl = T.payload;
+    $('#aLoad').textContent = pl ? `${fmt(pl.mass, 0)} kg · ${pl.state} · hooks carry ${fmt(pl.loadFrac * 100, 0)} %` : 'none';
+    const lim = ARM.tipRatioMax;
+    $('#aTip').textContent = `${fmt(T.tipRatio, 2)} / ${fmt(lim, 2)} limit`; cls($('#aTip'), T.tipRatio > lim ? 'err' : T.tipRatio > 0.85 * lim ? 'warn' : '');
+    let lm = null; try { lm = A.liftMargin(pl ? pl.mass : CARGO_TYPES.acm.mass, A.arms[0].q).margin; } catch (e) { lm = null; }
+    $('#aMargin').textContent = lm == null ? '—' : fmt(lm, 2); cls($('#aMargin'), lm != null && lm < 1 ? 'err' : lm != null && lm < 1.3 ? 'warn' : '');
+    $('#aFault').textContent = T.faults.length ? T.faults.join(', ') : 'none'; cls($('#aFault'), T.faults.length ? 'err' : '');
+    const nm = ['port', 'stbd'], pc = (v) => (v > 0.9 ? 'err' : v > 0.6 ? 'warn' : '');
+    const jn = ['S', 'E', 'W'];
+    $('#armRows').innerHTML = [0, 1].flatMap((i) => [0, 1, 2].map((j) => `<tr><td style="text-align:left">${nm[i]} ${jn[j]}</td><td>${fmt(T.qDeg[i][j], 1)}</td><td class="${pc(T.pctStall[i][j])}">${fmt(T.pctStall[i][j] * 100, 0)}</td><td>${fmt(T.currentA[i][j], 1)}</td><td>${fmt(T.tempC[i][j], 0)}</td></tr>`)).join('');
+    $('#aHookP').textContent = `${T.latch[0]} gate · ${fmt(T.hookLoad[0] / 1000, 1)} kN`;
+    $('#aHookS').textContent = `${T.latch[1]} gate · ${fmt(T.hookLoad[1] / 1000, 1)} kN`;
+  }
+
   update(dt) {
     this.inst.update(this.sim.rover, dt, !!this.ui.overlays.eng);
     this.therm.update(dt);
     { const [txt, cls] = this.therm.status(), e = $('#pTherm'); if (e.textContent !== txt) e.textContent = txt; e.className = 'pill eng ' + cls; }
     this._t -= dt; if (this._t > 0) return; this._t = 0.1;
-    const sim = this.sim, R = sim.rover, A = sim.autonomy, S = sim.sensors, tl = R.telemetry();
+    const sim = this.sim, R = sim.rover, A = sim.autonomy, S = sim.sensors;
+    // downlink delay (lunar audit B4): over a delayed link the operator sees telemetry one light time old. A 10 Hz ring
+    // buffer of snapshots is read sim.comms.delayS back; the drive state, speed, attitude and SoC shown come from it.
+    const tlNow = R.telemetry();
+    (this.tlm ||= new DelayLine(1024)).push(sim.time, { tl: { ...tlNow, pose: { ...tlNow.pose } }, soc: R.power.soc, wh: R.power.wh, estop: R.estop, powered: R.powered });
+    const dl = sim.comms.delayS > 0, snap = dl ? this.tlm.at(sim.time - sim.comms.delayS) : null, tl = snap ? snap.tl : tlNow;
+    const seen = snap || { soc: R.power.soc, wh: R.power.wh, estop: R.estop, powered: R.powered };
+    this.seen = seen;
     $('#camPanel').style.top = ($('#mapPanel').getBoundingClientRect().bottom + 8) + 'px';
     // show the speed actually achieved: above ~5x the physics is CPU-bound, and 50x relies on transit warp
     const act = sim.actualRate, warpOn = sim.warp.active && sim.timeScale >= sim.warp.minScale;
     $('#clock').textContent = `MET ${fmtT(sim.time)}${sim.paused ? ' ❚❚' : ''} ${sim.timeScale !== 1 ? '· ' + sim.timeScale + '×' : ''}${sim.timeScale > 1 && !sim.paused ? ` (actual ${act >= 10 ? act.toFixed(0) : act.toFixed(1)}×${warpOn ? ', transit warp' : sim.lagging ? ', CPU-limited' : ''})` : ''}${S.decimated ? ' · sensors decimated' : ''}`;
     const pill = (id, txt, cls) => { const e = $(id); e.textContent = txt; e.className = (e.classList.contains('eng') ? 'pill eng ' : 'pill ') + cls; }; // keeps the layer marker
     pill('#pMode', A.mode === 'AUTO' ? 'AUTO' : A.paused && A.gen ? 'OVERRIDE' : 'MANUAL', A.mode === 'AUTO' ? 'info' : A.paused && A.gen ? 'warn' : '');
-    pill('#pDrive', R.estop ? 'E-STOP' : sim.startup ? 'SELF-TEST' : R.powered ? 'DRIVE ARMED' : 'DISARMED', R.estop ? 'err' : R.powered ? 'ok' : 'warn');
+    pill('#pDrive', seen.estop ? 'E-STOP' : sim.startup ? 'SELF-TEST' : seen.powered ? 'DRIVE ARMED' : 'DISARMED', seen.estop ? 'err' : seen.powered ? 'ok' : 'warn');
     if (this.ai) pill('#pAI', this.ai.busy ? 'AI THINKING' : this.ai.online ? 'AI ONLINE' : this.ai.online === false ? 'AI OFFLINE' : 'AI', this.ai.busy ? 'info' : this.ai.online ? 'ok' : this.ai.online === false ? 'warn' : '');
     else $('#pAI').style.display = 'none';
-    pill('#pComms', A.faults.comms ? 'COMMS LOS' : 'COMMS OK', A.faults.comms ? 'err' : 'ok');
+    { const pend = sim.comms.queue.some((e) => e.estop);
+      pill('#pComms', A.faults.comms ? 'COMMS LOS' : pend ? 'E-STOP IN FLIGHT' : dl ? `COMMS ${sim.comms.mode.toUpperCase()} · TLM −${sim.comms.delayS.toFixed(1)} s` : 'COMMS OK', A.faults.comms ? 'err' : pend ? 'warn' : dl ? 'info' : 'ok'); }
     pill('#pLidar', S.faults.lidar ? 'LIDAR FAIL' : S.lidarOn ? 'LIDAR' : 'LIDAR OFF', S.faults.lidar ? 'err' : S.lidarOn ? 'ok' : 'warn');
     pill('#pCam', S.faults.camera ? 'CAM FAIL' : S.cameraOn ? 'CAM' : 'CAM OFF', S.faults.camera ? 'err' : S.cameraOn ? 'ok' : 'warn');
     pill('#pSteer', `${R.rpm.proto.toFixed(0)} RPM ${R.rpm.tier.toUpperCase()}`, R.rpm.tier === 'turbo' ? 'warn' : R.rpm.tier === 'crawl' ? 'info' : '');
-    $('#estop').classList.toggle('latched', R.estop);
+    $('#estop').classList.toggle('latched', seen.estop);
     $('#resetBtn').disabled = !R.estop; $('#startBtn').disabled = R.estop || R.powered || !!sim.startup;
-    $('#estopBanner').style.display = R.estop ? 'block' : 'none';
+    $('#estopBanner').style.display = seen.estop ? 'block' : 'none';
     $('#overrideBanner').style.display = A.paused && A.gen && !R.estop ? 'block' : 'none';
     this.syncTimeUi();
     this.root.querySelectorAll('[data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === this.ui.view));
@@ -514,8 +556,8 @@ export class HUD {
     $('#vAtt').textContent = `${fmt(tl.roll * 57.3, 1)}° / ${fmt(tl.pitch * 57.3, 1)}°`;
     $('#vMargin').textContent = `${fmt(tl.margin, 1)}°`;
     const mb = $('#bMargin'); mb.style.width = Math.max(0, Math.min(100, tl.margin / 50 * 100)) + '%'; mb.style.background = tl.margin < 15 ? 'var(--err)' : tl.margin < 25 ? 'var(--warn)' : 'var(--ok)';
-    $('#vSoc').textContent = `${fmt(R.power.soc * 100, 1)} %  (${fmt(R.power.wh / 1000, 1)} kWh, ${fmt(R.power.voltage, 0)} V)`;
-    const sb = $('#bSoc'); sb.style.width = R.power.soc * 100 + '%'; sb.style.background = R.power.soc < A.reserveSoc ? 'var(--err)' : R.power.soc < 0.4 ? 'var(--warn)' : 'var(--ok)';
+    $('#vSoc').textContent = `${fmt(seen.soc * 100, 1)} %  (${fmt(seen.wh / 1000, 1)} kWh, ${fmt(R.power.voltage, 0)} V)`;
+    const sb = $('#bSoc'); sb.style.width = seen.soc * 100 + '%'; sb.style.background = seen.soc < A.reserveSoc ? 'var(--err)' : seen.soc < 0.4 ? 'var(--warn)' : 'var(--ok)';
     $('#vPow').textContent = `${fmt((R.power.dockW || 0) / 1000, 1)} / ${fmt(R.power.loadW / 1000, 2)} kW`;
     { const D = sim.powerDock; $('#vDock').textContent = `bank ${fmt(D.bankV, 1)} V · ${fmt(D.bankAhNow, 0)}/${D.bankAhRated} Ah (${fmt(D.soc * 100, 0)}%) · ${fmt(D.bankA, 1)} A · sun ${fmt(D.solarW, 0)} W · ${fmt(D.Tbank, 0)} °C · ${D.status}`;
       $('#vDockChg').textContent = D.connected ? `${fmt(D.chargeA, 2)} A @ ${fmt(D.packV, 1)} V = ${fmt(D.chargeW, 1)} W · pack ${fmt(R.power.soc * 10, 1)} Ah · link ${fmt(D.linkEff * 100, 0)}% · ≙ ${fmt((R.power.dockW || 0) / 1000, 0)} kW` : 'not coupled'; }
@@ -526,7 +568,9 @@ export class HUD {
     $('#vClamp').textContent = `${R.lift.clamp} ${R.lift.clamp === 'closing' || R.lift.clamp === 'opening' ? (R.lift.clampT * 100).toFixed(0) + '%' : ''}`;
     $('#vLim').textContent = `${R.rpm.proto.toFixed(0)} rpm ${R.rpm.tier} · ${R.rpm.why} · cap ${R.speedCap().toFixed(1)} m/s`;
     const names = ['FL', 'FR', 'ML', 'MR', 'RL', 'RR']; const kS = Math.sqrt(K);
-    $('#wheelRows').innerHTML = R.wheels.map((w, i) => `<tr><td class="${w.fault ? 'f' : ''}">${i + 1} ${names[i]}</td><td>${fmt(w.omega * 60 / (2 * Math.PI) * kS, 0)}</td><td>${fmt(w.torque, 0)}</td><td>${fmt(w.slip * 100, 0)}%</td><td>${fmt(w.sink * 1000, 0)}</td><td>${fmt(w.load / 1000, 2)}</td><td>${fmt(w.temp, 0)}</td></tr>`).join('');
+    // ML / MR (driven: false) are passive idlers: no motor, so torque shows IDLE and the row is dimmed
+    $('#wheelRows').innerHTML = R.wheels.map((w, i) => `<tr class="${w.driven === false ? 'idle' : ''}"><td class="${w.fault ? 'f' : ''}">${i + 1} ${names[i]}${w.driven === false ? ' <small>idler</small>' : ''}</td><td>${fmt(w.omega * 60 / (2 * Math.PI) * kS, 0)}</td><td>${w.driven === false ? 'IDLE' : fmt(w.torque, 0)}</td><td>${fmt(w.slip * 100, 0)}%</td><td>${fmt(w.sink * 1000, 0)}</td><td>${fmt(w.load / 1000, 2)}</td><td>${fmt(w.temp, 0)}</td></tr>`).join('');
+    this.updateArm(R);
     $('#bogieRow').textContent = R.bogies.map((b) => `${b.name} ${((ROVER.bogie.Lnom - b.L) * 1000).toFixed(0)}`).join('   ');
     const contact = R.wheels.filter((w) => w.contact);
     const avgSink = contact.reduce((a, w) => a + w.sink, 0) / Math.max(1, contact.length), avgSlip = contact.reduce((a, w) => a + Math.abs(w.slip), 0) / Math.max(1, contact.length);

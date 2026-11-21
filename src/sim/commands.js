@@ -2,12 +2,29 @@
 import { ROVER, WORLD, K, FAILURES } from './config.js';
 import { PRIORITY } from './autonomy.js';
 import { MODES } from './health.js';
+import { COMMS } from './lunarParams.js';
+
+// Operator E-STOP from the HUD button, Esc or the gamepad (lunar audit B4). The habitat crew's stop is immediate; any
+// other link (Earth, or a set delay) carries it like every other command: it reaches the rover one light time late.
+// Repeated presses while one is in flight (a held gamepad button fires every frame) do not stack up.
+export function linkIsLocal(sim) { return sim.comms.mode === 'local' || !(sim.comms.delayS > 0); }
+export function requestEstop(sim, source = 'operator') {
+  const C = sim.comms;
+  if (linkIsLocal(sim)) { sim.emergencyStop(source); return { queued: false }; }
+  if (C.queue.some((e) => e.estop)) return { queued: true, dup: true };
+  C.queue.push({ t: sim.time + C.delayS, estop: true, fn: () => sim.emergencyStop(`${source}, uplinked`) });
+  sim.log(`E-STOP sent (${source}): reaches the rover in ${C.delayS.toFixed(1)} s`, 'warn');
+  return { queued: true };
+}
 
 export const HELP = [
   ['help [topic]', 'this list'],
   ['estop | reset | start', 'emergency stop; release latch; power-on self-test (all 3 needed to restart)'],
   ['status', 'one-line vehicle status'],
   ['mission <1-6|cycle> [A|B|C]', 'run a NASA mission (A = 40-ft module CM-40A, B = 20-ft container CC-20B, C = pod rack CP-36C)'],
+  ['acm pick [id] | acm place <x> <z> | acm spawn [kg]', 'two-arm ACM handling: autonomous pick-up onto the deck | set it down at a point | add an ACM 9 m ahead'],
+  ['acm list | acm drive [m]', 'list ACMs and their state (acm demo adds two on the pad) | drive away with the ACM on the deck (arm speed caps)'],
+  ['arm stow | arm pose <name> | arm status', 'arm presets (stow preGrasp grasp apex prePlace place) | arm telemetry (latches, hook loads, tip ratio)'],
   ['abort | resume', 'abort mission | resume after operator override'],
   ['goto <x> <z> | goto <pad|hab|staging|port1|port2|port3|A|B|C>', 'autonomous drive to a point / site'],
   ['speed <m/s>', 'autonomy cruise speed'],
@@ -23,8 +40,8 @@ export const HELP = [
   ['newmap', 'reload with a new random crater / boulder layout'],
   ['lidar on|off | lidar channels <n> | lidar res <n>', 'LiDAR power / resolution'],
   ['camera on|off', 'camera power'],
-  ['comms earth | comms local | comms delay <s>', 'operator link: Earth (1.3 s one-way delay) or habitat crew (no delay)'],
-  ['fault block|lidar|camera|comms|battery <%>|wheel <1-6>|shift|port <1|2>', 'Mission 10 fault injection'],
+  ['comms earth | comms local | comms delay <s> | comms auto on|off | comms los', `operator link: Earth (${COMMS.earthDelayS} s one-way delay, telemetry and E-STOP delayed too) or habitat crew (no delay); auto = raise COMMS LOS from mast line-of-sight`],
+  ['fault block|lidar|camera|comms|battery <%>|wheel <1-6, default 1>|shift|port <1|2>', 'Mission 10 fault injection'],
   ['fault list | fault <id> [unit]', 'hardware failure catalogue (mc 3, seize 5, bat 2, fc A, imu B, ldust, louver L, ...)'],
   ['failures on|off [realistic|100x|1000x|demo]', 'RANDOM FAILURE switch (off by default; demo = one every few minutes)'],
   ['health | procedure <id> | repair <id>|all|abort', 'FDIR alarms + redundancy, procedure card, field / dock repair'],
@@ -157,6 +174,44 @@ export function runCommand(sim, ui, line, _uplinked = false) {
     case 'stop': R.cmd.vx = R.cmd.vz = R.cmd.wz = 0; ui.manualHold = false; if (A.mode === 'AUTO') A.override(); say('Stopped', 'ok'); break;
     case 'steer': say('AEGIS is skid-steer (fixed wheels): steering is a yaw rate; no Ackermann or crab modes', 'info'); break;
     case 'brake': R.brake = (a[0] || 'on').toLowerCase() !== 'off'; say(`Parking brake ${R.brake ? 'SET' : 'released'}`, 'ok'); break;
+    case 'acm': {
+      const k = (a[0] || 'list').toLowerCase(), L = sim.acm.list();
+      const byId = (v) => { if (v == null) return L.find((c) => c.mode === 'GROUND') || L[0]; const n = String(v).toUpperCase().replace(/^ACM/, ''); return L.find((c) => c.id.toUpperCase() === 'ACM' + n || c.id.toUpperCase() === String(v).toUpperCase()); };
+      if (k === 'list') { if (!L.length) say('no ACMs in the world', 'info'); for (const c of L) { const t = c.body.translation(); say(`${c.id}  ${c.T.mass} kg  ${c.mode}  at (${t.x.toFixed(1)}, ${t.z.toFixed(1)})`, 'info'); } break; }
+      if (k === 'pick') {
+        const c = byId(a[1]); if (!c) { say('no such ACM (try: acm list)', 'warn'); break; }
+        if (A.gen) A.abort('new ACM pick');
+        A.start(`ACM pick ${c.id}`, A.missionPickupArm(c)); break;
+      }
+      if (k === 'place') {
+        if (a.length < 3 || !Number.isFinite(parseFloat(a[1])) || !Number.isFinite(parseFloat(a[2]))) { say('usage: acm place <x> <z>', 'warn'); break; }
+        if (A.gen) A.abort('new ACM place');
+        A.start('ACM place', A.missionPlaceArm(num(a[1]), num(a[2]))); break;
+      }
+      if (k === 'drive') { if (A.gen) A.abort('new drive'); A.start('ACM drive away', A.driveAway(num(a[1], 20))); break; }
+      if (k === 'demo') { const n = sim.acm.spawnDemo(); say(`${n.map((c) => c.id).join(', ')} placed on the pad apron`, 'ok'); break; }
+      if (k === 'spawn') {
+        const p = R.pose(), d = ROVER.frame.halfLen + 8, m = Math.max(200, Math.min(12000, num(a[1], 2400)));
+        const c = sim.acm.spawn(p.x + Math.cos(p.yaw) * d, p.z - Math.sin(p.yaw) * d, p.yaw, { mass: m });
+        say(`${c.id} (${m} kg) placed ${d.toFixed(0)} m ahead`, 'ok'); break;
+      }
+      say('usage: acm pick [id] | acm place <x> <z> | acm spawn [kg] | acm demo | acm list | acm drive [m]', 'warn'); break;
+    }
+    case 'arm': {
+      const k = (a[0] || 'status').toLowerCase(), arm = R.arm;
+      if (k === 'status') {
+        const t = arm.telemetry(), f = (v) => v.map((x) => x.toFixed(0)).join('/');
+        say(`arm ${t.mode}${t.cradled ? ' (cradled)' : ''} ${t.status || ''} | q1 ${f(t.qDeg[0])} deg, q2 ${f(t.qDeg[1])} deg | latch ${t.latch.join('/')} deck ${t.deckLatch} | tip ratio ${arm.tip.ratio.toFixed(2)} | ${t.payload ? `payload ${t.payload.mass} kg ${t.payload.state} ${(t.payload.loadFrac * 100).toFixed(0)}% on hooks` : 'no payload'}${arm.faults.size ? ' | FAULT ' + [...arm.faults].join(',') : ''}`, arm.faults.size ? 'warn' : 'info'); break;
+      }
+      if (A.gen && A.mode === 'AUTO') { say('Refused: an autonomous mission is running (abort first)', 'warn'); break; }
+      if (k === 'stow' || k === 'pose') {
+        const name = k === 'stow' ? 'stow' : a[1];
+        if (!name || !arm.poses[name]) { say(`usage: arm pose <${Object.keys(arm.poses).join('|')}>`, 'warn'); break; }
+        const r = arm.moveTo(name); say(r.ok === false ? `Refused: ${r.reason}` : `Arm moving to ${name}`, r.ok === false ? 'warn' : 'ok'); break;
+      }
+      if (k === 'clear') { arm.clearFaults(); say('Arm faults cleared', 'ok'); break; }
+      say('usage: arm stow | arm pose <name> | arm status | arm clear', 'warn'); break;
+    }
     case 'lift': {
       const k = (a[0] || '').toLowerCase();
       if (k === 'up' || k === 'carry') R.lift.target = ROVER.ride.carry; else if (k === 'down' || k === 'kneel') R.lift.target = ROVER.ride.kneel; else if (k === 'drive') R.lift.target = 0; else R.lift.target = num(a[0], R.lift.target);
@@ -196,7 +251,7 @@ export function runCommand(sim, ui, line, _uplinked = false) {
     case 'fault': {
       const k = (a[0] || '').toLowerCase();
       if (k === 'list' || !k) {
-        say('Fault catalogue (fault <id> [unit]): legacy block | lidar | camera | comms | battery <%> | wheel <1-6> | shift | port <1|2|3> | seal [hard]', 'info');
+        say('Fault catalogue (fault <id> [unit]): legacy block | lidar | camera | comms | battery <%> | wheel <1-6, default 1> | shift | port <1|2|3> | seal [hard]', 'info');
         for (const m of MODES) say(`  ${m.id.padEnd(8)} ${m.inst[0] == null ? '' : `[${m.inst.join('|')}] `}${m.name} (${m.sev}, ${m.fidelity})`, 'info');
         break;
       }
@@ -332,10 +387,12 @@ export function runCommand(sim, ui, line, _uplinked = false) {
     }
     case 'comms': {
       const C = sim.comms, k = (a[0] || '').toLowerCase();
-      if (k === 'earth') { C.mode = 'earth'; C.delayS = C.earthDelayS; }
+      if (k === 'earth') { C.earthDelayS = Math.max(C.earthDelayS || 0, COMMS.earthDelayS); C.mode = 'earth'; C.delayS = C.earthDelayS; } // >= 2.6 s: light time + ground segment
+      else if (k === 'auto') { C.autoLos = (a[1] || 'on').toLowerCase() !== 'off'; say(`Automatic COMMS LOS from mast line-of-sight ${C.autoLos ? 'ON' : 'OFF'}`, 'ok'); break; }
+      else if (k === 'los') { const r = sim.losMonitor?.check(); say(r ? `Line of sight: habitat ${r.hab ? 'clear' : 'BLOCKED'}, Earth ${r.earth ? 'clear' : 'BLOCKED'} -> link ${r.ok ? 'OK' : 'LOS'}` : 'no line-of-sight monitor in this session', r && !r.ok ? 'warn' : 'info'); break; }
       else if (k === 'local') { C.mode = 'local'; C.delayS = 0; }
       else if (k === 'delay') { C.delayS = Math.max(0, num(a[1], 0)); C.mode = C.delayS > 0 ? 'remote' : 'local'; }
-      say(`Operator link: ${C.mode}, one-way delay ${C.delayS.toFixed(1)} s${C.delayS > 0 ? ` (commands and E-STOP arrive late; manual drive capped at ${C.earthDriveCap} m/s)` : ' (crew in the habitat)'}`, 'ok');
+      say(`Operator link: ${C.mode}, one-way delay ${C.delayS.toFixed(1)} s${C.delayS > 0 ? ` (commands and E-STOP arrive late, telemetry and the onboard view are ${C.delayS.toFixed(1)} s old; manual drive capped at ${C.earthDriveCap} m/s)` : ' (crew in the habitat)'}`, 'ok');
       break;
     }
     case 'sun': sim.setSun(num(a[0], sim.sunAz), num(a[1], sim.sunEl)); say(`Sun az ${sim.sunAz} el ${sim.sunEl}`, 'ok'); break;

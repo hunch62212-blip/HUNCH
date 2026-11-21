@@ -34,7 +34,7 @@ check('every value numeric, expression present', bad.length === 0, bad.join(',')
 const need = ['bed_max', 'bed_z', 'clr_slip', 'clr_snug', 'clr_press', 'rho_petg', 'infill_eff', 'srv_big_L', 'srv_big_W', 'srv_big_H',
   'srv_std_H', 'srv_mic_H', 'arm_z', 'arm_plate_t', 'arm_plate_gap', 'arm_L1', 'arm_L2', 'arm_sh_x', 'hook_off', 'hook_cheek_ang',
   'trun_d', 'trun_len', 'acm_L', 'acm_W', 'acm_trun_y', 'acm_cg_y', 'acm_mass', 'dk_place_x', 'dk_latch_x', 'stow_x', 'stow_y', 'pick_x',
-  'sweep_x0', 'sweep_x1', 'sweep_halfW', 'sweep_top', 'ins_m3_d', 'ins_m3_depth'];
+  'sweep_x0', 'sweep_x1', 'sweep_halfW', 'sweep_top', 'ins_m3_d', 'ins_m3_depth', 'pi_cool_clear', 'ele_upper_y', 'ele_plate_t', 'ele_standoff_h', 'pi_H', 'ch_rail_y1'];
 const missing = need.filter((n) => !(n in P));
 check('required parameters present', missing.length === 0, missing.join(','));
 
@@ -48,3 +48,4 @@ within('FDM clearances ordered snug < slip', P.clr_slip - P.clr_snug, 0.01, 1, '
 within('bed 220 x 250 default', P.bed_max, 150, 400, ' mm');
 within('arm reach L1+L2 covers the ground pick at pick_x', Math.hypot(P.pick_x - P.arm_sh_x, 90 - 275), 0, P.arm_L1 + P.arm_L2, ' mm');
 within('place point inside sweep box', P.dk_place_x, P.sweep_x0, P.sweep_x1, ' mm');
+within('Pi 5 Active Cooler free air: deck underside - Pi top >= pi_cool_clear', P.ch_rail_y1 - (P.ele_upper_y + P.ele_plate_t + P.ele_standoff_h + P.pi_H), P.pi_cool_clear, 1e6, ' mm');

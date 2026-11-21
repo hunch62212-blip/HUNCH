@@ -1,9 +1,11 @@
 // Builds the Rapier physics world: terrain heightfield, boulders, lander, supply building,
 // docking vestibules, cargo saddles and the cargo bodies themselves.
 import * as THREE from 'three';
-import { MOON, WORLD, CARGO_TYPES, DOCK, GROUPS, groups } from './config.js';
-import { generateTerrain, toRapierHeights, heightAt } from './terrain.js';
+import { MOON, WORLD, CARGO_TYPES, DOCK, GROUPS, groups, REGOLITH as R, PHYS } from './config.js';
+import { generateTerrain, toRapierHeights, heightAt, soilAt } from './terrain.js';
 import { rockShapes, rockTransform } from './rockShapes.js';
+import { acmGeom, makeFeet } from './cargoContact.js';
+import { plateSinkage } from './terramechanics.js';
 
 const ALL = 0xffff;
 export const LANDER_SCALE = 2.6;
@@ -22,6 +24,10 @@ export const G_ROCK = groups(GROUPS.ROCK, MOVERS);
 export const G_STRUCT = groups(GROUPS.STRUCT, MOVERS);
 export const G_CARGO = groups(GROUPS.CARGO, ALL);
 export const G_CARGO_HELD = groups(32, ALL & ~GROUPS.ROVER);   // held cargo does not touch its own carrier
+// ACM (arm-handled cargo): its collider never meets TERRAIN (four custom regolith feet carry it, cargoContact.js);
+// everything else (rocks, structures, rover, other cargo) still does. G_ACM_ARM: held by the arms, touches all but the rover.
+export const G_ACM = groups(GROUPS.CARGO, ALL & ~GROUPS.TERRAIN);
+export const G_ACM_ARM = groups(GROUPS.CARGO, ALL & ~GROUPS.ROVER);
 export const G_ROVER = groups(GROUPS.ROVER, ALL & ~GROUPS.ROVER & ~32);
 // query filters
 export const Q_WHEEL = groups(GROUPS.ROVER, GROUPS.TERRAIN | GROUPS.ROCK | GROUPS.STRUCT | GROUPS.CARGO);
@@ -33,7 +39,10 @@ export function yawQuat(yaw) { return { x: 0, y: Math.sin(yaw / 2), z: 0, w: Mat
 export function buildWorld(RAPIER, seed = WORLD.seed) {
   const terrain = generateTerrain(seed);
   const world = new RAPIER.World({ x: 0, y: -MOON.g, z: 0 });
-  world.timestep = 1 / 120;
+  // single source of the integrator step: PHYS.dt (config.js). Sim.stepOnce advances sim.time by PHYS.dt per world.step(),
+  // so a mismatch would make the physics run at a different rate from the clock. Rapier stores it as float32.
+  world.timestep = PHYS.dt;
+  if (!(PHYS.dt > 0) || Math.abs(world.timestep - PHYS.dt) > 1e-6 * PHYS.dt) throw new Error(`world.timestep ${world.timestep} != PHYS.dt ${PHYS.dt}`);
   world.integrationParameters.numSolverIterations = 8;
   const eventQueue = new RAPIER.EventQueue(true);
 
@@ -251,6 +260,40 @@ export function buildWorld(RAPIER, seed = WORLD.seed) {
     return i;
   }
 
+  // --- ACM: arm-handled cargo module, dynamic body sitting on regolith (plan s5.5, s6.3). Not placed at build time:
+  // call spawnACM(x, z, yaw, opts) {mass, id, tag0, settled=true, drop=0 (m above the surface)}. The returned cargo
+  // entry is also pushed on `cargo` (type 'acm'); the caller registers colliderOwner and calls acmSoilStep each step.
+  let acmCount = 0;
+  function spawnACM(x, z, yaw = 0, opts = {}) {
+    const T0 = CARGO_TYPES.acm, mass = opts.mass ?? T0.mass, T = mass === T0.mass ? T0 : { ...T0, mass };
+    const G = acmGeom(T), feet = makeFeet(T);
+    const cs = Math.cos(yaw), sn = Math.sin(yaw);
+    // yaw about +Y (THREE): world = (x cos + z sin, -x sin + z cos)
+    const wp = (lx, lz) => ({ x: x + lx * cs + lz * sn, z: z - lx * sn + lz * cs });
+    const b = G.foot, A = b * b, Nf = mass * MOON.g / feet.length, p = Nf / A;
+    let sum = 0, zEq = 0;
+    for (const f of feet) { const q = wp(f.x, f.z), s = {}; soilAt(terrain, q.x, q.z, s);
+      const z = opts.settled === false ? 0 : plateSinkage(p, b, { n: R.n, kc: R.kc * s.k, kphi: R.kphi * s.k });
+      f.zp = z; zEq += z; sum += heightAt(terrain, q.x, q.z) - z; }
+    const gy = sum / feet.length, y = gy + (opts.drop ?? 0) - G.groundY;
+    const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(x, y, z).setRotation(yawQuat(yaw))
+      .setLinearDamping(0.02).setAngularDamping(0.05).setCanSleep(false).setCcdEnabled(false));
+    const ev = RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS;
+    const mk = (d) => world.createCollider(d.setDensity(0).setFriction(0.6).setCollisionGroups(G_ACM).setActiveEvents(ev).setContactForceEventThreshold(50), body);
+    const col = mk(RAPIER.ColliderDesc.cuboid(G.L / 2, G.H / 2, G.W / 2).setTranslation(0, G.boxY, 0));
+    const qx = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
+    const extra = [];
+    const tr = T.trunnion;
+    for (const sz of [-1, 1]) extra.push(mk(RAPIER.ColliderDesc.cylinder(tr.len / 2, tr.r).setTranslation(0, G.trunY, sz * (G.W / 2 + tr.len / 2)).setRotation({ x: qx.x, y: qx.y, z: qx.z, w: qx.w })));
+    const m = mass, inertia = { x: m * (G.H ** 2 + G.W ** 2) / 12, y: m * (G.L ** 2 + G.W ** 2) / 12, z: m * (G.L ** 2 + G.H ** 2) / 12 };
+    body.setAdditionalMassProperties(m, { x: 0, y: 0, z: 0 }, inertia, { x: 0, y: 0, z: 0, w: 1 }, true);
+    const id = opts.id ?? `ACM${++acmCount}`;
+    const c = { id, type: 'acm', T, x, z, yaw, tag0: opts.tag0, body, collider: col, colliders: [col, ...extra], stand: [], geom: G, feet,
+      groundY: gy, state: 'staged', mode: 'GROUND', dest: opts.dest ?? 2, deliveredAt: null, initial: { x, y, z, yaw }, soilN: 0 };
+    cargo.push(c);
+    return c;
+  }
+
   world.step(eventQueue);
-  return { RAPIER, world, eventQueue, terrain, terrainCollider, rockColliders, colliderRock, streamRocks, freshRocks, addRock, fixed, ports, cargo };
+  return { RAPIER, world, eventQueue, terrain, terrainCollider, rockColliders, colliderRock, streamRocks, freshRocks, addRock, fixed, ports, cargo, spawnACM };
 }

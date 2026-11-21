@@ -6,3 +6,7 @@ tests/out/
 .claude/settings.local.json
 
 .cc-writes/
+
+# graphify output (rebuild with: graphify update .)
+graphify-out/
+.claude/settings.json.graphify-bak

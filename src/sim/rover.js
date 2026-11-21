@@ -8,21 +8,29 @@
 //    (real contact) and locked by the two ring clamps (module_carry.js)
 //  - battery power bus (charged at the AEGIS garage), motor thermal model
 import * as THREE from 'three';
-import { ROVER, K, MOON, REGOLITH, CARGO_TYPES, GROUPS, THERMAL, KEEPALIVE } from './config.js';
+import { ROVER, K, K_LEGACY, MOON, REGOLITH, CARGO_TYPES, GROUPS, THERMAL, KEEPALIVE, DRIVE, PHYS } from './config.js';
 export const VEHICLE = ROVER;
 import { wheelSoil, shearFactor } from './terramechanics.js';
+import { ArmSystem } from './arm.js';
 import { G_ROVER, G_CARGO, G_CARGO_HELD, Q_WHEEL, Q_TERRAIN, Q_SENSOR, yawQuat } from './world.js';
 import { heightAt, soilAt } from './terrain.js';
 
 const STRUCT_STAND_COS = Math.cos(40 * Math.PI / 180);
+const KS = K / K_LEGACY; // body-collider and capture metres below were drawn at the legacy 1:16.32 scale (config.js)
+const ks = (v) => v * KS;
 
 const V = () => new THREE.Vector3();
-const ROVER_DT = 1 / 120;
+const ROVER_DT = PHYS.dt; // single source of the step (config.js; world.js asserts world.timestep equals it)
 const UP = new THREE.Vector3(0, 1, 0);
 const tmpQ = new THREE.Quaternion(), tmpQ2 = new THREE.Quaternion();
 const qX90 = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
 
 export class Rover {
+  // Point masses the rover carries that are not Rapier bodies of its own (the arm-handled ACM while carried or on the deck, plus the moving
+  // arm links): [{m, x, y, z}] world positions, refreshed every step by AcmHandler (acmCarry.js). They are part of the Rapier body's
+  // mass properties (syncMass), so they carry weight AND inertia (was: a weight-only impulse, no inertia).
+  extraLoads = [];
+  get extraMass() { let m = 0; for (const e of this.extraLoads) m += e.m; return m; }
   constructor(sim, pose) {
     this.sim = sim;
     const { RAPIER, world, terrain } = sim;
@@ -31,23 +39,24 @@ export class Rover {
     const desc = RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(pose.x, gy + ROVER.rideHeight + 0.04, pose.z)
       .setRotation(yawQuat(pose.yaw))
-      .setAdditionalMassProperties(ROVER.sprungMass, ROVER.comLocal, ROVER.inertia, { x: 0, y: 0, z: 0, w: 1 })
       .setCanSleep(false).setLinearDamping(0.0).setAngularDamping(0.02);
     this.body = world.createRigidBody(desc);
+    this._mp = null;
+    this.syncMass(true);
     const F = ROVER.frame, SY = ROVER.seatY, MR = CARGO_TYPES.cyl40.radius;
     const col = (d) => world.createCollider(d.setDensity(0).setFriction(0.6).setCollisionGroups(G_ROVER), this.body);
     // belly tub + deck (team model: tub y 0.065-0.185, deck top 0.225, z +-0.146 at 1:16.3)
     col(RAPIER.ColliderDesc.cuboid(F.halfLen * 0.9, (F.deckY - F.tubY0) / 2, F.tubZ).setTranslation(0, (F.deckY + F.tubY0) / 2, 0));
-    col(RAPIER.ColliderDesc.cuboid(F.halfLen * 0.95, 0.12, F.tubZ * 1.25).setTranslation(0, F.deckY - 0.12, 0));
-    col(RAPIER.ColliderDesc.cuboid(1.38, 0.65, 1.63).setTranslation(3.08, F.deckY + 0.65, 0));                    // avionics pod (upperShell)
-    for (const sz of [-1, 1]) col(RAPIER.ColliderDesc.cuboid(0.65, 0.5, 0.65).setTranslation(4.08, F.deckY + 0.5, sz * 2.45)); // LiDAR plinths
+    col(RAPIER.ColliderDesc.cuboid(F.halfLen * 0.95, ks(0.12), F.tubZ * 1.25).setTranslation(0, F.deckY - ks(0.12), 0));
+    col(RAPIER.ColliderDesc.cuboid(ks(1.38), ks(0.65), ks(1.63)).setTranslation(ks(3.08), F.deckY + ks(0.65), 0));                    // avionics pod (upperShell)
+    for (const sz of [-1, 1]) col(RAPIER.ColliderDesc.cuboid(ks(0.65), ks(0.5), ks(0.65)).setTranslation(ks(4.08), F.deckY + ks(0.5), sz * ks(2.45))); // LiDAR plinths
     // V saddles at the two rings: a flat seat and two 15 deg flanks tangent to the module bottom
     for (const rx of [-ROVER.ringX, ROVER.ringX]) {
-      col(RAPIER.ColliderDesc.cuboid(0.41, (SY - F.deckY) / 2, 0.9).setTranslation(rx, (SY + F.deckY) / 2, 0));
+      col(RAPIER.ColliderDesc.cuboid(ks(0.41), (SY - F.deckY) / 2, ks(0.9)).setTranslation(rx, (SY + F.deckY) / 2, 0));
       for (const sz of [-1, 1]) {
-        const th = 0.26, zc = Math.sin(th) * (MR + 0.35), yc = SY + MR - Math.cos(th) * (MR + 0.35);
+        const th = 0.26, zc = Math.sin(th) * (MR + ks(0.35)), yc = SY + MR - Math.cos(th) * (MR + ks(0.35));
         const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -sz * th);
-        col(RAPIER.ColliderDesc.cuboid(0.41, 0.35, 0.9).setTranslation(rx, yc, sz * zc).setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }));
+        col(RAPIER.ColliderDesc.cuboid(ks(0.41), ks(0.35), ks(0.9)).setTranslation(rx, yc, sz * zc).setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }));
       }
     }
     const B = ROVER.bogie;
@@ -63,7 +72,7 @@ export class Rover {
         L: B.Lnom, Ldot: 0, Lfree: B.Lnom + Ffree, level: 0, beamS: 0,
         steer: 0, steerTarget: 0, hpVelPrev: null, strutF: 0, Lslow: B.Lnom,
         wheels: [{
-          id: idx++, off: 0, omega: 0, angle: 0, target: 0, integ: 0, torque: 0,
+          id: idx++, driven: DRIVE.driven.includes(name), off: 0, omega: 0, angle: 0, target: 0, integ: 0, torque: 0,
           slip: 0, alpha: 0, sink: 0, load: 0, contact: false, delta: 0, deltaPrev: 0,
           H: 0, Rc: 0, Fx: 0, Fy: 0, power: 0, temp: 15, fault: null,
           cp: V(), cn: V(), dragAccum: 0,
@@ -76,6 +85,7 @@ export class Rover {
 
     // command interface (body-frame velocity request)
     this.cmd = { vx: 0, vz: 0, wz: 0 };
+    this._yI = 0; // degraded-drive yaw-rate integral
     this.brake = true;           // parking brake engaged at power-up
     this.estop = false;
     this.powered = true;
@@ -88,11 +98,13 @@ export class Rover {
     this._smart = { rough: 0, turboT: 0, slope: 0, slip: 0, curv: 0 };
     this.leveling = true;
     this.rideOffset = 0;
+    this.pitchTrim = 0; this._pitchTrimT = -1e9; // docking pitch trim target (rad), see _leveling and Autonomy docking
     this.lights = true;
     this.previewK = null;
 
     this.lift = { pos: 0, target: 0, stageX: 0, stageXT: 0, stageZ: 0, stageZT: 0, clamp: 'open', clampT: 0, cargo: null, joint: null, base: null, trolleyX: 0, msg: '' };
     this.power = { soc: 0.92, wh: ROVER.battery.capacityWh * 0.92, solarW: 0, loadW: 0, netW: 0, driveW: 0, mastYaw: 0, sunlit: 1, energyUsedWh: 0, energyGenWh: 0, regenWh: 0 };
+    this.arm = new ArmSystem();   // two 3-DOF ACM arms (arm.js, plan s4); stowed and idle until commanded
     this._shadowT = 0;
     this.odo = { dist: 0 };
     this.stats = { maxTilt: 0, minMargin: 99 };
@@ -103,6 +115,52 @@ export class Rover {
   }
 
   get mass() { return ROVER.sprungMass + ROVER.corners.length * ROVER.unsprungMassPerBogie; }
+
+  // ---- single mass-properties path ----------------------------------------------------------------------------------
+  // Sprung body (ROVER.sprungMass at comLocal, ROVER.inertia about it) + the six unsprung corners (point masses at their
+  // nominal axles) + the held point loads (extraLoads: arm links, carried / deck ACM). Body frame. The Rapier body gets
+  // all of it (syncMass), so tyre forces accelerate the whole vehicle (was: the 6,200 kg sprung mass only, ~1.29x too
+  // fast empty, ~1.88x carrying an ACM). Along the strut axis the unsprung masses keep their own 1-DOF dynamics; step()
+  // takes their along-strut weight and inertia back out of the body (see the strut block), so they are not counted twice.
+  // Products of inertia are neglected (the corners are symmetric; the loads ride on the centreline).
+  massProps(loads = this.extraLoads) {
+    const B = ROVER.bogie, mu = ROVER.unsprungMassPerBogie, cl = ROVER.comLocal, Is = ROVER.inertia;
+    const pts = [];
+    for (const [cx, cz] of ROVER.corners) pts.push({ m: mu, x: cx, y: B.hardpointY - B.Lnom - B.wheelBelowPivot, z: cz });
+    if (loads.length && this.body) {
+      const t = this.body.translation(), r = this.body.rotation();
+      const qi = new THREE.Quaternion(r.x, r.y, r.z, r.w).invert(), v = new THREE.Vector3();
+      for (const e of loads) { v.set(e.x - t.x, e.y - t.y, e.z - t.z).applyQuaternion(qi); pts.push({ m: e.m, x: v.x, y: v.y, z: v.z }); }
+    }
+    let m = ROVER.sprungMass, sx = m * cl.x, sy = m * cl.y, sz = m * cl.z;
+    for (const p of pts) { m += p.m; sx += p.m * p.x; sy += p.m * p.y; sz += p.m * p.z; }
+    const c = { x: sx / m, y: sy / m, z: sz / m };
+    const ms = ROVER.sprungMass, dx = cl.x - c.x, dy = cl.y - c.y, dz = cl.z - c.z;
+    const I = { x: Is.x + ms * (dy * dy + dz * dz), y: Is.y + ms * (dx * dx + dz * dz), z: Is.z + ms * (dx * dx + dy * dy) };
+    for (const p of pts) {
+      const ax = p.x - c.x, ay = p.y - c.y, az = p.z - c.z;
+      I.x += p.m * (ay * ay + az * az); I.y += p.m * (ax * ax + az * az); I.z += p.m * (ax * ax + ay * ay);
+    }
+    return { m, com: c, I };
+  }
+  // Push massProps() to the Rapier body when the load set changes (attach / detach: mass differs by > 1 kg) or the loads have
+  // moved the CoM by > 2 cm (arm motion). The body velocity is corrected so no point on the vehicle jumps (Rapier's linvel is
+  // the CoM velocity). Called from the constructor and at the top of step(), so an AcmHandler attach / detach is picked up next step.
+  syncMass(force = false) {
+    const mp = this.massProps(), old = this._mp;
+    if (!force && old && Math.abs(mp.m - old.m) < 1 && Math.hypot(mp.com.x - old.com.x, mp.com.y - old.com.y, mp.com.z - old.com.z) < 0.02) return false;
+    const b = this.body;
+    if (old) {
+      const r = b.rotation(), q = new THREE.Quaternion(r.x, r.y, r.z, r.w);
+      const d = new THREE.Vector3(mp.com.x - old.com.x, mp.com.y - old.com.y, mp.com.z - old.com.z).applyQuaternion(q);
+      const w = b.angvel(), v = b.linvel();
+      b.setLinvel({ x: v.x + w.y * d.z - w.z * d.y, y: v.y + w.z * d.x - w.x * d.z, z: v.z + w.x * d.y - w.y * d.x }, true);
+    }
+    b.setAdditionalMassProperties(mp.m, mp.com, mp.I, { x: 0, y: 0, z: 0, w: 1 }, true);
+    this._mp = mp;
+    return true;
+  }
+  get totalMass() { return (this._mp ? this._mp.m : this.mass + this.extraMass) + (this.loaded ? this.lift.cargo.T.mass : 0); }
   // Ride height the struts have actually reached (mean strut extension from nominal, from the strut position sensors), as opposed to
   // lift.pos, which is the commanded set point. They differ while the body is still moving and by the sag under a new load.
   get rideActual() { let s = 0; for (const b of this.bogies) s += b.L; return s / this.bogies.length - ROVER.bogie.Lnom; }
@@ -120,7 +178,10 @@ export class Rover {
   // top ground speed allowed right now (m/s): smart-rpm tier, the user speed limit, and the payload limit
   speedCap() {
     const v = this.rpm.wheel * 2 * Math.PI / 60 * ROVER.wheel.radius;
-    return Math.min(v, this.limits.speed, this.loaded ? ROVER.speedLimitLoaded : ROVER.speedLimitEmpty);
+    let cap = Math.min(v, this.limits.speed, this.loaded ? ROVER.speedLimitLoaded : ROVER.speedLimitEmpty);
+    if (this.arm.payload && this.arm.lifted) cap = 0;        // plan s6.3: no driving with the ACM suspended
+    else if (!this.arm.stowed) cap = Math.min(cap, 0.1);     // 0.1 m/s while the arms are out
+    return cap;
   }
 
   // Smart rpm v2 (v1.5.0). Each condition sets its own rpm ceiling on a smooth ramp between crawl (120) and the 280
@@ -204,6 +265,14 @@ export class Rover {
     f.vx += Math.max(-aLon * dt, Math.min(aLon * dt, vx - f.vx));
     f.wz += Math.max(-A.yaw * dt, Math.min(A.yaw * dt, wz - f.wz));
     vx = f.vx; wz = f.wz;
+    // degraded drive (a driven wheel's motor is dead): the side with fewer drivers under-delivers yaw (pivot efficiency 0.10 with
+    // FL dead). Slow yaw-rate integral on the commanded wz (gain DRIVE.degYawGain) restores the commanded turn; healthy rover unchanged.
+    if (this.wheels.some((w) => w.driven && w.fault === 'motor') && Math.abs(wz) > 0.005) {
+      const yr = this.body.angvel(), Yb = new THREE.Vector3(0, 1, 0).applyQuaternion(this.body.rotation());
+      const bodyYawRate = yr.x * Yb.x + yr.y * Yb.y + yr.z * Yb.z;
+      this._yI = Math.max(-0.5, Math.min(0.5, (this._yI || 0) + (wz - bodyYawRate) * dt));
+      wz += DRIVE.degYawGain * this._yI;
+    } else this._yI = 0;
     const rpmOmega = this.rpm.wheel * 2 * Math.PI / 60;
     // keep the commanded curvature when the outer side hits the rpm limit: scale v and w together. (Was: each wheel
     // clipped on its own, so the outer side saturated while the inner side did not, the side-to-side speed split
@@ -228,7 +297,8 @@ export class Rover {
     const Q = sv.Q, Yb = sv.Yb.set(0, 1, 0).applyQuaternion(Q), Xb = sv.Xb.set(1, 0, 0).applyQuaternion(Q), Zb = sv.Zb.set(0, 0, 1).applyQuaternion(Q);
     const B = ROVER.bogie, Wp = ROVER.wheel, S = ROVER.susp, M = ROVER.motor;
     const g = MOON.g, mu = ROVER.unsprungMassPerBogie;
-    const totalMass = this.mass + (this.loaded ? this.lift.cargo.T.mass : 0);
+    this.syncMass();
+    const totalMass = this.totalMass; // single mass path: sprung + unsprung + held loads (+ the clamped module), = the Rapier body
 
     // E-STOP is a category-1 stop: the drives decelerate the vehicle at the tip-safe rate, then the
     // spring brakes set and drive power is removed (an instant lock-up would tip a loaded AEGIS).
@@ -245,6 +315,8 @@ export class Rover {
     const f = this._cmdF;
     const cmdZero = Math.abs(f.vx) + Math.abs(f.wz) < 1e-3 && (arrayHold || Math.abs(this.cmd.vx) + Math.abs(this.cmd.wz) < 1e-6);
     const parkBrake = halt || this.brake || (cmdZero && speedNow < 0.03);
+    const pivoting = Math.abs(this._cmdF.wz) > 0.02 && Math.abs(this._cmdF.vx) < 0.3; // turn-in-place command (skid-steer pivot)
+    const turning = Math.abs(this._cmdF.wz) > 0.02; // any yaw command (pivot or arc): sliding-direction saturation blend applies
 
     const vel = V(), tmp = V(), tl = V(), tlat = V(), F = V(), hp = V(), wc = V(), dirW = V(), rel = V();
     let nContacts = 0;
@@ -264,7 +336,7 @@ export class Rover {
     // lowers mEffLat well below totalMass, and exceeding 2*mEffLat caused 60 Hz lateral tire chatter.
     const mEffLat = (this.loaded ? 0.55 * (1 / (1 / totalMass + (hCom * hCom) / IxTot)) : 0.6 * totalMass) / nC;
     const mEffLon = (this.loaded ? 0.6 * (1 / (1 / totalMass + (hCom * hCom) / IzTot)) : 0.6 * totalMass) / nC;
-    const Lstart = B.Lmin - 0.32;
+    const Lstart = B.Lmin - ks(0.32);
     const maxCast = B.Lmax + B.halfSpan * Math.sin(B.maxBeamAngle) + 0.12 - Lstart;
     const gvec = tmp.set(0, -g, 0).clone();
     let driveW = 0;
@@ -348,25 +420,33 @@ export class Rover {
         w.contact = N > 0;
         w.load = N;
         // ---- motor torque (PI speed loop) ---------------------------------------
-        const failed = w.fault === 'motor';
+        const idler = !w.driven;                 // ML / MR: passive idler, no motor, no brake (plan s5.7)
+        const failed = w.fault === 'motor' || idler;
+        const braked = (parkBrake && !idler) || w.fault === 'seized';
         const seized = w.fault === 'seized';
-        const tAvail = M.peakTorque * (this.limits.torquePct / 100) * (this.thermalTorqueK ?? 1) * Math.max(0, Math.min(1, (M.noLoadSpeed - Math.abs(w.omega)) / (M.noLoadSpeed * 0.25))) * (w.temp > 110 ? Math.max(0.2, 1 - (w.temp - 110) / 30) : 1);
+        // Torque-speed (back-EMF) derate applies only while MOTORING (T x omega > 0): braking / regenerating, the back-EMF adds to
+        // the drive voltage and the full current limit is available (actuators.js eval: I = (uV - ke w) / R). Was: derated always,
+        // so the drive could barely brake near the no-load speed.
+        const tBase = M.peakTorque * (this.limits.torquePct / 100) * (this.thermalTorqueK ?? 1) * (w.temp > 110 ? Math.max(0.2, 1 - (w.temp - 110) / 30) : 1);
+        const tLim = (T, om) => (T * om > 0 ? tBase * Math.max(0, Math.min(1, (M.noLoadSpeed - Math.abs(om)) / (M.noLoadSpeed * 0.25))) : tBase);
+        const clampT = (T, om) => { const L = tLim(T, om); return Math.max(-L, Math.min(L, T)); };
         let Tm = 0;
         if (parkBrake || failed || seized) w.integ = 0;
         if (!w.contact) {
           if (!parkBrake && !failed && !seized) {
             const e = w.target - w.omega;
             w.integ = Math.max(-0.8, Math.min(0.8, w.integ + e * dt));
-            Tm = Math.max(-tAvail, Math.min(tAvail, M.kp * e + M.ki * w.integ));
+            Tm = clampT(M.kp * e + M.ki * w.integ, w.omega);
           }
           w.torque = Tm;
           // free spinning wheel
           w.airT = (w.airT || 0) + dt; if (w.airT > 0.6 && !w.blocked) w.groundY = null;
           w.omega += dt * Tm / Wp.inertia;
-          if (parkBrake || seized) w.omega = 0;
+          if (braked) w.omega = 0;
+          else if (idler) w.omega *= Math.exp(-dt * DRIVE.idlerViscous / Wp.inertia);
           w.Fx = w.Fy = w.H = w.Rc = 0; w.slip = 0; w.sink *= 0.9;
           w.angle += w.omega * dt;
-          driveW += this._motorPower(Tm, w.omega);
+          if (!idler) driveW += this._motorPower(Tm, w.omega);
           { const Thub = this.sim.health ? this.sim.health.th.hub[w.id] : 0; w.hubQ = (w.temp - Thub) / M.thermalR; w.temp -= dt * w.hubQ / M.thermalC; }
           continue;
         }
@@ -416,25 +496,31 @@ export class Rover {
           if (parkBrake || failed || seized) return 0;
           const e = w.target - om;
           const T = M.kp * e + M.ki * Math.max(-0.8, Math.min(0.8, w.integ + e * dt));
-          return Math.max(-tAvail, Math.min(tAvail, T));
+          return clampT(T, om);
         };
-        const f = (om, Textra) => I * (om - w.omega) / dt - piT(om) - Textra + Hof(om) * rr;
+        // idler bearing drag (smoothed Coulomb + viscous), resists spin; implicit in om so the bisection stays monotone
+        const dragT = idler ? (om) => DRIVE.idlerDragNm * Math.tanh(om / 0.02) + DRIVE.idlerViscous * om : () => 0;
+        const f = (om, Textra) => I * (om - w.omega) / dt - piT(om) - Textra + Hof(om) * rr + dragT(om);
         const bisect = (Textra) => {
           let lo = w.omega - 8, hi = w.omega + 8;
           for (let it = 0; it < 16; it++) { const mid = 0.5 * (lo + hi); if (f(mid, Textra) > 0) hi = mid; else lo = mid; }
           return 0.5 * (lo + hi);
         };
         let omNew;
-        if (parkBrake || seized) {
+        if (braked) {
           // can the spring brake hold the wheel at zero this step?
           const need = I * (0 - w.omega) / dt + Hof(0) * rr;
           if (seized || Math.abs(need) <= M.brakeTorque) omNew = 0;
           else omNew = bisect(-Math.sign(w.omega || need) * M.brakeTorque);
+        } else if (idler) {
+          // bearing stiction: the idler stays stopped while the soil torque is below the Coulomb drag (no creep / slip while parked)
+          const need = I * (0 - w.omega) / dt + Hof(0) * rr;
+          omNew = Math.abs(need) <= DRIVE.idlerDragNm ? 0 : bisect(0);
         } else omNew = bisect(0);
         if (!(parkBrake || failed || seized)) {
           const e = w.target - omNew;
           const Tun = M.kp * e + M.ki * (w.integ + e * dt);
-          if (Math.abs(Tun) < tAvail) w.integ = Math.max(-0.8, Math.min(0.8, w.integ + e * dt));
+          if (Math.abs(Tun) < tLim(Tun, omNew)) w.integ = Math.max(-0.8, Math.min(0.8, w.integ + e * dt));
           Tm = piT(omNew);
         } else Tm = 0;
         w.torque = Tm;
@@ -442,6 +528,8 @@ export class Rover {
         w.angle += w.omega * dt;
         const soil = wheelSoil(N, Wp.width, D, slipOf(w.omega), tanA, soilL);
         w.slip = slipOf(w.omega);
+        // an unbraked idler on a standing vehicle jitters at mm/s with the strut rocking; the slip read-out has a 2 cm/s dead band (resolver noise floor)
+        if (idler && Math.abs(rr * w.omega) < 0.02 && Math.abs(vL) < 0.02) w.slip = 0;
         w.alpha = Math.atan(tanA);
         w.sink += (soil.z - w.sink) * Math.min(1, dt * 8);
         w.H = soil.H; w.Rc = soil.Rc;
@@ -449,7 +537,15 @@ export class Rover {
         let Fy = soil.Fy;
         // friction-ellipse saturation
         const mag = Math.hypot(Fx, Fy), cap = soil.Hmax * 1.02;
-        if (mag > cap) { Fx *= cap / mag; Fy *= cap / mag; }
+        if (mag > cap) {
+          // Coulomb saturation: the friction force opposes the SLIDING velocity of the contact patch (tyre surface speed minus ground
+          // velocity, both axes), not the ratio of the unsaturated components. With only the 4 outer wheels driven, a spinning tyre
+          // that barely moves over the ground must push along its rolling direction, not be capped to a 45 deg force by a tiny vL.
+          // Blended 60 / 40 with the proportional cap (full sliding direction over-responds: the pod4 square-up under the module misses centring). Only while pivoting: elsewhere (a wheel pushing against an obstacle) the proportional cap keeps the old behaviour.
+          const sxv = rr * w.omega - vL, syv = -vLat, sm = Math.hypot(sxv, syv);
+          if (turning && w.driven && sm > 1e-4 && Math.abs(sxv) > 1e-6) { const bl = 0.6, fx = cap * sxv / sm, fy = Math.sign(Fy || syv) * cap * Math.abs(syv) / sm; Fx = Fx * cap / mag * (1 - bl) + fx * bl; Fy = Fy * cap / mag * (1 - bl) + fy * bl; }
+          else { Fx *= cap / mag; Fy *= cap / mag; }
+        }
         // dead-beat guards (stability at very low speed): forces may stop, never reverse, motion
         const latCap = mEffLat * Math.abs(vLat) / dt;
         if (Math.abs(Fy) > latCap) Fy = Math.sign(Fy) * latCap;
@@ -460,7 +556,7 @@ export class Rover {
         // Static friction of a braked wheel (bristle / Dahl model): the locked tyre is anchored
         // to the regolith and resists with a stiff spring up to the soil shear capacity, so a
         // parked rover holds against slopes and docking-stage reaction loads without creep.
-        if (Math.abs(w.omega) < 1e-6 && (parkBrake || seized) && Math.hypot(vL, vLat) < 0.06) {
+        if (Math.abs(w.omega) < 1e-6 && braked && Math.hypot(vL, vLat) < 0.06) {
           if (!w.anchor) w.anchor = w.cp.clone();
           const dx = V().subVectors(w.cp, w.anchor);
           const dL = dx.dot(tl), dT = dx.dot(tlat);
@@ -482,8 +578,8 @@ export class Rover {
         FtireY += fY;
         F.addScaledVector(Yb, -fY); // tangential part goes straight into the chassis through the leg
         this.body.applyImpulseAtPoint({ x: F.x * dt, y: F.y * dt, z: F.z * dt }, { x: w.cp.x, y: w.cp.y, z: w.cp.z }, true);
-        driveW += this._motorPower(Tm, w.omega);
-        w.power = this._motorPower(Tm, w.omega);
+        if (!idler) driveW += this._motorPower(Tm, w.omega);
+        w.power = idler ? 0 : this._motorPower(Tm, w.omega);
         // thermal
         // extraHeat: degraded hub cooling path (health.js 'cool' failure; 0 when healthy)
         // heatW: thermal brain stator heating (REV UP, d-axis current: heat, no torque) + scenario motor heat (thermal.js)
@@ -502,24 +598,31 @@ export class Rover {
       // keeps the same damping ratio) scale with the supported mass; plus skyhook body-rate damping
       // (body_control.js fast loop) on pitch and roll.
       let Fs = b._fs;
-      if (b.L < B.Lmin) Fs += S.bumpK * (B.Lmin - b.L) - S.bumpC * Math.min(0, b.Ldot);
-      if (b.L > B.Lmax) Fs -= S.bumpK * (b.L - B.Lmax) + S.bumpC * Math.max(0, b.Ldot);
-      b.strutF = Fs;
+      if (b.L < B.Lmin) Fs += S.bumpK * (B.Lmin - b.L);
+      if (b.L > B.Lmax) Fs -= S.bumpK * (b.L - B.Lmax);
       const gAlong = g * Yb.y;              // weight of unsprung mass along strut extension
-      const Lddot = (Fs + mu * gAlong + mu * aAlong - FtireY) / mu;
-      b.Ldot += Lddot * dt;
+      // Bump-stop damper, implicit (backward Euler on Ldot): explicit it had bumpC dt / mu ~ 2, at the stability limit.
+      // One-sided: it acts only while the predicted stroke runs further into the stop.
+      const Ldot1 = b.Ldot + dt * (Fs + mu * gAlong + mu * aAlong - FtireY) / mu;
+      const cB = (b.L < B.Lmin && Ldot1 < 0) || (b.L > B.Lmax && Ldot1 > 0) ? S.bumpC : 0;
+      b.Ldot = Ldot1 / (1 + dt * cB / mu);
+      Fs -= cB * b.Ldot;
+      b.strutF = Fs;
       b.L += b.Ldot * dt;
-      // body: strut force at hardpoint + the part of unsprung weight the strut can't carry
-      const gPerp = V().copy(gvec).addScaledVector(Yb, -gvec.dot(Yb)).multiplyScalar(mu);
-      F.copy(Yb).multiplyScalar(Fs).add(gPerp);
+      // body: strut force at the hardpoint. The unsprung mass is in the Rapier body (massProps) for the motion across the strut;
+      // along the strut it has its own DOF above, so its along-strut weight (mu g Yb.y) and inertia (mu aAlong) are taken back
+      // out of the body here. (Was: the body had no unsprung mass at all; only the across-strut weight was added.)
+      const aComp = Math.max(-20, Math.min(20, aAlong));
+      F.copy(Yb).multiplyScalar(Fs + mu * (gAlong + aComp));
       this.body.applyImpulseAtPoint({ x: F.x * dt, y: F.y * dt, z: F.z * dt }, { x: hp.x, y: hp.y, z: hp.z }, true);
     }
 
     this._leveling(dt, Q);
     this._smartRpm(dt);
     this._liftStep(dt, Q, sv.pos);
+    this.arm.step(dt, { g: MOON.g, gBody: { x: -MOON.g * Xb.y, y: -MOON.g * Yb.y }, marginF: this.tilt.marginF ?? this.tilt.margin, powered: this.powered });
     this._powerStep(dt, driveW, Q, sv.pos);
-    this._stability(Q, sv.com, dt);
+    { const cl = ROVER.comLocal; this._stability(Q, V().set(cl.x, cl.y, cl.z).applyQuaternion(Q).add(sv.pos), dt); } // sprung CoM (the Rapier CoM now includes the unsprung + loads)
     // odometer (true)
     if (this._prevPos) this.odo.dist += Math.hypot(sv.pos.x - this._prevPos.x, sv.pos.z - this._prevPos.z);
     this._prevPos = { x: sv.pos.x, z: sv.pos.z };
@@ -531,6 +634,9 @@ export class Rover {
     return (p >= 0 ? p / eff : p * eff * 0.7) + copper;
   }
 
+  // Docking pitch trim: command a target body pitch (rad, + = nose up, relative to the world). Must be refreshed within 1 s.
+  setPitchTrim(rad) { this.pitchTrim = rad; this._pitchTrimT = this.sim.time; }
+
   _leveling(dt, Q) {
     const B = ROVER.bogie, S = ROVER.susp;
     const fwd = V().set(1, 0, 0).applyQuaternion(Q), right = V().set(0, 0, 1).applyQuaternion(Q);
@@ -539,7 +645,16 @@ export class Rover {
     this.tilt.pitch = pitch; this.tilt.roll = roll;
     const rollRate = this._rollPrev == null ? 0 : (roll - this._rollPrev) / dt;
     this._rollPrev = roll;
-    if (!this.leveling || this.estop) return;
+    const pitchRate = this._pitchPrev == null ? 0 : (pitch - this._pitchPrev) / dt;
+    this._pitchPrev = pitch;
+    if (!this.leveling || this.estop || this.sim.health?.th?.strutLock) return; // strutLock: a roller-screw is below the grease limit (health.js, MECH.lockC); the struts hold their stroke
+    // Pitch hold. (1) Docking: autonomy refreshes pitchTrim (setPitchTrim); it lapses 1 s after the last refresh, so it cannot stick.
+    // (2) Arm lift: the ACM hangs 3.4 m ahead of the centre on a rover whose wheelbase and pitch stiffness are small at K = 8.16, so a
+    // passive rover pitched nose-down 3.5 deg under the weight and ate the 0.24 m breakout stroke (the ACM never left the soil). While an
+    // arm holds a payload (before it is on the deck latch) the struts hold the body pitch from the moment the hooks engaged, like crane outriggers.
+    const armHold = !!this.arm.payload && !this.arm.deckLatched;
+    if (armHold && this._armPitch0 == null) this._armPitch0 = pitch; else if (!armHold) this._armPitch0 = null;
+    const pitchTrim = this.sim.time - this._pitchTrimT < 1 ? this.pitchTrim : armHold ? this._armPitch0 : null;
     const Lavg = this.bogies.reduce((a, b) => a + b.L, 0) / this.bogies.length;
     const Ltarget = B.Lnom + this.rideOffset;
     // m/s, from _liftStep on the previous step. The strut is a spring and a damper in parallel, so at stroke speed v the strut trails the
@@ -549,12 +664,15 @@ export class Rover {
     const sp = this.body.linvel(), tdGate = Math.max(0, Math.min(1, (Math.hypot(sp.x, sp.z) - 0.1) / 0.3));
     for (const b of this.bogies) {
       // height of this corner relative to the plane through the centre
-      const h = b.z * Math.sin(roll); // pitch is passive (rocker-bogie); only roll is trimmed
-      const Ldes = b.L - h * 0.85 + (Ltarget - Lavg);
+      const h = b.z * Math.sin(roll); // pitch is passive (rocker-bogie); only roll is trimmed (and the docking pitch trim below)
+      // Docking pitch trim: while squaring a held module onto a port, autonomy gives a target body pitch (setPitchTrim) and the struts level
+      // pitch to it exactly as they level roll (a first-order loop, ~2 s time constant). Otherwise pitchTarget is null and pitch stays passive.
+      const hP = pitchTrim == null ? 0 : b.x * Math.sin(pitch - pitchTrim);
+      const Ldes = b.L - (h + hP) * 0.85 + (Ltarget - Lavg);
       const err = Math.max(B.Lmin + 0.06, Math.min(B.Lmax - 0.06, Ldes)) - b.L;
       // roll-rate damping: driven by roll error alone, the seats pumped a loaded (CoM 6.8 m) roll into a
       // roll-over; the rate term (S.levelTd s) stops them chasing a roll that is already recovering (CHANGES.md §9)
-      const hdot = b.z * Math.cos(roll) * rollRate * tdGate;
+      const hdot = b.z * Math.cos(roll) * rollRate * tdGate + (pitchTrim == null ? 0 : b.x * Math.cos(pitch) * pitchRate); // pitch damping is not speed-gated: the hold is used at standstill
       const rate = Math.max(-S.levelRate, Math.min(S.levelRate, 0.6 * (err - S.levelTd * 0.85 * hdot)));
       // Ride-height feedforward: the commanded stroke rate (the S-curve of _liftStep) goes straight to the actuators and the
       // rate-limited levelling term above only trims what is left (roll, sag). Without it the body followed the command through
@@ -600,6 +718,7 @@ export class Rover {
       const cc = this.lift.cargo.body.worldCom(), m2 = this.lift.cargo.T.mass;
       c.add(V().set(cc.x, cc.y, cc.z).multiplyScalar(m2)); mSum += m2;
     }
+    for (const e of this.extraLoads) { c.add(V().set(e.x, e.y, e.z).multiplyScalar(e.m)); mSum += e.m; }
     c.divideScalar(mSum);
     this.comWorld = c.clone();
     // support polygon = convex hull of the wheel contacts (horizontal plane)
@@ -659,8 +778,8 @@ export class Rover {
     const dxc = rel.x - (T.carryX || 0);
     const seatErr = rel.y - (ROVER.seatY + half);
     const res = { c, dx: dxc, dz: rel.z, yawErr, seatErr, ok: false, why: '' };
-    if (Math.abs(dxc) > 0.3) res.why = `clamp band ${dxc.toFixed(2)} m off the rings (limit 0.30 m)`;
-    else if (Math.abs(rel.z) > 0.41) res.why = `lateral offset ${rel.z.toFixed(2)} m > V-saddle capture 0.41 m`;
+    if (Math.abs(dxc) > ks(0.3)) res.why = `clamp band ${dxc.toFixed(2)} m off the rings (limit ${ks(0.3).toFixed(2)} m)`;
+    else if (Math.abs(rel.z) > ks(0.41)) res.why = `lateral offset ${rel.z.toFixed(2)} m > V-saddle capture ${ks(0.41).toFixed(2)} m`;
     else if (Math.abs(yawErr) > 0.06) res.why = `yaw error ${(yawErr * 180 / Math.PI).toFixed(1)} deg > 3.4 deg`;
     else if (Math.abs(seatErr) > 0.2) res.why = seatErr > 0 ? 'module not seated: rise under it first' : 'module below the saddles';
     else res.ok = true;
@@ -746,6 +865,12 @@ export class Rover {
       if (L.clampT <= 0) { L.clamp = 'open'; L.msg = 'Ring jaws open'; }
     }
     if (this.estop) { this._rs = null; L.rateNow = 0; L.accNow = 0; return; } // actuators locked: ride held, the S-curve (if any) is dropped
+    if (this.sim.health?.th?.strutLock) { // cold lockout (B): no ride-height motion until the strut heaters recover the grease
+      this._rs = null; L.rateNow = 0; L.accNow = 0; L.target = this.rideOffset;
+      if (!L.coldMsg) { L.msg = 'RIDE HELD: strut below grease limit (cold lockout)'; L.coldMsg = true; }
+      return;
+    }
+    L.coldMsg = false;
     if (this.sim.health?.isStrutKneelInhibited?.() && L.target < this.rideOffset) {
       L.target = this.rideOffset;
       L.msg = 'KNEEL INHIBITED: roller-screw strut < 65% response';
@@ -809,7 +934,7 @@ export class Rover {
       this._shadowT = 1.0;
       const deployed = this.sim.health?.array?.state === 'deployed';
       const { x: kx, z: kz } = KEEPALIVE.corner;
-      const o = (deployed ? V().set(kx, KEEPALIVE.mastH, kz) : V().set(-1.2, 5.4, -2.75)).applyQuaternion(Q).add(pos).addScaledVector(sun, 0.5);
+      const o = (deployed ? V().set(kx, KEEPALIVE.mastH, kz) : V().set(ks(-1.2), ks(5.4), ks(-2.75))).applyQuaternion(Q).add(pos).addScaledVector(sun, 0.5);
       const ray = new this.RAPIER.Ray({ x: o.x, y: o.y, z: o.z }, { x: sun.x, y: sun.y, z: sun.z });
       const hit = this.sim.world.castRay(ray, 3000, true, undefined, Q_SENSOR, undefined, this.body);
       P.sunlit = hit ? 0 : 1;
@@ -836,8 +961,11 @@ export class Rover {
     // (a 48 W "steering actuator" load was booked here every step, left over from SPAN-40: AEGIS-V1 has fixed wheels
     // and no steering actuators, so it was a phantom drain, a fifth of the survival-night budget)
     P.driveW = driveW;
-    P.loadW = hotel + driveW + lifting + clampW;
+    P.armW = this.arm.powerW;     // arm servos on the rail + ARM.hotelW (arm.js)
+    P.armWh = this.arm.energyWh;
+    P.loadW = hotel + driveW + lifting + clampW + P.armW;
     // auxSolarW: emergency keep-alive array (health.js); capK: fraction of battery strings on line (health.js)
+    if ((P.dockW || 0) > BAT.dockMaxW) P.dockW = BAT.dockMaxW; // realistic surface charger (config.js battery.dockMaxW)
     const gen = P.solarW + (P.auxSolarW || 0) + (P.dockW || 0);
     const capK = Math.max(0, P.capK ?? 1);
     const cap = BAT.capacityWh * capK;
@@ -865,7 +993,7 @@ export class Rover {
     return {
       pose: p, speed: Math.hypot(v.x, v.y, v.z), fwdSpeed,
       roll: this.tilt.roll, pitch: this.tilt.pitch, margin: this.tilt.margin,
-      wheels: this.wheels, bogies: this.bogies, power: this.power, lift: this.lift,
+      wheels: this.wheels, bogies: this.bogies, power: this.power, lift: this.lift, arm: this.arm.telemetry(),
     };
   }
 
@@ -917,7 +1045,7 @@ export class Rover {
       cb.setTranslation(cp, false); cb.setRotation(cq, false);
       cb.setLinvel({ x: fwd.x * v, y: fwd.y * v, z: fwd.z * v }, false); cb.setAngvel({ x: 0, y: 0, z: 0 }, false);
     }
-    const mTot = this.mass + (this.loaded ? this.lift.cargo.T.mass : 0);
+    const mTot = this.totalMass;
     const om = v / ROVER.wheel.radius;
     for (let i = 0; i < this.bogies.length; i++) for (const w of this.bogies[i].wheels) {
       w.cp.set(G.pts[i].x, G.pts[i].y, G.pts[i].z); w.contact = true; w.load = mTot * MOON.g / this.wheels.length;
@@ -932,7 +1060,8 @@ export class Rover {
     const Fdrive = mTot * MOON.g * (0.09 * Math.sqrt(Math.max(0, 1 - fwd.y * fwd.y)) + fwd.y);
     const P = Fdrive * v;
     const driveW = P >= 0 ? P / ROVER.motor.efficiency : P * ROVER.motor.efficiency * 0.6;
-    for (const w of this.wheels) { w.torque = Fdrive * ROVER.wheel.radius / this.wheels.length; w.power = driveW / this.wheels.length; }
+    const nDrv = Math.max(1, this.wheels.filter((w) => w.driven && w.fault !== 'motor' && w.fault !== 'seized').length);
+    for (const w of this.wheels) { const on = w.driven && w.fault !== 'motor' && w.fault !== 'seized'; w.torque = on ? Fdrive * ROVER.wheel.radius / nDrv : 0; w.power = on ? driveW / nDrv : 0; }
     this.lift.rateNow = 0;
     this._powerStep(h, driveW, q, pos);
     if (this._prevPos) this.odo.dist += Math.hypot(x - this._prevPos.x, z - this._prevPos.z);

@@ -24,6 +24,7 @@
 // All [ASSUMED] numbers are sized so the brain can hold every instrument inside its operating range through the
 // hottest and coldest scenarios; with the brain off, the LiDAR overheats on a sun-facing slope (tests/thermal.mjs).
 import { THERMAL } from './config.js';
+import { RAD_ALPHA } from './lunarParams.js';
 import { mulberry32 } from './terrain.js';
 
 const SIGMA = 5.670e-8, S0 = 1361, K0 = 273.15, DEG = Math.PI / 180;
@@ -54,7 +55,9 @@ export const SCENARIOS = {
   'slope-heat': { name: 'Sun-facing slope heat soak', need: 'sun', dur: [360, 720], text: 'the route crosses a 30 deg sun-facing slope: regolith heads for ~70 C' },
   'psr-cold': { name: 'Crater shadow cold snap', dur: [240, 480], text: 'into a permanently shadowed crater floor: no sun, regolith ~60 K' },
   'eclipse': { name: 'Earth eclipses the Sun', need: 'sun', dur: [300, 600], text: 'the Earth covers the Sun: regolith cools toward ~120 K (Apollo-measured)' },
-  'dust-fins': { name: 'Regolith dust on the hub radiators', dur: [300, 600], text: 'wheel-end radiator emissivity down 60 % until the EDS clears it' },
+  // dust does not cut emissivity (a thin regolith film stays ~0.9 emissive); it raises SOLAR ABSORPTIVITY ~0.10 -> ~0.50,
+  // so a dusted radiator facing the low sun takes in heat instead of rejecting it (lunarParams RAD_ALPHA.fins)
+  'dust-fins': { name: 'Regolith dust on the hub radiators', dur: [300, 600], text: 'wheel-end and controller radiator solar absorptivity ~0.10 -> ~0.50 until the EDS clears it' },
   'climb': { name: 'Long heavy climb', dur: [240, 420], text: 'motors near stall torque: +600 W copper loss per motor, controllers +3 % losses' },
   'glint': { name: 'Sun glint into the LiDAR / camera', need: 'sun', dur: [180, 300], text: 'sunlight focused through the sensor windows: LiDAR +35 W, camera +8 W' },
   'heater-stuck': { name: 'Vault heater relay stuck on', dur: [180, 360], text: '+600 W into the avionics vault until the relay is power-cycled' },
@@ -71,7 +74,7 @@ export class Thermal {
     for (const k of Object.keys(NODES)) this.n[k] = { T: 15, rate: 0, heaterW: 0, tecW: 0, tecQ: 0, shade: false, extraW: 0, inW: 0 };
     this.ok = { lidar: true, camera: true };
     this.powerW = 0;           // electrical power the thermal actions draw (heaters, TECs, stator heating)
-    this.fx = { hubEmisK: 1, vaultExtraW: 0, mcExtraW: 0, motorExtraW: 0, glint: 0 };
+    this.fx = { hubEmisK: 1, dustAlpha: null, vaultExtraW: 0, mcExtraW: 0, motorExtraW: 0, glint: 0 };
     this.cmd = { rpm: Infinity, torqueK: 1, statorW: 0, louver: null, setBias: 0, vaultLoadK: 1, hold: false };
     this.brain = new ThermalBrain(this);
     const rnd = mulberry32(((sim.terrain?.seed ?? 1) ^ 0x7e3a11) >>> 0);
@@ -114,7 +117,9 @@ export class Thermal {
         const on = powered && this.ok[k] && (k === 'lidar' ? sim.sensors?.lidarOn : sim.sensors?.cameraOn) !== false;
         P = (on ? N.Pint : 0) + (k === 'lidar' ? 35 : 8) * this.fx.glint;
       }
-      const solar = E.sunlit ? N.alphaA * S0 * (s.shade ? 0.2 : 1) : 0;
+      let solar = E.sunlit ? N.alphaA * S0 * (s.shade ? 0.2 : 1) : 0;
+      // dusted controller radiators (tub walls, epsA / 0.85 m^2, one side toward the ~horizontal sun): extra absorbed sun
+      if (k === 'mc' && E.sunlit && this.fx.dustAlpha != null) solar += (this.fx.dustAlpha - RAD_ALPHA.clean) * S0 * (N.epsA / 0.85) / 2 * Math.cos(E.sunEl * DEG);
       const emis = k === 'mc' ? (this.fx.mcEmisK ?? 1) : 1;
       const rad = N.epsA * emis * SIGMA * (s.T + K0) ** 4;
       const absIR = N.epsA * emis * regIR;
@@ -185,7 +190,7 @@ export class Thermal {
       case 'slope-heat': E.incBoost = on ? 30 : 0; break;
       case 'psr-cold': E.shadow = on; E.floorK = on ? ENV.psrK : ENV.nightK; break;
       case 'eclipse': E.blocked = on; E.floorK = on ? ENV.eclipseK : ENV.nightK; break;
-      case 'dust-fins': f.hubEmisK = on ? 0.4 : 1; f.mcEmisK = on ? 0.6 : 1; break;
+      case 'dust-fins': f.dustAlpha = on ? RAD_ALPHA.fins : null; break;
       case 'climb': f.motorExtraW = on ? 600 : 0; f.mcLossK = on ? 1 : 0; break;
       case 'glint': f.glint = on ? 1 : 0; break;
       case 'heater-stuck': f.vaultExtraW = on ? 600 : 0; break;

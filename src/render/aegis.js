@@ -241,6 +241,12 @@ export class AegisModel {
     // ring jaws
     const Lf = rover.lift;
     this.cradle.apply({ lid: Math.min(1, Lf.clampT * 1.25), squeeze: Math.max(0, (Lf.clampT - 0.8) * 5), locked: Lf.clamp === 'closed' });
+    // The straddle-cargo cradle (saddle tubes, posts, ring jaws) occupies the same deck volume as the ACM arms, hooks and the
+    // ACM at the place pose, so it is hidden (render only) while an ACM is carried / on deck or the arms are not stowed.
+    const A = rover.arm;
+    const acmAboard = !!(A && A.payload) || !!rover.sim?.cargo?.some((c) => c.T?.handling === 'arm' && (c.mode === 'CARRIED' || c.mode === 'DECK' || c.onDeck));
+    const hideCradle = acmAboard || !!(A && !A.stowed);
+    const cb = window.cargoBayGroup; if (cb) cb.visible = !hideCradle;
     for (const h of this.heads) h.rotation.y = time * 2 * Math.PI * 10;
     // Headlights sized against the sun (DirectionalLight 5.2 in scene.js): illuminance E = I / d^2. At 900 cd,
     // always on, the ground 5 m ahead got 36 = 7x full sun and the main view and the camera feed burned out white.

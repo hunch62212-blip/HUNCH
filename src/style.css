@@ -69,6 +69,10 @@ table.wheels { width: 100%; border-collapse: collapse; font-family: var(--mono);
 table.wheels th { color: var(--dim); font-weight: 500; text-align: right; padding: 1px 3px; font-family: var(--sans); font-size: 9.5px; }
 table.wheels td { text-align: right; padding: 1px 3px; border-top: 1px solid rgba(255, 255, 255, 0.04); }
 table.wheels td.f { color: var(--err); }
+table.wheels tr.idle td { color: var(--dim); }
+table.wheels tr.idle small { font-size: 8.5px; letter-spacing: 0.06em; color: var(--accent); }
+#armTable td.warn, #armSect .v.warn { color: var(--warn); } #armTable td.err, #armSect .v.err { color: var(--err); }
+#armTable { font-size: 9.5px; }
 .sect { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line); }
 .sect .t { color: var(--dim); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 4px; }
 

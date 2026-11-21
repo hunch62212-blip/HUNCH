@@ -5,11 +5,27 @@ import * as THREE from 'three';
 import { ROVER, WORLD, DOCK, MOON, POWER_DOCK, MISSION, NAV } from './config.js';
 import { Planner, LocalPlanner, LETHAL } from './planner.js';
 import { OrbitalDEM, matchToDEM } from './orbitalMap.js';
+import { armMissions } from './autonomyArm.js';
 const LETHAL_HALF = LETHAL * 0.5; // planner hard-inflation cost (obstacle margin)
 
 const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const DEG = Math.PI / 180;
+
+// Soft-capture angular envelope (docs/changes/C.md). The latches fire only with the module axis square to the port normal:
+// over a 1 m ring radius 0.5 deg of yaw puts the rim 8.7 mm out (beyond the 5 mm lateral tolerance); 0.25 deg is 4.4 mm.
+// Checked here on the docking-camera reading and again in hardware by Sim.dockCapture (sim.js), which refuses to weld outside it.
+export const DOCK_CAPTURE_MAX_ANGLE = 0.25 * DEG;
+// Vestibule pressure-decay leak check hold, sim seconds. A decay test that resolves the 0.01 kPa/min limit holds >= 30 min
+// (was 3 s). Override per sim with new Sim(RAPIER, { leakCheckS }) or sim.autonomy.leakCheckS; the hold itself runs on the
+// quiescent-hold warp (Sim._holdStep: rover braked, module latched, no physics), so it costs ~3,600 cheap steps, not 216,000.
+export const DOCK_LEAK_CHECK_S = 1800;
+// Relative yaw / pitch between a held module's axis (+x) and the port's inward normal (truth, from the bodies).
+export function dockAngles(c, port) {
+  const r = c.body.rotation();
+  const ax = new THREE.Vector3(1, 0, 0).applyQuaternion(new THREE.Quaternion(r.x, r.y, r.z, r.w));
+  return { yaw: wrap(Math.atan2(-ax.z, ax.x) - Math.atan2(port.nz, -port.nx)), pitch: Math.asin(clamp(ax.y, -1, 1)) };
+}
 
 export const PRIORITY = { 'life-support': 5, 'emergency-repair': 5, 'power': 4, 'habitat-supplies': 3, 'science': 2 };
 
@@ -17,6 +33,8 @@ export class Autonomy {
   constructor(sim, sensors, slam) {
     this.sim = sim; this.sensors = sensors; this.slam = slam;
     this.rate = 10;
+    this.leakCheckS = DOCK_LEAK_CHECK_S;   // berthing leak-check hold (s), see DOCK_LEAK_CHECK_S
+    this.dockAngleRefusals = 0;           // latch samples refused only because |yaw| or |pitch| >= DOCK_CAPTURE_MAX_ANGLE
     this.planner = new Planner(sim, slam);
     this.local = new LocalPlanner(slam);
     // surveyed thin posts and the vehicle's swept rectangle for the local planner's post check (planner.js LocalPlanner)
@@ -333,6 +351,7 @@ export class Autonomy {
     if (this.slam.recording) this.slam.endRecord(false);
     this.gen = null; this.missionName = null; this.mode = 'MANUAL'; this.phase = 'Idle'; this.detail = '';
     this.sim.rover.crawlZone = false; // an aborted mission must not leave the drive held at the crawl cap
+    { const arm = this.sim.rover.arm; if (arm && arm.plan) { arm.hold = true; arm.keepOut = null; } } // abort freezes a moving arm where it is (a later manual `arm pose` starts a new plan; it is gated by moveTo's per-payload pose list)
     this.path = null; this.stop();
     this.sim.emit('mission', { state: 'abort' });
   }
@@ -461,11 +480,48 @@ export class Autonomy {
     }
     this.stop(); R.brake = true;
     for (let i = 0; i < 30; i++) yield;
+    // Final square-up on the pilot-coil read-out. The map-frame heading used for the line-up can sit several degrees off the
+    // true heading (fiducial corrections, 4-wheel-drive scrub on the pivot), so if the pilot reports a heading error beyond
+    // 3 deg (the coupler tolerates 8) pivot on it, and creep back onto the pad centre if it drifted off by over 1 m.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      let al = PD.padAlignment();
+      if (Math.abs(al.dyaw) < 3 * DEG && al.offset < 1.0) break;
+      R.brake = false;
+      this.phase = 'Power dock: pilot square-up';
+      t0 = this.sim.time;
+      while (this.sim.time - t0 < 40) {
+        al = PD.padAlignment();
+        const sp = Math.abs(this.sensors.imu.yawRate);
+        if (Math.abs(al.dyaw) < 1.5 * DEG && sp < 0.004) break;
+        const w = clamp(-0.9 * al.dyaw, -0.11, 0.11);
+        this.cmd(0, 0, Math.abs(w) < 0.012 ? Math.sign(w) * 0.012 : w);
+        this.detail = `pilot square-up: heading error ${(al.dyaw / DEG).toFixed(1)} deg, offset ${al.offset.toFixed(2)} m`;
+        yield;
+      }
+      this.stop();
+      for (let i = 0; i < 30; i++) yield;
+      const q = PD.padAlignment();
+      if (q.offset > 1.0) {
+        // creep onto the pad centre along the current heading
+        t0 = this.sim.time;
+        while (this.sim.time - t0 < 40) {
+          const rel = this.relBody({ x: L.pad.x, z: L.pad.z });
+          if (Math.abs(rel.f) < 0.3 || Math.hypot(rel.f, rel.r) < 0.3) break;
+          const v = clamp(rel.f * 0.3, -0.15, 0.15);
+          this.cmd(v, 0, 0);
+          this.detail = `pilot creep: ${rel.f.toFixed(2)} m to centre`;
+          yield;
+        }
+        this.stop();
+        for (let i = 0; i < 30; i++) yield;
+      }
+      R.brake = true;
+    }
     this.phase = 'Power dock: couple';
     R.lift.target = ROVER.ride.kneel;
     t0 = this.sim.time;
     while (!PD.connected && this.sim.time - t0 < 20) { this.stop(); this.detail = `kneeling onto coupler: ride ${R.lift.pos.toFixed(2)} m`; yield; }
-    if (!PD.connected) { R.lift.target = 0; R.brake = false; this.log('Power dock: coupler did not engage (not centred on the pad)', 'warn'); return { ok: false, why: 'coupler did not engage' }; }
+    if (!PD.connected) { R.lift.target = 0; R.brake = false; { const q = R.pose(), L2 = PD.layout; this.log(`Power dock: coupler did not engage (not centred on the pad): offset ${Math.hypot(q.x - L2.pad.x, q.z - L2.pad.z).toFixed(2)} m, yaw ${(wrap(q.yaw - L2.yaw) / DEG).toFixed(1)} deg, speed ${R.telemetry().speed.toFixed(3)}`, 'warn'); } return { ok: false, why: 'coupler did not engage' }; }
     this.phase = 'Power dock: charging';
     const s0 = R.power.soc, ts = this.sim.time;
     while (R.power.soc < target && PD.connected) {
@@ -485,14 +541,28 @@ export class Autonomy {
   }
   *missionCharge(target = 0.95) { return yield* this.chargeAtDock(target); }
 
+  // Degraded drive: side (sign of body z: -1 = left, +1 = right) of a driven wheel whose motor is dead, 0 when healthy.
+  // A left turn (wz > 0) turns toward the left side, so a turn AWAY from the dead side has sign(wz) = this value.
+  _deadDriveSide() {
+    const w = this.sim.rover.wheels.find((q) => q.driven && q.fault === 'motor');
+    if (!w) return 0;
+    const b = this.sim.rover.bogies.find((q) => q.wheels.includes(w));
+    return b ? Math.sign(b.z) : 0;
+  }
+
   *alignYaw(yaw, tol = 1.2 * DEG, opts = {}) {
     const R = this.sim.rover;
     let t0 = this.sim.time, noRate = 0, ok = true;
+    const degraded = this._deadDriveSide() !== 0, p0 = R.pose(), errHist = [];
     while (true) {
       const e = this.est();
       const err = wrap(yaw - e.yaw);
       if (Math.abs(err) < tol && Math.abs(this.sensors.imu.yawRate) < 0.004) break;
-      const wmax = R.loaded ? 0.07 : 0.11;
+      const wmax = degraded ? 0.15 : R.loaded ? 0.07 : 0.11;
+      if (degraded) { // ratchet: the pivot with one dead driver is slow and creeps; bounded travel, stall check yields while the error shrinks
+        const pn = R.pose(); errHist.push({ t: this.sim.time, a: Math.abs(err) });
+        if (Math.hypot(pn.x - p0.x, pn.z - p0.z) > 16) { this.log('Degraded pivot: crept more than 16 m, giving up the turn', 'warn'); ok = false; break; }
+      }
       // transit warp: a navigation pivot (sweep already checked clear by pivotSafe, rover empty) turns on rails at the
       // same rate the physics pivot runs; precision line-ups (pickup, docking, charging) never do
       if (opts.rails && !R.loaded && this.sim.warpWanted()) {
@@ -514,6 +584,7 @@ export class Autonomy {
       const steerDone = R.bogies.every((b) => Math.abs(b.steerTarget - b.steer) < 0.02);
       const rate = Math.abs(this.sensors.imu.yawRate);
       if (steerDone && Math.abs(w) > 0.02 && rate < 0.004) noRate += this.dt; else noRate = 0;
+      if (degraded) { while (errHist.length > 1 && this.sim.time - errHist[0].t > 10) errHist.shift(); if (errHist.length > 1 && errHist[0].a - Math.abs(err) > 0.5 * DEG && this.sim.time - errHist[0].t > 9) noRate = 0; }
       if (noRate > 6) { this.log(`PIVOT STALL: commanded yaw ${w.toFixed(3)} rad/s, gyro ${(this.sensors.imu.yawRate).toFixed(4)} rad/s (sweep blocked)`, 'err'); ok = false; break; }
       if (this.sim.time - t0 > 150) { this.log('Pivot timeout', 'warn'); ok = false; break; }
       yield;
@@ -861,9 +932,10 @@ export class Autonomy {
         if (NAV.slip.enabled && on && !R.loaded && this._yawCmdAvg > 0.04) { // yaw efficiency: achieved / commanded yaw rate (skid-steer scrub), CHANGES.md §32
           const e1 = clamp(this._yawActAvg / this._yawCmdAvg, NAV.slip.etaMin, 1); this.eta = this.eta + Math.min(1, this.dt / NAV.slip.etaTau) * (e1 - this.eta);
         }
-        if (on && this._yawCmdAvg > 0.04 && this._yawActAvg < NAV.noSteerRatio * this._yawCmdAvg) this._noSteerT = (this._noSteerT || 0) + this.dt;
+        const degNs = this._deadDriveSide() !== 0, nsRatio = degNs ? 0.03 : NAV.noSteerRatio, nsWin = degNs ? 40 : 15; // one dead driver: yaw 0.10-0.25 of command is the physics
+        if (on && this._yawCmdAvg > 0.04 && this._yawActAvg < nsRatio * this._yawCmdAvg) this._noSteerT = (this._noSteerT || 0) + this.dt;
         else this._noSteerT = Math.max(0, (this._noSteerT || 0) - 2 * this.dt);
-        if (this._noSteerT > 15) { this._noSteerT = 0; return fail(`vehicle is not responding to steering (yaw rate < ${(NAV.noSteerRatio * 100).toFixed(0)} % of command for 15 s): stopped, operator assistance required`); } }
+        if (this._noSteerT > nsWin) { this._noSteerT = 0; return fail(`vehicle is not responding to steering (yaw rate < ${(nsRatio * 100).toFixed(0)} % of command for ${nsWin} s): stopped, operator assistance required`); } }
       const forceReplan = this._replanNow;
       if (this._replanNow) { this._replanNow = false; lastReplan = -1e9; bestD = Infinity; }
       if ((this.slam.lastLoop?.t ?? -1e9) > lastLoopSeen) {
@@ -970,7 +1042,12 @@ export class Autonomy {
       const sinceTurn = Math.hypot(e.x - (lastPivotPos?.x ?? 1e9), e.z - (lastPivotPos?.z ?? 1e9));
       const closeTurn = (this.local.last?.freeDist ?? 99) < 11 && sinceTurn >= 8;
       const pivotLim = sinceTurn < (usingRoute ? 15 : 6) ? 150 : usingRoute ? 60 : closeTurn ? 65 : 115;
-      if (!R.loaded && Math.abs(headErr) > pivotLim * DEG && dGoal > tol + 0.8 && Math.hypot(rel.f, rel.r) > tol + 0.8) { // a loaded rover never point-turns: wheels would dig ruts and the CoM is 6.8 m up
+      // degraded (one dead driven wheel): turns away from the dead side cannot be flown as arcs (that side has one driver), so
+      // stop and pivot (alignYaw, slow, creeps) when a 7 m fore/aft corridor is clear, otherwise take the long way round toward the dead side
+      const deadSide = this._deadDriveSide(), degAway = deadSide !== 0 && !R.loaded && headErr * deadSide > 0 && Math.abs(headErr) > 12 * DEG && dGoal > tol + 0.8 && Math.hypot(rel.f, rel.r) > tol + 0.8;
+      const degPivot = degAway && this.local.pivotSafe(e, 7);
+      const degLongWay = degAway && !degPivot;
+      if (!R.loaded && (Math.abs(headErr) > pivotLim * DEG || degPivot) && dGoal > tol + 0.8 && Math.hypot(rel.f, rel.r) > tol + 0.8) { // a loaded rover never point-turns: wheels would dig ruts and the CoM is 6.8 m up
         if (this.local.pivotSafe(e)) {
           lastPivotPos = { x: e.x, z: e.z };
           const tStop = this.sim.time;
@@ -1155,6 +1232,10 @@ export class Autonomy {
       // gentle curve, where the rover is supposed to be rotating: it under-steered, drifted past 5 deg and snapped back.)
       { const yr = this.sensors.imu.yawRate || 0;
         if (hAbs < NAV.yawDampErrDeg * DEG && Math.abs(lp.k) < 0.02 && Math.abs(yr) > NAV.yawDampRate && yr * headErr > 0) wzCmd *= NAV.yawDampGain; }
+      if (deadSide !== 0) { // degraded: the away-from-dead-side direction has almost no authority; long way round = forward arcs toward the dead side
+        if (degLongWay) { wzCmd = -deadSide * 0.06; vCmd = Math.min(vCmd, 0.5); }
+        else if (wzCmd * deadSide > 0.02) wzCmd = deadSide * 0.02;
+      }
       { const w0 = R.cmd.wz, dw = NAV.maxYawAccel * this.dt; wzCmd = w0 + clamp(wzCmd - w0, -dw, dw); }
       if (NAV.slip.enabled && !loaded) wzCmd = this.trackCurv(vCmd, lp.k, wzCmd); // wzCmd (shaped) is now the DESIRED yaw rate
       this.cmd(vCmd, 0, wzCmd);
@@ -1286,6 +1367,15 @@ export class Autonomy {
         const tgt = { x: e.x - Math.cos(y) * 10, z: e.z + Math.sin(y) * 10 };
         const alt = this.local.evaluate(e, tgt, 0.3, this.sim.rover.loaded, { dir: -1, horizon: 8, kmax: 0.12, relaxed: true });
         if (alt.ok) { lp = alt; break; }
+      }
+    }
+    // degraded drive: prefer a reverse arc whose yaw command (-0.3 k) is NOT the weak direction (away from the dead side)
+    const dsR = this._deadDriveSide();
+    if (dsR !== 0 && lp.ok && -lp.k * dsR > 1e-3) {
+      for (const ang of [0, -0.35, 0.35, -0.7, 0.7]) {
+        const y = e.yaw + ang, tgt = { x: e.x - Math.cos(y) * 10, z: e.z + Math.sin(y) * 10 };
+        const alt = this.local.evaluate(e, tgt, 0.3, this.sim.rover.loaded, { dir: -1, horizon: 8, kmax: 0.12, relaxed: true });
+        if (alt.ok && -alt.k * dsR <= 1e-3) { lp = alt; break; }
       }
     }
     const phase0 = this.phase.replace(/ \(recovery\)$/, '');
@@ -1498,7 +1588,7 @@ export class Autonomy {
   // over the rings, RISE so the V-saddles lift it off the stand's lug notches, then close the ring jaws.
   *_acquire(c, opts = {}) {
     const R = this.sim.rover, T = c.T, RD = ROVER.ride;
-    if (R.loaded) return { ok: false, why: 'already carrying cargo' };
+    if (R.loaded || this.sim.acm?.onDeck) return { ok: false, why: 'already carrying cargo' };
     this._backedOut = true;
     const aft = Math.min(-T.length / 2, (T.adapterX || 0) - (T.adapterLen || 0) / 2);
     const carry = T.carryX || 0;
@@ -1807,7 +1897,7 @@ export class Autonomy {
         latA = latA == null ? lat : latA + (lat - latA) * clamp(this.dt / 1.0, 0, 1);
         if (along < 1.2 && Math.abs(latA) > 0.06) { bad = true; break; }
         if (along < 0.22) break;
-        const vx = along > 10 ? 1.2 : clamp((along - 0.15) * 0.25, 0.025, 0.8);
+        const vx = along > 10 ? 1.2 : clamp((along - 0.15) * 0.25, 0.025, 0.5); // cap 0.8 -> 0.5: with the arc yaw blend (v1.8.0 A1) the arc tracks the commanded curvature at vx >= 0.3, and 0.8 m/s overshot the yaw (0.8 deg left at contact, soft capture failed on box20 / pod4)
         // Inside the ring camera's range: lat is the nose's offset from the port axis (L = frontOff ahead of the
         // turning centre). Since d lat/ds = -(yaw + delta) + L*kap (delta = module-to-rover saddle skew) and
         // d yaw/ds = -kap, kap = -k*lat gives characteristic eq lambda^2 + k*L*lambda + k = 0 with critical
@@ -1829,7 +1919,7 @@ export class Autonomy {
       // low-pass filtered (~1 s) against that sway; lateral is closed by heading over the remaining gap (a yaw
       // change moves the nose by frontOff x dyaw), vertical by trimming the ride while moving. The port face is
       // flat: the module end touches it rim-first unless square, and gentle push (< maxPushN) squares it up.
-      let latF = null, vertF = null, yawF = null, lostT = 0; this._wzI = 0;
+      let latF = null, vertF = null, yawF = null, pitchF = null, lostT = 0; this._wzI = 0;
       // Force-impedance contact (CHANGES.md §17): inside 0.1 m the speed follows the contact force, v = clamp(Kf (Ft - F), -0.02, 0.015),
       // so the module settles on Ft = 1200 N (between softCaptureN 900 and maxPushN 6000) instead of creeping at a fixed rate.
       // First contact (> 200 N) ramps the speed target to zero within 0.1 s, so the tyres' kinetic energy cannot overshoot
@@ -1850,6 +1940,14 @@ export class Autonomy {
         latF = latF == null ? yNow : latF + (yNow - latF) * a;
         vertF = vertF == null ? ring.vertical : vertF + (ring.vertical - vertF) * a;
         yawF = yawF == null ? (ring.yaw ?? 0) : yawF + ((ring.yaw ?? 0) - yawF) * a;
+        // relative pitch: the ring camera's ellipse gives it the same way as yaw. sensors.js does not report ring.pitch yet
+        // (requested in docs/changes/C.md), so until it does the body attitude stands in for it.
+        const pNow = ring.pitch ?? dockAngles(c, ring.port || port).pitch;
+        pitchF = pitchF == null ? pNow : pitchF + (pNow - pitchF) * a;
+        // Pitch trim (rover.js _leveling): contact force on the soft-capture ring pitches the body nose-up (~0.4 deg per kN with the K = 8.16
+        // rover, whose wheelbase is half the legacy one) and the latches need < 0.25 deg. The struts level the body to the pitch that
+        // makes the module axis square to the port (target = body pitch - measured relative pitch), as they level roll.
+        R.setPitchTrim(R.tilt.pitch - pitchF);
         const f = this.sim.cargoForces.get(c);
         contactF = f ? f.port : 0;
         peakN = Math.max(peakN, contactF); this._dockPeakN = Math.max(this._dockPeakN || 0, peakN);
@@ -1891,7 +1989,9 @@ export class Autonomy {
           this._wzI = clamp((this._wzI || 0) * 0.992 + 0.3 * err * this.dt, -wMax, wMax);
           this.cmd(vA, 0, clamp(wDes + 1.5 * err + this._wzI, -wMax, wMax));
           v = vA;
-        } else if ((fF >= 80 || backoffUntil > now || (ring.along > 0.025 && ring.along < 0.15)) && ring.along > 0.010 && Math.abs(yawF) > 0.22 * DEG && Math.abs(latF) <= 0.0042 && fF < 650) {
+        } else if ((fF >= 80 || backoffUntil > now || (ring.along > 0.025 && ring.along < 0.15)) && ring.along > 0.010 && Math.abs(latF) <= 0.0042 && ((Math.abs(yawF) > 0.22 * DEG && fF < 650) || (Math.abs(yawF) > 0.72 * DOCK_CAPTURE_MAX_ANGLE && fF < 1600))) {
+          // (the second clause: at the capture force (> softCaptureN 750 N) the latches now refuse |yaw| >= 0.25 deg, so the
+          // squaring must keep running there; it used to stop at 650 N and the module was latched at whatever yaw it had)
           // Square yaw before rim-first impact or during light pinches with tight lateral margin so nose swing does not break alignment
           const wMax = 0.0005;
           const wDes = clamp(0.22 * yawF, -wMax, wMax), err = wDes - this.sensors.imu.yawRate;
@@ -1904,7 +2004,7 @@ export class Autonomy {
           if (ring.along < 0.08) this.cmd(vHold, 0, 0);
           else this.cmdCurv(vHold, kap);
         }
-        this.detail = `gap ${ring.along.toFixed(3)} m | lat ${(latF * 1000).toFixed(1)} mm | vert ${(vertF * 1000).toFixed(1)} mm | yaw ${(yawF / DEG).toFixed(2)} deg | contact ${contactF.toFixed(0)} N (F ${fF.toFixed(0)} -> ${IMP.Ft}) v ${(v * 1000).toFixed(1)} mm/s`;
+        this.detail = `gap ${ring.along.toFixed(3)} m | lat ${(latF * 1000).toFixed(1)} mm | vert ${(vertF * 1000).toFixed(1)} mm | yaw ${(yawF / DEG).toFixed(2)} deg | pitch ${(pitchF / DEG).toFixed(2)} deg | contact ${contactF.toFixed(0)} N (F ${fF.toFixed(0)} -> ${IMP.Ft}) v ${(v * 1000).toFixed(1)} mm/s`;
         // dwell: in contact at capture force and aligned, continuously
         if (contactF > 2500 && !spiked && (spiked = true)) this.log(`Dock contact spike ${contactF.toFixed(0)} N: gap ${ring.along.toFixed(3)} m, cmd ${(v * 1000).toFixed(1)} mm/s, filtered F ${fF.toFixed(0)} N, lat ${(latF * 1000).toFixed(1)} mm, wheel speed ${(R.telemetry().fwdSpeed * 1000).toFixed(1)} mm/s`, 'info');
         // (the 1.5 s count runs on the ring alignment alone: the contact force of a rigid port face bounces between 0 and the
@@ -1915,7 +2015,11 @@ export class Autonomy {
         const nearAligned = Math.abs(vertF) < 1.6 * IMP.tol && Math.abs(latF) < 1.6 * IMP.tol;
         const gapOk = ring.along < (DOCK.captureGap ?? 0.015);   // the bellows rests ~32 mm proud at the capture force, so a fixed 30 mm never held
         if (gapOk && aligned) alignedT += this.dt; else if (!(ring.along < captureGapHold && nearAligned)) alignedT = 0;
-        if (alignedT >= IMP.dwell && ring.along < (DOCK.captureGap ?? 0.015) && fF > DOCK.softCaptureN && Math.abs(ring.lateral) < IMP.tol && Math.abs(ring.vertical) < IMP.tol) { captured = true; break; } // the latching sample itself is inside the envelope too
+        if (alignedT >= IMP.dwell && ring.along < (DOCK.captureGap ?? 0.015) && fF > DOCK.softCaptureN && Math.abs(ring.lateral) < IMP.tol && Math.abs(ring.vertical) < IMP.tol) { // the latching sample itself is inside the envelope too
+          // angular envelope: square to the port within DOCK_CAPTURE_MAX_ANGLE in yaw and pitch, or no latch
+          if (Math.abs(yawF) < DOCK_CAPTURE_MAX_ANGLE && Math.abs(pitchF) < DOCK_CAPTURE_MAX_ANGLE) { captured = true; break; }
+          if (this.dockAngleRefusals++ % 50 === 0) this.log(`Soft capture held: module not square to ${port.name} (yaw ${(yawF / DEG).toFixed(2)} deg, pitch ${(pitchF / DEG).toFixed(2)} deg, limit ${(DOCK_CAPTURE_MAX_ANGLE / DEG).toFixed(2)} deg)`, 'warn');
+        }
         yield;
       }
       this.stop(); R.brake = true;
@@ -1926,8 +2030,11 @@ export class Autonomy {
     const acc = { port: port.name, lateralMm: ring.lateral * 1000, verticalMm: ring.vertical * 1000, yawDeg: 0, contactN: contactF, peakN: this._dockPeakN || 0, attempts: this._dockAttempts || 1 };
     // yaw error measured between cargo axis and port normal (from docking camera)
     { const rq = c.body.rotation(); const q = new THREE.Quaternion(rq.x, rq.y, rq.z, rq.w); const ax = new THREE.Vector3(1, 0, 0).applyQuaternion(q); acc.yawDeg = wrap(Math.atan2(-ax.z, ax.x) - Math.atan2(port.nz, -port.nx)) / DEG; }
+    { const an = dockAngles(c, port); acc.pitchDeg = an.pitch / DEG; }
     this.metrics.accuracy.push(acc);
-    this.sim.dockCapture(c, port);
+    // the latch hardware checks the angles itself (Sim.dockCapture); a refusal there (camera bias) is a failed capture
+    const capRes = this.sim.dockCapture(c, port);
+    if (capRes && capRes.ok === false) { this.log(`Soft capture refused by the latches: ${capRes.why}`, 'err'); this.stop(); R.brake = false; yield* this.backUp(14); return { ok: false, why: `soft capture refused: ${capRes.why}` }; }
     R.crawlZone = false; // soft capture done: clear of the approach zone
     this.log(`SOFT CAPTURE ${port.name}: lateral ${acc.lateralMm.toFixed(1)} mm, vertical ${acc.verticalMm.toFixed(1)} mm, yaw ${acc.yawDeg.toFixed(2)} deg`, 'ok');
     // berthing sequence: pressure boundary sealed before the module hatch opens
@@ -1937,7 +2044,7 @@ export class Autonomy {
       ['Electrodynamic dust shield pulse + brush sweep of both seal faces (30 mm apart)', 2.5],
       ['Hard capture: latches draw the ring in, seal compressed 30 mm', 1.5],
       ['Dust-exclusion coupling: metal bellows shroud closed around the interface', 2],
-      ['Leak check: vestibule pressure-decay test', 3],
+      [`Leak check: vestibule pressure-decay test (${(this.leakCheckS / 60).toFixed(this.leakCheckS < 600 ? 1 : 0)} min hold)`, this.leakCheckS],
       ['Equalising vestibule to 70.3 kPa', 3],
       ['Receiving cradle jacks extending under module', 2.5],
       ['Module hatch opening', 2],
@@ -1947,6 +2054,8 @@ export class Autonomy {
     for (let i = 0; i < steps.length; i++) {
       this.docking.step = i;
       const t1 = this.sim.time;
+      // the decay hold is quiescent (braked, latched, nothing moves): the sim may step it without physics (Sim._holdStep)
+      this.sim.quiescentHold = i === 3 ? { until: t1 + steps[i][1], gen: this.gen } : null;
       while (this.sim.time - t1 < steps[i][1]) {
         const k = (this.sim.time - t1) / steps[i][1];
         if (i === 3) { this.docking.pressure = 0.5; this.docking.leakRate = 0.0021 * (1 - k) + 0.0006; }
@@ -1955,6 +2064,8 @@ export class Autonomy {
         this.phase = `M5 Berthing ${port.name}`; this.detail = `${i + 1}/${steps.length} ${steps[i][0]}`;
         this.stop(); yield;
       }
+      this.sim.quiescentHold = null;
+      if (i === 4) this.docking.pressure = 70.3; // equalised: the ramp above stops one 0.1 s autonomy tick short (k < 1), so land on the target
       if (i === 3) {
         // The hatch interlock: no PASS, no equalisation and no hatch. A fouled seal (fault "seal") leaks; the response is
         // to back the seal off, clean and re-seat once, and after a second failure to hold with the hatch closed.
@@ -2039,6 +2150,7 @@ export class Autonomy {
   }
   *missionApproach(c) { return yield* this.acquire(c, { approachOnly: true }); }
   *missionPickup(c) {
+    if (c.T.handling === 'arm') return yield* this.missionPickupArm(c); // ACM: two-arm pick (autonomyArm.js)
     const r = yield* this.acquire(c);
     if (r.ok === false) return r;
     return yield* this.stabilityCheck();
@@ -2168,3 +2280,6 @@ export class Autonomy {
     return { ok: true };
   }
 }
+
+// arm-handled cargo (ACM) pick / place missions live in autonomyArm.js
+Object.assign(Autonomy.prototype, armMissions);

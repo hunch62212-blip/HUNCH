@@ -1,8 +1,8 @@
 // Power dock (prototype-scale electrics, CHANGES.md / docs/LUNAR_CHARGING.md): rover teleported near the habitat at 30 % SoC,
 // autonomous "charge" mission over the inductive pad, then bank day-refill, cold-hold and a full-night soak.
 // Pass: the charge mission finishes OK and reaches 90 %; it takes 3.5-5.5 h (the same 0.14 C CC-CV as the old 60 kW
-// heat-limited charger: 1.4 A into the 10 Ah prototype pack, tapering above 80 %); peak current <= 1.4 A (<= 70 kW
-// full-scale); energy delivered to the 128 Wh pack matches the SoC gain; the pack stays under 50 C; the link releases and
+// heat-limited charger: 1.4 A into the 10 Ah prototype pack, tapering above 80 %); peak current <= 1.4 A (~21 kW into the 150 kWh
+// pack, capped at the 20 kW charger); energy delivered to the 128 Wh pack matches the SoC gain; the pack stays under 50 C; the link releases and
 // the rover backs off; the 2 x 126 W arrays refill the 2.4 kWh bank in under a day; a cold bank is not charged; the bank
 // carries the dock's own night load for a full 354 h lunar night and the vault stays above its heater set point.
 import { check, within, atLeast, atMost } from './lib/check.mjs';
@@ -27,7 +27,7 @@ check('charge mission finished OK', !A.gen && rec && rec.ok, rec ? `ok=${rec.ok}
 atLeast('state of charge after the charge', R.power.soc * 100, 89, ' %', 1);
 within('time to charge 30 -> 90 % at 0.14 C', (sim.time - t0) / 3600, 3.5, 5.5, ' h', 2);
 atMost('peak charge current into the prototype pack (CC limit)', maxChargeA, POWER_DOCK.chargeCC_A + 0.01, ' A', 2);
-atMost('peak full-scale equivalent charge power', maxDockW / 1000, 70, ' kW', 1);
+atMost('peak full-scale equivalent charge power (capped at the 20 kW charger, ROVER.battery.dockMaxW)', maxDockW / 1000, ROVER.battery.dockMaxW / 1000 + 0.01, ' kW', 1);
 { const dSoc = R.power.soc - 0.3; within('prototype Wh delivered / 128 Wh vs state-of-charge gain', (D.deliveredWh - del0) / PROTO_PACK.Wh, dSoc, dSoc * 1.15, '', 3); }
 atLeast('dock bank state of charge after the day charge (solar covers it)', D.soc, bank0 - 0.01, '', 3);
 atMost('peak pack temperature while charging', maxTb, 50, ' C', 1);

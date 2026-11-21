@@ -31,7 +31,7 @@ Faults from `sim.injectFault` (`src/sim/sim.js`).
 | Fault (`fault …`) | Expected response (README) | Verified by | Result |
 |---|---|---|---|
 | `block` — boulder field on path | replan around it | `faults` (arrives at habitat) | <!--fblock--> |
-| `wheel <n>` — motor failure | derate 25 %, 5 of 6 wheels driven | `faults` (wheel 3; arrives) | <!--fwheel--> |
+| `wheel <n>` — motor failure | derate 25 %, 3 of the 4 driven wheels remain (outer wheels driven, middle ML/MR passive idlers) | `faults` (a driven wheel; arrives) | <!--fwheel--> |
 | `lidar` — LiDAR loss | slow on proven route, else hold | `faults_m10` (off-route: stopped in 2.5 s, 0 m/s while blind, spare head B in 23 s, mission continues); on a proven route: 0.30 m/s crawl until head B is on, 23 s) | pass |
 | `camera` — camera / fiducial loss | FDIR alarm; traverse continues (docking needs the camera) | `faults_m10` (alarm raised, 188 m covered in the next 60 s; camera dead at the port: berthing refused, 0 N on the port, module held, reason reported) | pass |
 | `comms` — comms loss | continue; queue commands except E-STOP | `faults_m10` (command queued and not applied, mission continues, queue delivered on `clear comms`, E-STOP accepted) | pass |

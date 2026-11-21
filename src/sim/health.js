@@ -13,8 +13,10 @@
 // Effect fidelity per mode: 'physics' = the failure changes the vehicle model (wheel free-rolls, capacity lost,
 // sensor blind, heater off...); 'annunciation' = the failure only changes its sensor channel and the alarm
 // (the physical consequence is not modelled). Listed in the catalogue so nothing is overstated.
-import { ROVER, THERMAL, KEEPALIVE, FAILURES, RADIATOR, MOON } from './config.js';
+import { ROVER, THERMAL, KEEPALIVE, FAILURES, RADIATOR, MOON, DRIVE } from './config.js';
 import { NODES } from './thermal.js';
+import { SOLAR, RAD_ALPHA, MECH } from './lunarParams.js';
+import { MechNode } from './actuators.js';
 
 const WN = ROVER.corners.map((c) => c[2]); // FL FR ML MR RL RR (wheel n = index n-1; odd n = port side)
 const KNEEL = ROVER.ride.kneel;
@@ -76,17 +78,20 @@ export const LRUS = {
 // sig(h, n) returns the sensor reading that trips the detector, or null. persist: seconds it must hold.
 const W = (h, n) => h.sim.rover.wheels[n - 1];
 const wheelBay = (n) => (n % 2 ? 'MCL' : 'MCR');
+// Plan s0/s5.7: only FL FR RL RR (wheels 1 2 5 6) have a motor, controller, resolver and spring brake; ML MR (3 4) are passive idlers.
+const DRV = DRIVE.driven.map((nm) => ROVER.corners.findIndex((c) => c[2] === nm) + 1).sort((a, b) => a - b); // [1, 2, 5, 6]
+const IDL = [1, 2, 3, 4, 5, 6].filter((n) => !DRV.includes(n));                                              // [3, 4]
 const strBay = (n) => (n <= 2 ? 'BTL' : 'BTR');
 const other = (x) => ({ A: 'B', B: 'A', P: 'B' }[x] || 'A');
 
 export const MODES = [
   // ---- mobility ----
   {
-    id: 'mc', lru: 'MC', bay: wheelBay, name: 'Hub motor controller dropout', sev: 'warning', inst: [1, 2, 3, 4, 5, 6], mtbfH: 60000, fidelity: 'physics',
+    id: 'mc', lru: 'MC', bay: wheelBay, name: 'Hub motor controller dropout', sev: 'warning', wheel: true, inst: DRV, mtbfH: 60000, fidelity: 'physics',
     cause: 'inverter gate-driver latch-up or DC-link capacitor failure',
     sensors: ['CAN heartbeat from MC-n (50 Hz)', 'phase current sensor', 'wheel resolver'],
     detect: 'heartbeat missing for 0.3 s with the bus up', persist: 0.3,
-    response: 'drive inhibit on wheel n (free-rolls), torque re-allocated to the other 5 wheels, autonomy speed derated 25 %',
+    response: 'drive inhibit on wheel n (free-rolls), torque re-allocated to the other 3 driven wheels, autonomy speed derated 25 % (autonomy.js: any faulted wheel x0.75)',
     operator: ['Continue the mission derated; avoid slopes > 12 deg loaded', 'Swap the MC drawer at the next stop (field, 15 min, kit spare)'],
     apply: (h, n) => { W(h, n).fault = 'motor'; W(h, n).declutched = false; },
     clear: (h, n) => { if (W(h, n).fault === 'motor' && !W(h, n).declutched) W(h, n).fault = null; },
@@ -94,11 +99,11 @@ export const MODES = [
     sig: (h, n) => (h.sim.rover.powered && !h.ch.mcAlive(n) ? `no heartbeat MC-${n}, phase I ${h.ch.phaseI(n).toFixed(2)} pu` : null),
   },
   {
-    id: 'seize', lru: 'WHL', bay: () => 'WHL', name: 'Wheel-end seized (gearbox / bearing / brake fails to release)', sev: 'warning', inst: [1, 2, 3, 4, 5, 6], mtbfH: 150000, fidelity: 'physics',
+    id: 'seize', lru: 'WHL', bay: () => 'WHL', name: 'Wheel-end seized (gearbox / bearing / brake fails to release)', sev: 'warning', wheel: true, inst: DRV, mtbfH: 150000, fidelity: 'physics',
     cause: 'regolith past the hub seal, gearbox bearing failure, or spring brake stuck applied',
     sensors: ['phase current sensor', 'wheel resolver', 'hub thermistor', 'brake solenoid current'],
     detect: 'phase current at the limit while the resolver shows < 0.05 rad/s and the wheel is commanded > 0.3 rad/s, for 1.5 s', persist: 1.5,
-    response: 'stop, retract the declutch pin so the wheel free-rolls (LRV / Lunokhod heritage), continue on 5 driven wheels derated 25 %',
+    response: 'stop, retract the declutch pin so the wheel free-rolls (LRV / Lunokhod heritage), continue on 3 driven wheels derated 25 % (autonomy.js: any faulted wheel x0.75)',
     operator: ['Confirm the declutch with a 1 m creep (wheel turns freely)', 'Wheel-end swap at the dock (90 min, gantry)'],
     apply: (h, n) => { W(h, n).fault = 'seized'; },
     clear: (h, n) => { W(h, n).fault = null; W(h, n).declutched = false; },
@@ -106,32 +111,54 @@ export const MODES = [
     // a seized wheel stops while the others keep turning; when every wheel is at the current limit and none turns,
     // the vehicle is stalled against something (common mode), not six wheels seizing at once (v1.3.0: four false
     // "seized" isolations against the building wall left 2 driven wheels and the rover ran away from the port)
-    sig: (h, n) => { const w = W(h, n); let turning = 0; for (let m = 1; m <= 6; m++) if (m !== n && Math.abs(h.ch.encW(m)) > 0.15) turning++;
-      // ... and the vehicle itself must be moving (IMU / odometry): a seized wheel is dragged along by the other five.
+    sig: (h, n) => { const w = W(h, n); let turning = 0; for (const m of DRV) if (m !== n && Math.abs(h.ch.encW(m)) > 0.15) turning++;
+      // ... and the vehicle itself must be moving (IMU / odometry): a seized wheel is dragged along by the other wheels.
       // In a tight loaded skid turn some wheels stall at the current limit while others spin and the vehicle stands
       // still: that is a traction stall for the navigation recovery, not a failed hub (dock tests, false isolations)
       const bv = h.sim.rover.body.linvel(), moving = Math.hypot(bv.x, bv.z) > 0.12;
-      return moving && turning >= 3 && h.ch.phaseI(n) > 0.95 && Math.abs(h.ch.encW(n)) < 0.05 && Math.abs(w.target) > 0.3 ? `phase I ${h.ch.phaseI(n).toFixed(2)} pu, resolver ${h.ch.encW(n).toFixed(2)} rad/s, cmd ${w.target.toFixed(2)} rad/s` : null; },
-    respond: (h, n) => { h.hold(3, `declutching wheel ${n}`); h.after(3, () => { const w = W(h, n); if (w.fault === 'seized') { w.fault = 'motor'; w.declutched = true; h.sim.log(`FDIR: wheel ${n} (${WN[n - 1]}) declutched: free-rolling, 5 driven wheels`, 'warn'); } }); },
+      return moving && turning >= 2 && h.ch.phaseI(n) > 0.95 && Math.abs(h.ch.encW(n)) < 0.05 && Math.abs(w.target) > 0.3 ? `phase I ${h.ch.phaseI(n).toFixed(2)} pu, resolver ${h.ch.encW(n).toFixed(2)} rad/s, cmd ${w.target.toFixed(2)} rad/s` : null; },
+    respond: (h, n) => { h.hold(3, `declutching wheel ${n}`); h.after(3, () => { const w = W(h, n); if (w.fault === 'seized') { w.fault = 'motor'; w.declutched = true; h.sim.log(`FDIR: wheel ${n} (${WN[n - 1]}) declutched: free-rolling, 3 driven wheels`, 'warn'); } }); },
   },
   {
-    id: 'cool', lru: 'WHL', bay: () => 'WHL', name: 'Hub motor cooling path degraded', sev: 'caution', inst: [1, 2, 3, 4, 5, 6], mtbfH: 80000, fidelity: 'physics',
+    id: 'idler_seize', lru: 'WHL', bay: () => 'WHL', name: 'Idler wheel bearing seized (ML / MR skids)', sev: 'caution', wheel: true, inst: IDL, mtbfH: 150000, fidelity: 'physics',
+    cause: 'regolith past the idler hub seal or a failed 608-2RS / hub bearing; the tyre skids with drag of about mu*N',
+    sensors: ['idler wheel resolver (passive, no motor)', 'driven-wheel resolvers', 'IMU / odometry'],
+    detect: 'idler resolver rim speed < 10 % of the expected v_fwd + yaw_rate * z_idler (body motion, IMU / odometry) while that exceeds 0.35 m/s and the idler carries > 600 N, for 2 s', persist: 2, derate: 0.5,
+    response: 'no declutch is possible (the idler has no motor or pin): autonomy speed derated 50 % and a dock bearing swap is scheduled',
+    operator: ['Finish the leg at the derated speed and avoid tight skid turns (the locked idler scrubs)', 'Idler hub bearing swap at the dock (90 min, gantry)'],
+    apply: (h, n) => { W(h, n).fault = 'seized'; },
+    clear: (h, n) => { W(h, n).fault = null; },
+    truth: (h, n) => W(h, n).fault === 'seized',
+    // The reference is the body motion (v_fwd + yaw_rate * z_idler), not the driven wheels (which slip in skid turns). A resolver that reads ~0 only counts when the wheel is on the ground (strut load): an idler lifted by a
+    // rock spins down to zero while the vehicle drives on, which tripped this detector 2 times in a 12 min traverse.
+    sig: (h, n) => { const R = h.sim.rover, w = W(h, n), b = R.bogies[n - 1], q = R.body.rotation(), bv = R.body.linvel(), av = R.body.angvel();
+      const fx = 1 - 2 * (q.y * q.y + q.z * q.z), fy = 2 * (q.x * q.y + q.w * q.z), fz = 2 * (q.x * q.z - q.w * q.y);
+      const ux = 2 * (q.x * q.y - q.w * q.z), uy = 1 - 2 * (q.x * q.x + q.z * q.z), uz = 2 * (q.y * q.z + q.w * q.x);
+      const vF = bv.x * fx + bv.y * fy + bv.z * fz, wY = av.x * ux + av.y * uy + av.z * uz, vId = vF + wY * b.z;
+      const rr = ROVER.wheel.radius, om = h.ch.encW(n);
+      return Math.abs(vId) > 0.35 && w.contact && w.load > 600 && Math.abs(om * rr) < 0.1 * Math.abs(vId) ? `idler ${n} resolver ${om.toFixed(2)} rad/s, expected ${(vId / rr).toFixed(2)} rad/s from the body motion` : null; },
+    respond: (h, n) => { h.sim.log(`FDIR: idler ${n} (${WN[n - 1]}) seized: speed derated 50 %, dock bearing swap scheduled`, 'warn'); },
+  },
+  {
+    id: 'cool', lru: 'WHL', bay: () => 'WHL', name: 'Hub motor cooling path degraded', sev: 'caution', wheel: true, inst: DRV, mtbfH: 80000, fidelity: 'physics',
     cause: 'dust on the hub radiator fins or a cracked thermal strap',
-    sensors: ['winding thermistor (each hub)', 'comparison with the other 5 hubs'],
-    detect: 'winding > 40 C, > 20 C above the median of the other hubs and not cooling, for 10 s', persist: 10, derate: 0.7,
+    sensors: ['winding thermistor (each hub)', 'comparison with the other 3 driven hubs'],
+    detect: 'winding > 40 C, > 20 C above the median of the other driven hubs and not cooling, for 10 s', persist: 10, derate: 0.7,
     response: 'autonomy speed derated 30 % to cut copper loss; existing torque derate above 110 C still applies',
     operator: ['Prefer flat routes; rest 20 min if the winding passes 100 C', 'Clean fins / replace strap (field 30 min) or wheel end at the dock'],
     apply: (h, n) => { W(h, n).extraHeat = 4000; }, // W of heat the hub can no longer reject
-    clear: (h, n) => { W(h, n).extraHeat = 0; },
-    sig: (h, n) => { const t = h.ch.windT(n), o = [1, 2, 3, 4, 5, 6].filter((k) => k !== n).map((k) => h.ch.windT(k)).sort((a, b) => a - b), med = (o[2] + o[3]) / 2;
+    clear: (h, n) => { W(h, n).extraHeat = 0; W(h, n)._coolClr = h.sim.time; }, // re-arm hysteresis in sig: a just-repaired hub is still hot
+    sig: (h, n) => { const t = h.ch.windT(n), o = DRV.filter((k) => k !== n).map((k) => h.ch.windT(k)).sort((a, b) => a - b), med = o[1];
       // a hub that is hot but cooling down has a working heat path (it is recovering from a past load or a repaired
       // fault): in vacuum the winding sheds heat only by conduction into the hub, so it stays warm for many minutes
       const w = W(h, n), st = w._coolS || (w._coolS = { t: h.sim.time, T: t, falling: false });
       if (h.sim.time - st.t >= 15) { st.falling = t < st.T - 0.15; st.t = h.sim.time; st.T = t; }
+      // re-arm hysteresis after a clear / repair: stay quiet until the hub is within 10 C of the median or 600 s have passed [ASSUMED]
+      if (w._coolClr != null) { if (t < med + 10 || h.sim.time - w._coolClr > 600) w._coolClr = null; else return null; }
       return t > 40 && t - med > 20 && !st.falling ? `hub ${n} ${t.toFixed(0)} C vs median ${med.toFixed(0)} C` : null; },
   },
   {
-    id: 'enc', lru: 'ENC', bay: () => 'WHL', name: 'Wheel resolver failure', sev: 'caution', inst: [1, 2, 3, 4, 5, 6], mtbfH: 100000, fidelity: 'annunciation',
+    id: 'enc', lru: 'ENC', bay: () => 'WHL', name: 'Wheel resolver failure', sev: 'caution', wheel: true, inst: DRV, mtbfH: 100000, fidelity: 'annunciation',
     cause: 'resolver winding open or connector fretting',
     sensors: ['wheel resolver', 'back-EMF speed estimate from the motor controller'],
     detect: 'resolver reads 0 while back-EMF speed > 0.5 rad/s, for 1 s (latent while parked)', persist: 1,
@@ -140,7 +167,7 @@ export const MODES = [
     sig: (h, n) => (Math.abs(h.ch.bemfW(n)) > 0.5 && Math.abs(h.ch.encW(n)) < 0.05 ? `resolver ${h.ch.encW(n).toFixed(2)} vs back-EMF ${h.ch.bemfW(n).toFixed(2)} rad/s` : null),
   },
   {
-    id: 'strut', lru: 'STRUT', bay: () => 'WHL', name: 'Roller-screw actuator jam / motor winding open circuit', sev: 'caution', inst: [1, 2, 3, 4, 5, 6], mtbfH: 70000, fidelity: 'annunciation',
+    id: 'strut', lru: 'STRUT', bay: () => 'WHL', name: 'Roller-screw actuator jam / motor winding open circuit', sev: 'caution', wheel: true, inst: [1, 2, 3, 4, 5, 6], mtbfH: 70000, fidelity: 'annunciation',
     cause: 'regolith past the bellows into the roller screw (jam), or an open servo winding / connector (CHANGES.md §17)',
     sensors: ['servo phase-current sensor', 'actuator LVDT (stroke)', 'screw resolver'],
     detect: 'actuator force response < 85 % of the value the load model expects, for 5 s', persist: 5, derate: 0.85,
@@ -192,7 +219,7 @@ export const MODES = [
     detect: 'insulation resistance < 100 kOhm for 2 s', persist: 2,
     response: 'automatic branch isolation test (30 s): each 400 V branch is opened in turn until the IMD reading recovers, naming the branch',
     operator: ['Single fault is safe (IT earthing); a second fault would be a short. Repair before the next EVA near the rover', 'Replace the named harness branch (field 40 min)'],
-    apply: (h, x, f) => { f.branch = `wheel ${1 + Math.floor(h.rngOut() * 6)} motor feeder`; },
+    apply: (h, x, f) => { f.branch = `wheel ${DRV[Math.floor(h.rngOut() * DRV.length)]} motor feeder`; },
     sig: (h) => { const r = h.ch.insulationKOhm(); return r < 100 ? `IMD ${r.toFixed(0)} kOhm` : null; },
     respond: (h) => { h.after(30, () => { const f = h.active.get('imd'); if (f) h.sim.log(`FDIR: insulation test isolated the fault to the ${f.branch}`, 'warn'); }); },
   },
@@ -389,7 +416,7 @@ export function partPos(mode, n) {
   if ((b === 'BTL' || b === 'BTR') && typeof n === 'number') { const p = BAYS[b].pos; return [p[0] + (n % 2 ? 0.45 : -0.45), p[1], p[2]]; }
   return BAYS[b].pos.slice();
 }
-export const unitLabel = (mode, n) => `${mode.lru || 'FC'}${n == null ? '' : '-' + n}${typeof n === 'number' && mode.inst.length === 6 ? ` (${WN[n - 1]})` : ''}`;
+export const unitLabel = (mode, n) => `${mode.lru || 'FC'}${n == null ? '' : '-' + n}${typeof n === 'number' && mode.wheel ? ` (${WN[n - 1]})` : ''}`;
 
 export class Health {
   constructor(sim) {
@@ -408,7 +435,12 @@ export class Health {
     this.redund = { fc: 'A', imu: 'A', com: 'P', htr: 'A' };
     this.fx = { speedK: 1, coupler: false, estopLoop: false };
     this.th = { Tv: 20, Tb: 18, louver: { L: 0.3, R: 0.3 }, louverCmd: 0.3, louverB: 0.06, stuck: {}, demandW: 0, vaultW: 0, battW: 0, rejW: 0,
-      hub: new Array(6).fill(THERMAL.hub.initC), hubOn: new Array(6).fill(false), hubW: 0 };
+      hub: new Array(6).fill(THERMAL.hub.initC), hubOn: new Array(6).fill(false), hubW: 0,
+      // radiator solar absorptivity (lunarParams RAD_ALPHA: 0.10 clean .. 0.30 dusty); per-side absorbed sun (W) and
+      // the sun-facing cosine of each side panel (+-body z), for the HUD and tests
+      radAlpha: RAD_ALPHA.clean, solarV: { L: 0, R: 0 }, solarB: 0, solarHub: 0, cosSide: { L: 0, R: 0 }, louverBs: { L: 0.06, R: 0.06 },
+      // roller-screw strut cartridges: radiating thermal nodes with a film heater; motion lockout below MECH.lockC
+      strut: Array.from({ length: 6 }, () => new MechNode(MECH.strut, MECH.lockC)), strutW: 0, strutLock: false };
     this.heaterW = 0;
     this.survival = { on: false, auto: true, t0: 0, why: '' };
     this.array = { state: 'stowed', k: 0, W: 0, yaw: 0 };
@@ -670,6 +702,18 @@ export class Health {
     const survival = !R.powered;
     const V = T.vault, B = T.battery;
     const htrOK = !this.isFailed('htr', this.redund.htr);
+    // Direct sun on the side radiators (lunar audit B1). The panels hang on the tub side walls (RADIATOR), normal = +-body z
+    // (L = port = -z). At the south pole the sun is ~9 deg up and circles 360 deg, so one side or the other faces it at
+    // cos ~0.99 for half of every rotation. The deck overhang above them shades only a ~0.12 m strip at that elevation:
+    // it is NOT counted as shade. Absorbed: Q = alpha S0 A_side max(0, n.s) x louver fraction (closed blades shade the plate).
+    const sunlit = TE ? !!TE.env.sunlit : day;
+    const qr = R.body.rotation();
+    // body +z axis in world
+    const zx = 2 * (qr.x * qr.z + qr.w * qr.y), zy = 2 * (qr.y * qr.z - qr.w * qr.x), zz = 1 - 2 * (qr.x * qr.x + qr.y * qr.y);
+    const cz = zx * sun.x + zy * sun.y + zz * sun.z;
+    const cosSide = { L: sunlit ? Math.max(0, -cz) : 0, R: sunlit ? Math.max(0, cz) : 0 };
+    th.cosSide = cosSide;
+    const alphaRad = th.radAlpha, S = SOLAR.S0;
     // vault: couple instrument TEC reject heat + mount conduction into the avionics cold plate
     let mountQ = 0;
     if (TE) {
@@ -681,17 +725,22 @@ export class Health {
     }
     const qV = (R.powered ? ROVER.avionicsW + ROVER.lidarW + ROVER.cameraW + ROVER.commsW : 60) * (tc?.vaultLoadK ?? 1) + (TE?.fx.vaultExtraW || 0) + mountQ;
     th.louverCmd = tc?.louver != null ? clamp(tc.louver, V.louverMin, 1) : clamp((th.Tv - V.louverOpenC) / (V.louverFullC - V.louverOpenC), V.louverMin, 1);
-    let rej = 0;
+    let rej = 0, solV = 0;
+    const eV4 = (th.Tv + 273.15) ** 4 - Ts4;
     for (const s of ['L', 'R']) {
-      const want = th.stuck[s] != null ? th.stuck[s] : th.louverCmd;
+      // per-side louver: a side whose open panel would absorb more sun than it radiates is closed (sunward louver shut)
+      const Aside = V.radArea / 2, qSun = alphaRad * S * Aside * cosSide[s];
+      const sideNetOpen = V.emis * T.sigma * Aside * eV4 - qSun;
+      const want = th.stuck[s] != null ? th.stuck[s] : (sideNetOpen < 0 ? V.louverMin : th.louverCmd);
       th.louver[s] += clamp(want - th.louver[s], -0.02 * dt, 0.02 * dt);
-      rej += th.louver[s] * V.emis * T.sigma * (V.radArea / 2) * ((th.Tv + 273.15) ** 4 - Ts4);
+      rej += th.louver[s] * V.emis * T.sigma * Aside * eV4;
+      const q = th.louver[s] * qSun; th.solarV[s] = q; solV += q;
     }
     th.demandW = clamp(T.heaterGainWperK * ((survival ? V.survivalSetC : V.setC) + (tc?.setBias || 0) - th.Tv), 0, V.heaterMaxW);
     th.vaultW = htrOK ? th.demandW : 0;
     const sinkK = Math.sqrt(Math.sqrt(Ts4)); // effective radiative sink; the cold structure the boxes leak to sits near it
     rej += T.leakWperK.vault * (th.Tv + 273.15 - sinkK);
-    th.Tv += dt * (qV + th.vaultW - rej) / V.C;
+    th.Tv += dt * (qV + solV + th.vaultW - rej) / V.C;
     th.rejW = rej;
     // battery
     // pack current is the NET bus current: discharge (loads minus generation) or charge (dock / keep-alive array).
@@ -701,16 +750,29 @@ export class Health {
     const qB = I * I * (P.internalR || ROVER.battery.internalR);
     th.battQ = qB;
     th.louverB = tc?.louver != null ? clamp(tc.louver, B.louverMin, 1) : clamp((th.Tb - B.louverOpenC) / (B.louverFullC - B.louverOpenC), B.louverMin, 1);
-    const rejB = th.louverB * B.emis * T.sigma * B.radArea * ((th.Tb + 273.15) ** 4 - Ts4) + T.leakWperK.battery * (th.Tb + 273.15 - sinkK);
+    // battery radiator: [ASSUMED] split over both tub sides like the vault panels, same per-side sunward-louver rule
+    let rejB = T.leakWperK.battery * (th.Tb + 273.15 - sinkK), solB = 0;
+    const eB4 = (th.Tb + 273.15) ** 4 - Ts4;
+    for (const s of ['L', 'R']) {
+      const Aside = B.radArea / 2, qSun = alphaRad * S * Aside * cosSide[s];
+      const l = (B.emis * T.sigma * Aside * eB4 - qSun) < 0 ? B.louverMin : th.louverB;
+      th.louverBs[s] = l;
+      rejB += l * B.emis * T.sigma * Aside * eB4; solB += l * qSun;
+    }
+    th.solarB = solB;
     const dB = clamp(T.heaterGainWperK * ((survival ? B.survivalSetC : B.setC) + (tc?.setBias || 0) - th.Tb), 0, B.heaterMaxW);
     th.demandW += dB;
     th.battW = htrOK ? dB : 0;
-    th.Tb += dt * (qB + th.battW - rejB) / B.C;
+    th.Tb += dt * (qB + solB + th.battW - rejB) / B.C;
     // wheel-end freeze protection (CHANGES.md §17): each hub is a lumped, MLI-wrapped mass. The thermostat has a dead band
     // (on below hubFreezeC, off hubHystK above) and runs only at night or in survival; by day the sun and the regolith keep
     // the hubs well above the grease glass transition. The heaters share the zone controllers' health ('htr').
+    // Sun on the hub: the radiator ring faces outboard (+-body z); it absorbs alpha S0 A cos(i) on the sunlit side only,
+    // coupled into the hub in proportion to the thermal switch (emis / emisHot). Regolith IR is in the Ts4 sink term.
+    // dust-fins scenario (thermal.js): dust raises the ring's solar absorptivity (~0.10 -> ~0.50), emissivity unchanged.
     const Hb = T.hub, night = !day, protect = (survival || this.survival.on || night) && htrOK;
-    let hubW = 0;
+    const alphaHub = TE?.fx.dustAlpha ?? alphaRad;
+    let hubW = 0, solH = 0;
     for (let i = 0; i < 6; i++) {
       const Th = th.hub[i];
       const on = protect && (Th < T.hubFreezeC || (th.hubOn[i] && Th < T.hubFreezeC + T.hubHystK));
@@ -718,12 +780,23 @@ export class Health {
       const qh = on ? T.hubHeaterW : 0; hubW += qh;
       // passive thermal switch: insulated when cold, radiating when hot (THERMAL.hub)
       const emis = Hb.emis + (Hb.emisHot - Hb.emis) * clamp((Th - Hb.switchLoC) / (Hb.switchHiC - Hb.switchLoC), 0, 1);
-      const rad = emis * (TE?.fx.hubEmisK ?? 1) * T.sigma * Hb.radArea * ((Th + 273.15) ** 4 - Ts4); // hubEmisK: dust scenario
+      const rad = emis * (TE?.fx.hubEmisK ?? 1) * T.sigma * Hb.radArea * ((Th + 273.15) ** 4 - Ts4);
+      const side = (R.bogies[i]?.z ?? (i % 2 ? 1 : -1)) < 0 ? 'L' : 'R';
+      const qSun = alphaHub * S * Hb.radArea * cosSide[side] * (emis / Hb.emisHot); solH += qSun;
       const qMotor = R.wheels[i].hubQ || 0;   // heat conducted out of the motor winding (rover.js)
-      th.hub[i] = Th + dt * (qh + (day ? Hb.solarW : 0) + (R.powered ? Hb.motorW : 0) + qMotor - rad) / Hb.C;
+      th.hub[i] = Th + dt * (qh + qSun + (R.powered ? Hb.motorW : 0) + qMotor - rad) / Hb.C;
     }
-    th.hubW = hubW;
-    this.heaterW = th.vaultW + th.battW + hubW;
+    th.hubW = hubW; th.solarHub = solH;
+    // exposed mechanisms (lunar audit B2): struts here, arm joints / latches in arm.js. They radiate to the same sink and
+    // see the sun at the mean side-wall cosine; a 25 W film heater each; motion lockout below the -65 C grease limit.
+    const solarWm2 = sunlit ? S * Math.max(cosSide.L, cosSide.R, Math.max(0, sun.y)) : 0;
+    let strutW = 0, sLock = false;
+    for (const n of th.strut) { n.step(dt, { sinkK, solarWm2, heaterOK: htrOK }); strutW += n.heatW; sLock = sLock || n.locked; }
+    if (sLock && !th.strutLock) this.log(`Strut cold lockout: a roller-screw cartridge is below ${MECH.lockC} C (grease limit); autonomy holds until its heater recovers it`, 'err');
+    th.strutLock = sLock; th.strutW = strutW;
+    if (sLock) this.hold(2, `strut grease below ${MECH.lockC} C (cold lockout)`);
+    if (R.arm) R.arm.thermalEnv = { sinkK, solarWm2, heaterOK: htrOK };
+    this.heaterW = th.vaultW + th.battW + hubW + strutW;
   }
 
   // ---- emergency keep-alive array ----

@@ -202,7 +202,8 @@ function placeAtPort(sim) {
   runCommand(sim, {}, 'fault seal');
   let hatchT = null, failT = null; sim.on('hatch', () => { hatchT = sim.time; });
   A.start('M5 with a fouled seal', A.missionDeliver(c.dest));
-  run(sim, 1500, () => { if (failT == null && said(sim, /Leak check FAIL/)) failT = sim.time; return !!A.gen; });
+  // 4800 s budget like tests/dock.mjs: the equalisation + leak check (1800 s) of the K = 8.16 berthing chain alone outlasts the old 1500 s
+  run(sim, 4800, () => { if (failT == null && said(sim, /Leak check FAIL/)) failT = sim.time; return !!A.gen; });
   const rec = A.history[A.history.length - 1];
   check('seal: leak detected, hatch kept closed', failT != null && (hatchT == null || hatchT > failT), `fail at ${failT?.toFixed(0)} s, hatch at ${hatchT?.toFixed(0)} s`);
   check('seal: cleaned and re-seated', said(sim, /repeating the dust-shield pulse and sweep/i));
@@ -214,11 +215,11 @@ function placeAtPort(sim) {
   const port = placeAtPort(sim);
   runCommand(sim, {}, 'fault seal hard');
   A.start('M5 with a damaged seal', A.missionDeliver(c.dest));
-  run(sim, 1500, () => !/PAUSED: operator decision/.test(A.phase));
+  run(sim, 4800, () => !/PAUSED: operator decision/.test(A.phase));
   run(sim, 30);
   check('seal (damaged): holds for the operator with the hatch closed', /PAUSED: operator decision/.test(A.phase) && !port.hatchOpen && !!A.gen, A.phase);
   check('seal (damaged): module stays latched to the port', !!c.dockJoint || c.state === 'docked', `state ${c.state}`);
   runCommand(sim, {}, 'clear seal'); runCommand(sim, {}, 'resume');
-  run(sim, 1500, () => !!A.gen);
+  run(sim, 4800, () => !!A.gen);
   check('seal (damaged): after service and "resume" the hatch opens and the delivery completes', port.hatchOpen && c.state === 'delivered', `hatch ${port.hatchOpen}, state ${c.state}`);
 }

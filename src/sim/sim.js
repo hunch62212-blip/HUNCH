@@ -5,13 +5,25 @@ import { buildWorld, yawQuat, G_STRUCT } from './world.js';
 import { Rover } from './rover.js';
 import { Sensors } from './sensors.js';
 import { Slam } from './slam.js';
-import { Autonomy } from './autonomy.js';
+import { Autonomy, dockAngles, DOCK_CAPTURE_MAX_ANGLE } from './autonomy.js';
 import { heightAt } from './terrain.js';
 import { Scout } from './scout.js';
 import { Telemetry } from './telemetry.js';
 import { PowerDock } from './powerDock.js';
 import { Health } from './health.js';
 import { Thermal } from './thermal.js';
+import { AcmHandler } from './acmCarry.js';
+
+// Dust-exclusion bellows contact points (docs/changes/C.md): the ring touches the port at BELLOWS_POINTS points spread round
+// its rim, each carrying 1/N of DOCK.bellows k and c, so a module that is not square gets a restoring moment (the single
+// centre point gave none). Rim radius: inside the port opening and the module end face.
+const BELLOWS_POINTS = 4;
+// Quiescent-hold step (s): while the autonomy holds the docked, braked rover for the vestibule leak check, stepOnce
+// advances this much sim time per call without the physics solver (same size as the rails step warp.H).
+const HOLD_STEP_S = 0.5;
+// Transit-warp rails step: a fixed size per time scale, whole physics steps, about one rendered frame (1/60 s of wall time)
+// of sim time, between PHYS.dt and warp.H. It used to follow the wall-clock backlog owed by the frame.
+const RAILS_FRAME_S = 1 / 60;
 
 export class Sim {
   constructor(RAPIER, opts = {}) {
@@ -38,7 +50,7 @@ export class Sim {
     // Operator link. delayS = one-way signal delay: 0 for crew in the habitat 2 km away (default), ~1.3 s light time
     // plus ground-segment latency for an operator on Earth ("comms earth"). Commands and manual drive inputs reach the
     // rover delayS late; an Earth operator cannot joystick a moving vehicle, so manual drive is speed-capped there.
-    this.comms = { delayS: 0, mode: 'local', queue: [], earthDelayS: 1.3, earthDriveCap: 0.3 };
+    this.comms = { delayS: 0, mode: 'local', queue: [], earthDelayS: 2.6, earthDriveCap: 0.3 };
     this.rover = new Rover(this, this.terrain.pad.roverStart);
     this.cargoForces = new Map();
     this.colliderOwner = new Map();
@@ -51,9 +63,18 @@ export class Sim {
     this.sensors = new Sensors(this);
     this.slam = new Slam(this, this.sensors);
     this.autonomy = new Autonomy(this, this.sensors, this.slam);
+    if (opts.leakCheckS != null) this.autonomy.leakCheckS = opts.leakCheckS;
+    // quiescent hold (berthing leak check): set by the autonomy to { until, gen }; Sim._holdStep runs it without physics
+    this.quiescentHold = null;
+    this.holdWarp = { enabled: opts.holdWarp ?? true, steps: 0, simS: 0 };
     this.addModule(this.sensors);
     this.addModule(this.slam);
     this.addModule(this.autonomy);
+    // arm-handled cargo (ACM): states GROUND / CARRIED / DECK, soil feet, hook coupling (acmCarry.js). Spawned after the autonomy and
+    // sensors so the straddle-cargo manifest and fiducial list stay as they were.
+    this.acm = new AcmHandler(this);
+    // no ACM is spawned by default (many tests and the logistics planner assume exactly the three straddle cargos in sim.cargo);
+    // `acm demo` / `acm spawn [kg]` or a scenario adds them
     this.scout = new Scout(this);
     this.addModule(this.scout);
     this.powerDock = new PowerDock(this);
@@ -145,7 +166,7 @@ export class Sim {
   // mm in a step reset the shadow to the solver's answer.
   _precisionPre() {
     if (!this._shadow) this._shadow = new Map();
-    const bodies = [this.rover.body, ...this.cargo.map((c) => c.body)];
+    const bodies = [this.rover.body, ...this.cargo.map((c) => c.body)].filter((b) => b.isDynamic());
     for (const b of bodies) {
       const t = b.translation();
       let s = this._shadow.get(b);
@@ -155,6 +176,7 @@ export class Sim {
   }
   _precisionPost(dt) {
     for (const [b, s] of this._shadow) {
+      if (!b.isDynamic()) continue;   // kinematic ACM (carried / on deck) is placed by acmCarry.js
       const t = b.translation(), vc = b.linvel(), w = b.angvel(), c = b.worldCom();
       // velocity of the body ORIGIN (translation() is the origin, linvel() the centre of mass 2.25 m above it): v + w x r
       const rx = t.x - c.x, ry = t.y - c.y, rz = t.z - c.z;
@@ -178,12 +200,20 @@ export class Sim {
   }
 
   // ---------------- docking hardware ----------------
+  // Returns { ok, why }. The latch hardware has the same angular envelope as the autonomy's capture check: outside
+  // DOCK_CAPTURE_MAX_ANGLE in yaw or pitch the ring cannot seat (a 1 deg yaw is 17 mm at a 1 m rim), so nothing is welded.
   dockCapture(c, port) {
+    const an = dockAngles(c, port);
+    if (Math.abs(an.yaw) >= DOCK_CAPTURE_MAX_ANGLE || Math.abs(an.pitch) >= DOCK_CAPTURE_MAX_ANGLE) {
+      const why = `module not square to ${port.name}: yaw ${(an.yaw * 180 / Math.PI).toFixed(2)} deg, pitch ${(an.pitch * 180 / Math.PI).toFixed(2)} deg (limit ${(DOCK_CAPTURE_MAX_ANGLE * 180 / Math.PI).toFixed(2)})`;
+      return { ok: false, why, yaw: an.yaw, pitch: an.pitch };
+    }
     const t = c.body.translation(), r = c.body.rotation();
     const jd = this.RAPIER.JointData.fixed({ x: t.x, y: t.y, z: t.z }, r, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0, w: 1 });
     c.dockJoint = this.world.createImpulseJoint(jd, this.fixed, c.body, true);
     c.dockedPort = port; port.occupied = c;
     c.state = 'docked';
+    return { ok: true, yaw: an.yaw, pitch: an.pitch };
   }
   // receiving stand at the port: four posts rise from the apron under the lug pins (same stand as the pad)
   extendJacks(port, k) {
@@ -234,7 +264,7 @@ export class Sim {
       case 'camera': this.sensors.faults.camera = true; this.log('FAULT: camera / fiducial pipeline failed', 'err'); break;
       case 'comms': A.faults.comms = true; this.log('FAULT: comms loss with base. Rover continues autonomously; operator commands queued (E-STOP link independent).', 'err'); break;
       case 'battery': { const s = Math.max(0.01, Math.min(1, (arg ?? 15) / 100)); R.power.wh = s * ROVER.battery.capacityWh * (R.power.capK ?? 1); R.power.soc = s; /* s is the SoC of the strings on line */ this.log(`FAULT: battery state of charge forced to ${(s * 100).toFixed(0)}%`, 'err'); break; }
-      case 'wheel': { const N = R.wheels.length, a = Math.round(Number(arg ?? 3)), n = Math.max(1, Math.min(N, Number.isFinite(a) ? a : 3)); R.wheels[n - 1].fault = 'motor'; this.log(`FAULT: wheel ${n} motor controller failed (wheel free-rolls). Torque redistributed to ${N - 1} wheels, speed derated 25% (autonomy.js).`, 'err'); break; }
+      case 'wheel': { const N = R.wheels.length, a = Math.round(Number(arg ?? 1)), n = Math.max(1, Math.min(N, Number.isFinite(a) ? a : 1)); R.wheels[n - 1].fault = 'motor'; this.log(`FAULT: wheel ${n} motor controller failed (wheel free-rolls). Torque redistributed to ${R.wheels.filter((w) => w.driven && w.fault !== 'motor' && w.fault !== 'seized').length} working drive wheels, speed derated 25% (autonomy.js).`, 'err'); break; }
       case 'shift': {
         if (!R.loaded) { this.log('No cargo to shift', 'warn'); return; }
         R.lift.base.z += 0.11; R.lift.shifted = true;
@@ -260,7 +290,33 @@ export class Sim {
     this.emit('fault', 'clear');
   }
 
+  // True while the autonomy's quiescent hold applies: its own mission, rover braked and still, module latched.
+  _holdActive() {
+    const H = this.quiescentHold, R = this.rover;
+    if (!H || !this.holdWarp.enabled) return false;
+    if (H.gen !== this.autonomy.gen || this.time >= H.until - 1e-9) { this.quiescentHold = null; return false; }
+    if (!R.brake || R.estop || this.autonomy.paused) return false;
+    const v = R.body.linvel();
+    return Math.hypot(v.x, v.y, v.z) < 0.01;
+  }
+  // One quiescent-hold step: everything but the rigid-body solver (rover idle power, FDIR, thermal, sensors, autonomy).
+  _holdStep() {
+    const H = this.quiescentHold, dt = PHYS.dt;
+    const h = Math.max(dt, Math.min(HOLD_STEP_S, Math.floor((H.until - this.time) / dt + 1e-6) * dt));
+    this._startupTick();
+    if (this.comms.queue.length) { const q = this.comms.queue; while (q.length && q[0].t <= this.time) q.shift().fn(); }
+    for (const m of this.modules) { m._acc += h; if (m._acc >= 1 / (m.rate || 120) - 1e-9) { m.update(m._acc); m._acc = 0; } }
+    this._stepShiftRecovery(h);
+    if (this.lunar.on) { const Ln = this.lunar; Ln.phase = (Ln.phase + h / Ln.periodS) % 1; this.setSun((this.sunAz0 ?? 205) + Ln.phase * 360, 10 * Math.sin(Ln.phase * 2 * Math.PI) - 1); }
+    const p = this.rover.pose(); this.rover._powerStep(h, 0, p.q, p);
+    this.cargoForces.clear();
+    this.time += h; this.stepCount++; this.holdWarp.steps++; this.holdWarp.simS += h;
+    return h;
+  }
+
+  // one fixed physics step (PHYS.dt), or one quiescent-hold step; returns the sim seconds advanced
   stepOnce(opts = {}) {
+    if (this._holdActive()) return this._holdStep();
     const dt = PHYS.dt;
     this._startupTick();
     // operator link: release uplinked commands whose one-way light time has elapsed (commands.js, "comms")
@@ -279,6 +335,7 @@ export class Sim {
     this._streamT -= dt;
     if (this._streamT <= 0) { this._streamT = 1.0; this.streamRocks([this.rover.pose()]); }
     this.rover.step(dt);
+    this.acm.step(dt);
     this._precisionPre();
     this._bellowsStep(dt);
     this.world.step(this.eventQueue);
@@ -303,24 +360,40 @@ export class Sim {
     }
     this.time += dt;
     this.stepCount++;
+    return dt;
   }
 
   // Port dust-exclusion coupling (DOCK.bellows): spring-damper between the held cargo's forward face and the port
   // plane, acting along the port normal while the face is within the bellows' free length and over the opening.
+  // The ring meets the port at BELLOWS_POINTS rim points (top, sides, bottom), each a spring-damper of k/N, c/N on its own
+  // gap and normal velocity: equal compression gives the old centre force, a tilted face gets a restoring moment.
   _bellowsStep(dt) {
     this._bellowsF = null;
     const B = DOCK.bellows, c = this.rover.lift.cargo;
     if (!B || !c || c.dockJoint) return;
-    const t = c.body.translation(), r = c.body.rotation();
-    const f = new THREE.Vector3(c.T.length / 2, 0, 0).applyQuaternion(new THREE.Quaternion(r.x, r.y, r.z, r.w)).add(new THREE.Vector3(t.x, t.y, t.z));
+    const t = c.body.translation(), r = c.body.rotation(), q = new THREE.Quaternion(r.x, r.y, r.z, r.w);
+    const f = new THREE.Vector3(c.T.length / 2, 0, 0).applyQuaternion(q).add(new THREE.Vector3(t.x, t.y, t.z));
     for (const p of this.ports) {
       if (p.occupied) continue;
       const dx = f.x - p.x, dz = f.z - p.z, gap = dx * p.nx + dz * p.nz;     // + = on the pad side of the port plane
-      if (gap >= B.free || gap < -0.05) continue;
+      if (gap >= B.free + 0.02 || gap < -0.05) continue;
       if (Math.hypot(dx - gap * p.nx, dz - gap * p.nz, f.y - p.y) > DOCK.openingD / 2 + 0.6) continue;
-      const v = c.body.linvel(), vn = v.x * p.nx + v.z * p.nz;              // + = backing away
-      const F = Math.max(0, B.k * (B.free - gap) - B.c * vn);
-      if (F > 0) { c.body.applyImpulseAtPoint({ x: p.nx * F * dt, y: 0, z: p.nz * F * dt }, { x: f.x, y: f.y, z: f.z }, true); this._bellowsF = { c, port: p, F }; }
+      const faceR = c.T.shape === 'cylinder' ? c.T.radius : Math.min(c.T.width, c.T.height ?? c.T.width) / 2;
+      const rimR = Math.max(0.2, Math.min(DOCK.openingD / 2 - 0.1, faceR - 0.05));
+      const v = c.body.linvel(), w = c.body.angvel(), com = c.body.worldCom();
+      const N = BELLOWS_POINTS, kN = B.k / N, cN = B.c / N;
+      let Ft = 0;
+      for (let i = 0; i < N; i++) {
+        const a = (i / N) * 2 * Math.PI;
+        const pt = new THREE.Vector3(c.T.length / 2, rimR * Math.cos(a), rimR * Math.sin(a)).applyQuaternion(q).add(new THREE.Vector3(t.x, t.y, t.z));
+        const gi = (pt.x - p.x) * p.nx + (pt.z - p.z) * p.nz;
+        if (gi >= B.free) continue;
+        const rx = pt.x - com.x, ry = pt.y - com.y, rz = pt.z - com.z;   // point velocity v + w x r, along the port normal
+        const vn = (v.x + w.y * rz - w.z * ry) * p.nx + (v.z + w.x * ry - w.y * rx) * p.nz;   // + = backing away
+        const F = Math.max(0, kN * (B.free - gi) - cN * vn);
+        if (F > 0) { c.body.applyImpulseAtPoint({ x: p.nx * F * dt, y: 0, z: p.nz * F * dt }, { x: pt.x, y: pt.y, z: pt.z }, true); Ft += F; }
+      }
+      if (Ft > 0) this._bellowsF = { c, port: p, F: Ft };
       return;
     }
   }
@@ -370,9 +443,15 @@ export class Sim {
     this.streamRocks([this.rover.pose()]);
     this._shadow = null; // float64 position shadows restart from the solver's positions
   }
-  // one step of whichever kind applies; returns the sim seconds advanced. owed (optional): sim seconds the caller still has to
-  // pay this frame; a rails step is sized to it (between one physics step and warp.H) so that at 5-20x the rover moves every
-  // frame instead of jumping warp.H = 0.5 s of travel every few frames.
+  // Fixed rails step for the current time scale: whole physics steps, ~one frame of sim time (RAILS_FRAME_S x scale), clamped
+  // to [PHYS.dt, warp.H]. It depends only on timeScale, never on the wall-clock backlog, so a warped leg integrates the same
+  // way on a fast or a slow machine (5x: 0.083 s, 10x: 0.167 s, >= 30x: 0.5 s).
+  railsStep() {
+    const n = Math.round(RAILS_FRAME_S * Math.max(1, this.timeScale) / PHYS.dt);
+    return Math.max(1, Math.min(Math.round(this.warp.H / PHYS.dt), n)) * PHYS.dt;
+  }
+  // one step of whichever kind applies; returns the sim seconds advanced. h (optional): rails step size, clamped to
+  // [PHYS.dt, warp.H]; advance() always passes the fixed railsStep(), tests may pass their own.
   stepAuto(owed) {
     let skipAutonomy = false;
     if (this.warpWanted() && this.autonomy.railsOk) {
@@ -381,8 +460,7 @@ export class Sim {
       skipAutonomy = r.autoRan;
     }
     this.endWarp();
-    this.stepOnce({ skipAutonomy });
-    return PHYS.dt;
+    return this.stepOnce({ skipAutonomy }) || PHYS.dt;
   }
 
   // advance by wall-clock dt with time scaling, within a CPU budget per frame; returns the sim seconds advanced
@@ -398,7 +476,7 @@ export class Sim {
     const t0 = performance.now(), simT0 = this.time;
     let steps = 0;
     while (this._acc >= PHYS.dt) {
-      this._acc -= this.stepAuto(this._acc);
+      this._acc -= this.stepAuto(this.railsStep());   // fixed step, not the wall-clock backlog (it may overpay: _acc goes negative and the next frame waits)
       if (++steps >= effectiveMaxSteps || performance.now() - t0 > effectiveBudget) break;
     }
     // carry a little backlog between frames; beyond that the CPU cannot keep up with the time scale

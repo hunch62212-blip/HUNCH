@@ -1,7 +1,7 @@
 // AEGIS power dock, PROTOTYPE-SCALE electrics (docs/LUNAR_CHARGING.md): two sun-tracking vertical solar masts (VSAT-style)
 // feed a 24 V 100 Ah LiFePO4 bank in a heated, bermed vault; an INDUCTIVE pad (no exposed contacts, dust tolerant, after the
 // Astrobotic / WiBotic lunar wireless charger) charges the rover. Everything here is in prototype units (V, A, W, Wh); the
-// rover pack is treated as the 128 Wh prototype pack with the same state of charge, and the only coupling to the 420 kWh sim
+// rover pack is treated as the 128 Wh prototype pack with the same state of charge, and the only coupling to the 150 kWh sim
 // pack is R.power.dockW = chargeW x PROTO_TO_FULL_WH (config.js).
 import { POWER_DOCK, PROTO_PACK, PROTO_TO_FULL_WH, LFP_OCV, ROVER, MOON } from './config.js';
 import { heightAt } from './terrain.js';
@@ -60,6 +60,14 @@ export class PowerDock {
   get bankV() { return POWER_DOCK.bankCells * ocv(this.soc) + this.bankA * POWER_DOCK.bankR; }
   get floorSoc() { return this.night ? POWER_DOCK.nightReserveSoc : POWER_DOCK.bankFloor; }
   get atFloor() { return this.soc <= this.floorSoc + 1e-6; }
+  // Pad pilot-coil alignment read-out: the inductive pilot reports the coil offset and the heading error (mod 180 deg, the
+  // rover can park either way round) of the receiver coil against the pad, used for the final square-up before kneeling.
+  padAlignment() {
+    const p = this.sim.rover.pose(), L = this.layout;
+    let dyaw = Math.atan2(Math.sin(p.yaw - L.yaw), Math.cos(p.yaw - L.yaw));
+    if (Math.abs(dyaw) > Math.PI / 2) dyaw -= Math.sign(dyaw) * Math.PI;
+    return { dyaw, offset: Math.hypot(p.x - L.pad.x, p.z - L.pad.z) };
+  }
   roverOnPad() {
     const R = this.sim.rover, p = R.pose(), L = this.layout;
     const dyaw = Math.abs(Math.atan2(Math.sin(p.yaw - L.yaw), Math.cos(p.yaw - L.yaw)));
@@ -132,6 +140,10 @@ export class PowerDock {
     const canDis = this.bankWh > this.floorSoc * cap && this.Tbank > D.dischargeMinBankC;
     const avail = Math.max(0, this.solarW - this.loadW) + (canDis ? D.bankMaxDischargeW : 0);
     this.inW = Math.min(wantW / this.linkEff, avail, D.linkMaxW);
+    // the full-scale charger rating (20 kW, ROVER.battery.dockMaxW) limits the prototype charge too, so the bank, the delivered-Wh
+    // accounting and the rover pack all see the same power (capping only the coupling made the bank give 15 % more than the rover got)
+    const maxProtoW = ROVER.battery.dockMaxW / PROTO_TO_FULL_WH;
+    if (this.inW * this.linkEff > maxProtoW) this.inW = maxProtoW / this.linkEff;
     this.chargeW = this.inW * this.linkEff;                       // prototype W into the pack
     this.chargeA = this.packV > 0 ? this.chargeW / this.packV : 0;
     // 7. bank energy balance (LiFePO4 will not take charge below 0 C: the MPPT backs off until the vault heater warms it)
@@ -145,8 +157,8 @@ export class PowerDock {
     this.bankWh = clamp(this.bankWh + dWh, 0, cap);
     this.bankA = netW / Math.max(1, this.bankV);
     this.genWh += this.solarW * dt / 3600; this.deliveredWh += this.chargeW * dt / 3600;
-    // 9. the only coupling to the full-scale sim: the same C-rate into the 420 kWh pack
-    R.power.dockW = this.chargeW * PROTO_TO_FULL_WH;
+    // 9. the only coupling to the full-scale sim: the same C-rate into the 150 kWh pack, limited to the full-scale charger rating
+    R.power.dockW = Math.min(this.chargeW * PROTO_TO_FULL_WH, ROVER.battery.dockMaxW);
     // (a coupled rover that gets no power is not always full: the bank may be at its floor, or the pack too hot)
     const Tb1 = sim.health ? sim.health.th.Tb : 20;
     const floorTxt = night ? `HOLD: bank at night reserve ${(D.nightReserveSoc * 100).toFixed(0)} %, waiting for sunrise` : `HOLD: bank at floor ${(D.bankFloor * 100).toFixed(0)} %, waiting for sun`;

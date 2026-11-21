@@ -49,9 +49,9 @@ check('blocked command reported, not run', said.some(([m]) => /reset.*blocked/.t
 check('request is non-thinking, JSON-schema, state included', lastBody.think === false && lastBody.format?.type === 'object' && lastBody.messages.at(-1).content.includes('"battery"'));
 
 // fault advisor: suggestion only, runs after "ai ok"
-answer = '{"reply":"MC-3 lost, derated.","commands":["status"]}';
+answer = '{"reply":"MC-1 lost, derated.","commands":["status"]}';
 said.length = 0;
-sim.health.inject('mc', 3);
+sim.health.inject('mc', 1);
 for (let i = 0; i < 120 && !sim.health.alarms.size; i++) sim.stepOnce();
 check('alarm raised for the advisor', sim.health.alarms.size > 0, [...sim.health.alarms.keys()].join(','));
 await new Promise((r) => setTimeout(r, 1700));

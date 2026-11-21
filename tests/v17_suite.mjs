@@ -7,7 +7,7 @@ import { check, atLeast, atMost, within, equal } from './lib/check.mjs';
 import RAPIER from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';
 import { Sim } from '../src/sim/sim.js';
-import { ROVER, MISSION, PHYS, NAV, K } from '../src/sim/config.js';
+import { ROVER, MISSION, PHYS, NAV, K, K_LEGACY } from '../src/sim/config.js';
 import { CLS, RES, TILE } from '../src/sim/slam.js';
 import { heightAt } from '../src/sim/terrain.js';
 import { drawnRide, DRAWN_RIDE_RANGE } from '../src/render/aegis.js';
@@ -32,7 +32,8 @@ function stroke(target, sec = 9) {
 }
 {
   const kn = stroke(ROVER.ride.kneel);
-  within('squat-down 0 -> kneel: body settled within 2 cm (S-curve)', kn.settle, 2.5, 4.5, ' s', 2);
+  // the S-curve duration is T = tFull x stroke / fullAt for strokes under fullAt (0.5 m): the 0 -> kneel stroke is now 0.326 m (k(0.040), was 0.65 m at K = 16.3), so T = 2.4 s and the 2 cm band (6 % of the stroke) is reached at ~0.77 T = 1.9 s
+  within('squat-down 0 -> kneel: body settled within 2 cm (S-curve)', kn.settle, 1.5, 2.6, ' s', 2);
   atMost('squat-down: peak body acceleration (was a step in speed)', kn.aPk, 0.6, ' m/s2', 2);
   atMost('squat-down: body speed 0.2 s after the command (ease-in)', kn.v02, 0.05, ' m/s', 3);
   const up = stroke(ROVER.ride.carry);
@@ -75,7 +76,8 @@ S.lidarAuto = true;
 {
   const p = R.pose(), W = (bx, by, bz) => new THREE.Vector3(bx, by, bz).applyQuaternion(p.q).add(new THREE.Vector3(p.x, p.y, p.z));
   const m0 = S._selfMask(p), pt = (v) => m0(v.x, v.y, v.z);
-  check('empty: chassis box point masked', pt(W(2, 2.5, 1)) === true);
+  // a point inside the chassis box, from the frame geometry (belly tub to deck), not hard-coded metres (the frame is k(0.30) x k(0.302) = 2.45 m half extents at K = 8.16)
+  { const F = ROVER.frame; check('empty: chassis box point masked', pt(W(0.8 * F.halfLen, (F.tubY0 + F.deckY) / 2, 0.4 * F.halfWid)) === true); }
   check('empty: terrain 8 m ahead not masked', pt(W(8, -0.2, 0)) === false);
   check('empty: terrain under the chassis not masked', pt(W(0, -0.3, 0)) === false);
   const c = sim.cargo[0], T = c.T; const cargo0 = R.lift.cargo, joint0 = R.lift.joint, base0 = R.lift.base;
@@ -163,4 +165,4 @@ S.lidarAuto = true;
   A.abort('test over');
 }
 // ---- 8. navigation constants (smoothing)
-check('nav constants', NAV.lookaheadMin >= 10 && NAV.headingDeadbandDeg === 3 && NAV.maxYawAccel === 0.1 && NAV.inflateLoaded === 6.5 && NAV.inflateEmpty === 5.8);
+check('nav constants', NAV.lookaheadMin >= 10 && NAV.headingDeadbandDeg === 3 && NAV.maxYawAccel === 0.1 && NAV.inflateLoaded === 6.5 && NAV.inflateEmpty === +(5.8 * K / K_LEGACY).toFixed(3)); // empty inflation is the legacy 5.8 m x KS (loaded 6.5 m keeps the 12.19 m module)

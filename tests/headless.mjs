@@ -44,14 +44,16 @@ within('speed tracking at 1.5 m/s', s.tl.fwdSpeed, 1.35, 1.65, ' m/s');
 
 let y0 = R.pose().yaw;
 R.cmd.vx = 1.5; R.cmd.wz = 1.5 / 14; run(8); s = st('turn');
-atLeast('skid-steer turn: heading change in 8 s at 0.107 rad/s cmd', dyaw(y0, s.p.yaw), 20, ' deg', 1);
+// P1b: 6WD gave 24.5 deg; with ML/MR passive idlers the four outer wheels carry all the thrust and out-push their own lateral scrub: 15.4 deg (docs/ARM_CARGO_BUILD_PLAN.md s5.7, CHANGES.md s33)
+atLeast('skid-steer turn: heading change in 8 s at 0.107 rad/s cmd', dyaw(y0, s.p.yaw), 14, ' deg', 1);
 
 R.cmd.wz = 0; R.cmd.vx = 0; run(6); s = st('stop');
 atMost('stop from 1.5 m/s within 6 s', Math.abs(s.tl.fwdSpeed), 0.05, ' m/s');
 
 y0 = R.pose().yaw; const pv0 = R.pose();
 R.cmd.vz = 0; R.cmd.wz = 0.08; run(10); s = st('pivot');
-atLeast('pivot: heading change in 10 s', dyaw(y0, s.p.yaw), 20, ' deg', 1);
+// P1b: 4 outer wheels only (middle wheels give no pivot thrust): 18.8 deg after the Coulomb-direction saturation fix; was >= 20 on 6WD
+atLeast('pivot: heading change in 10 s', dyaw(y0, s.p.yaw), 15, ' deg', 1);
 atMost('pivot: stays in place', Math.hypot(s.p.x - pv0.x, s.p.z - pv0.z), 0.5, ' m');
 R.cmd.wz = 0; run(4); st('stop2');
 
@@ -74,6 +76,8 @@ R.lift.target = 0; run(6); const yRide0 = R.pose().y;
 R.lift.target = ROVER.ride.kneel; run(6); const yKneel = st('kneel').p.y;
 R.lift.target = ROVER.ride.carry; run(8); const yCarry = st('carry ride').p.y;
 R.lift.target = 0; run(6); st('ride 0');
-atLeast('kneel lowers body', yRide0 - yKneel, 0.5, ' m');
-atLeast('carry ride raises body', yCarry - yRide0, 0.5, ' m');
+// Thresholds come from the K = 8.16 geometry: the commanded strokes are ROVER.ride.kneel = -0.326 m and carry = +0.408 m (the legacy
+// 1:16.3 rover had ~0.65 / 0.8 m, hence the old 0.5 m floors). The body must achieve >= 95 % of the commanded stroke.
+atLeast('kneel lowers body', yRide0 - yKneel, 0.95 * -ROVER.ride.kneel, ' m');
+atLeast('carry ride raises body', yCarry - yRide0, 0.95 * ROVER.ride.carry, ' m');
 console.log('sim ms per step', ((Date.now() - t0) / sim.stepCount).toFixed(3));

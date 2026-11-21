@@ -23,7 +23,7 @@
 | Weight layout | Use **Option R** (§3): battery low at x = −80 mm, electronics at +50 mm, ACM deck place point at −120 mm, loaded CG at x ≈ 0. Reject the "everything at the back" layout (Option U). |
 | Tip rule | Arm lifts are refused or aborted when the predicted tip ratio is above **0.75** (ASME B30.5-style "rated ≤ 75 % of tipping"), or when `tilt.marginF` < 8°. |
 | CAD | Fusion 360 scripts in `cad/fusion/`. **`cad/fusion/params.csv` is the single source of truth.** Script `00` creates a new Hybrid design. Each later script deletes and rebuilds its own component, so reruns are safe. |
-| Material | **PETG by default.** ASA for parts exposed to sun or outdoors. PA-CF only for hooks and towers, and only if the team has a hardened nozzle, an enclosure and a dryer. PLA is for fit coupons only. |
+| Material | **PETG by default.** ASA for parts exposed to sun or outdoors, and for the **motor mounts** (the motor can reaches about 70-90 °C and PETG creeps above about 70 °C). PA-CF only for hooks and towers, and only if the team has a hardened nozzle, an enclosure and a dryer. PLA is for fit coupons only. |
 
 The only open items are component sizes the user will supply. They are listed in §11.
 
@@ -66,9 +66,9 @@ Use heat-set inserts on every clamped or re-assembled joint. Never thread screws
 
 ### 1.6 Print vs buy
 
-| Buy | Print (PETG unless noted) |
+| Buy | Print (PETG unless noted; motor mounts in ASA) |
 |---|---|
-| Gearmotors, encoders, bearings (608-2RS), shafts and pins, 2020 extrusion, deck sheet, servos, metal 25T servo horns, electronics, ToF sensors, switches, fasteners and inserts, trunnion rod (Ø12 mm 6061), battery | Motor mounts, idler hub carriers, rocker/bogie joint blocks, frame corner brackets, battery tray, electronics tray, sensor nose (ASA), LiDAR mast (ASA), arm towers, link plates, servo cradles, hooks, latch gates, stow cradles (TPU pads), deck pins and latch, ACM shell, ACM feet and bushings, fit coupon |
+| Gearmotors, encoders, bearings (608-2RS), shafts and pins, 2020 extrusion, deck sheet, servos, metal 25T servo horns, electronics, ToF sensors, switches, fasteners and inserts, trunnion rod (Ø12 mm 6061), battery | Motor mounts (ASA), idler hub carriers, rocker/bogie joint blocks, frame corner brackets, battery tray, electronics tray, sensor nose (ASA), LiDAR mast (ASA), arm towers, link plates, servo cradles, hooks, latch gates, stow cradles (TPU pads), deck pins and latch, ACM shell, ACM feet and bushings, fit coupon |
 
 **Print settings** (0.4 mm nozzle, 0.2 mm layers; 0.16 mm for fit-critical small parts):
 
@@ -96,14 +96,14 @@ Prices are approximate 2026 USD. Items marked "existing" are already in `public/
 | 4 | 8 mm steel shaft 300 mm (or M8 bolts) | 2 | Idler axles, pivot pins | 12 |
 | 5 | Wheels 130 × 75 mm (existing) | 6 | 4 driven, 2 idler | — |
 | 6 | Cytron MDD10A dual 10 A driver (3.3 V logic OK) | 2 | One channel per driven motor | 2×25 |
-| 7 | 12.8 V 10 Ah LiFePO4 + BMS (existing), 30 A fuse, switch, XT60 | 1 | Main power | — |
-| 8 | Latching E-stop mushroom button | 1 | Cuts the motor and servo rails | 10 |
-| 9 | Raspberry Pi 5, BNO085, YDLIDAR X2L ×2, OV5647 cams (existing) | — | High-level control and sensing | — |
+| 7 | 12.8 V 15 Ah LiFePO4, BMS ≥ 20 A continuous / 40 A pulse (30 A / 45 A preferred, e.g. Bioenno BLF-1215WS), 30 A main fuse, main switch, XT60, 12 AWG main lead; BMS continuous rating ≥ 30 A `[VERIFY]` | 1 + 1 spare (hot swap) | Main power (see `PROTOTYPE_POWER_BUDGET.md`) | 2×110 |
+| 8 | Latching E-stop mushroom button, contacts rated ≥ 30 A DC or switching a relay/contactor; does not cut the Pi | 1 | Cuts the motor and servo rails | 10 |
+| 9 | Raspberry Pi 4 Model B 4 GB, BNO085, YDLIDAR X2L ×2 (powered from the 5.1 V buck, data only on Pi USB), 1 × OV5647 on CSI + 1 USB camera (Pi 4 has one CSI port) (existing) | — | High-level control and sensing | — |
 | 10 | **ESP32-S3 DevKitC-1** (replaces the Mega for motion: PCNT ×4 encoders, MCPWM, I²C) | 1 | Motion MCU with 250 ms watchdog | 15 |
 | 11 | PCA9685 16-ch servo driver (OE pin wired to the watchdog) | 1 | 9 servos | 8 |
-| 12 | UBEC-A 20 A adjustable, set to 7.4 V | 1 | Shoulder and elbow servos | 25 |
+| 12 | UBEC-A 20 A adjustable, set to 7.4 V | 1 | Shoulder and elbow servos; upgrade to 25–30 A if the measured 60 kg servo stall current is above 6 A | 25 |
 | 13 | UBEC-B 10 A, set to 6.0 V | 1 | Wrist, latch and deck-latch servos | 15 |
-| 14 | INA226 current/voltage monitor | 2 | Measures both servo rails (validates the sim) | 2×5 |
+| 14 | INA226 current/voltage monitor | 3 | Both servo rails + main bus (amp-hour counting) | 3×5 |
 | 15 | **60 kg·cm-class HV servo** (e.g. DS5160-type, about 65 × 30 × 48 mm, 160 g `[VERIFY]`) | 4 + 1 spare | Shoulders, elbows | 5×30 |
 | 16 | MG996R (or DS3218) | 3 + 1 spare | Wrists, deck latch | 4×10 |
 | 17 | MG90S | 2 + 1 spare | Hook latch gates | 3×4 |
@@ -114,13 +114,22 @@ Prices are approximate 2026 USD. Items marked "existing" are already in `public/
 | 22 | Stainless SHCS M2.5/M3/M4 kit, nyloc nuts, washers | 1 | Fasteners | 20 |
 | 23 | 2020 V-slot extrusion, 3 m total, plus corner brackets and T-nuts | 1 set | Chassis frame | 40 |
 | 24 | 3 mm aluminium-composite or 4 mm plywood deck, 600 × 604 mm | 1 | Deck | 20 |
-| 25 | Wire: 16 AWG silicone, 22 AWG, servo leads 300 mm ×9, XT30/JST | 1 set | Harness | 25 |
+| 25 | Wire: 12 AWG silicone (main bus), 14 AWG (drive branches), 16 AWG (servo rails), 22 AWG, servo leads 300 mm ×9, XT30/JST; motor leads ≥ 20 AWG | 1 set | Harness | 25 |
 | 26 | PETG 2 kg; ASA 1 kg; TPU 0.25 kg | — | Prints | 70 |
 | 27 | Ø12 mm 6061 rod, 300 mm | 1 | ACM trunnions (2 × 40 mm) | 8 |
 | 28 | Steel washers or ballast shot, about 0.6 kg | 1 | ACM ballast to 1.0 kg, CG set by `acm_cg_y` | 5 |
 | 29 | Printed AprilTag (36h11, 60 mm) | 1 | ACM fiducial | — |
+| 30 | 5.1 V 5 A buck converter (8–20 V in) | 1 | Logic rail: Pi 4, ESP32-S3, LiDARs, fan, sensors | 12 |
+| 31 | Inline blade fuse holders + fuses: 15 A ×3, 7.5 A ×1, 3 A ×1 | 1 set | Branch protection (2 drivers, UBEC-A, UBEC-B, logic) | 12 |
+| 32 | 1000–2200 µF 25 V low-ESR electrolytic capacitor | 2 | One at each MDD10A input | 4 |
+| 33 | Pi 4 heatsink + 30–40 mm 5 V fan | 1 | Required: a bare Pi 4 throttles in the closed tub (see `THERMAL_LOAD_PROTOTYPE.md` §4.5) | 8 |
+| 34 | (removed: the Pi 5 Active Cooler does not fit the Pi 4; row 33 replaces it) | 0 | — | 0 |
+| 35 | 40 mm 5 V fan + intake mesh | 1 | Tub exhaust | 6 |
+| 36 | 10 kΩ NTC thermistors | 3 | 2 motor cans + tub air, on ESP32 ADC | 3 |
 
-Estimated new spend is about $800. The prototype mass budget is in §3.1: 8.30 kg curb with arms, 9.30 kg loaded.
+Estimated new spend is about $1,050 (including two 15 Ah packs). The prototype mass budget is in §3.1: 8.30 kg curb with arms, 9.30 kg loaded.
+
+Power: one 15 Ah pack covers about 3.4 h of a typical demo hour (avg 47 W, peaks 18 A, 28 A with all wheels stalled); see `PROTOTYPE_POWER_BUDGET.md`.
 
 ---
 
@@ -157,6 +166,8 @@ Estimated new spend is about $800. The prototype mass budget is in §3.1: 8.30 k
 | **Curb total** | **8.30** | x = −27.4 | x = +9.7 |
 | ACM on deck (place point) | 1.00 | −180 | **−120** |
 
+> The 15 Ah pack is about 1.8–2.2 kg against the 1.65 kg above. Mounted at x = −80 mm the extra ≈0.35 kg moves the CG about 3 mm rearward; the Option R verdict is unchanged.
+
 ### 3.2 Prototype results
 
 | Case | U: x_cg / front / driven | R: x_cg / front / driven |
@@ -183,16 +194,16 @@ Tip ratio = overturning moment ÷ restoring moment about the front contact line 
 Inputs:
 - Rover 8,000 kg at comLocal x = 0.
 - Arm fixed 2 × 210 kg at x = 2.45 m.
-- Arm moving 2 × 430 kg at 0.98 m stowed, 5.85 m lifting.
+- Arm moving 2 × 430 kg at 0.864 m stowed (FK of the stow pose, `massProps()`), 5.85 m lifting.
 - Deck guides 150 kg.
 - ACM 2,400 kg.
-- Balance rule gives `DECK.placeX` = −(1029 + 843)/(150 + 2400) = **−0.734 m**. The sim computes this at init. It differs from the prototype's −120 mm because the mass ratios differ.
+- Balance rule gives `DECK.placeX` = −(1029 + 843)/(150 + 2400) = **−0.695 m** (moving links at the FK stow CG, x = 0.864 m, not the 0.98 m first assumed: −(1029 + 744)/(150 + 2400)). The sim computes this at init (`computeDeckPlaceX()`). It differs from the prototype's −120 mm because the mass ratios differ.
 
 | Case | Result |
 |---|---|
-| Empty, stowed | x = +0.187 m, front 36.5 % |
-| Loaded, flat | x ≈ 0, front 33.3 % |
-| Loaded, 15° / 20° uphill | front 20.2 % / 15.5 % |
+| Empty, stowed | x = +0.177 m, front 36.3 % (arm.js `cg()`, includes the 150 kg deck guides) |
+| Loaded, flat | x = 0, front 33.3 % |
+| Loaded, 15° / 20° uphill | front 19.2 % / 14.1 % (sim CG height 3.10 m; the original 20.2 / 15.5 used 2.88 m). The §3.2 rule "20° uphill front share ≥ 15 %" is missed by 0.9 points at full scale; not tuned |
 | Front lift (ACM at x = 6.855 m) | restoring 30,987 kg·m; overturning 7,051 → **tip ratio 22.8 %**; tipping payload 10,547 kg; 75 %-rated 7,910 kg |
 | Lift on a 10° nose-down slope | tip ratio 28.3 % |
 | Same layout with place at −2.94 m (U-style) | loaded flat front 25.3 %; 20° uphill **7.4 %** |
@@ -215,7 +226,9 @@ pod4 (5,900 kg) is above the 3 t structural rating. All three keep the straddle 
 - **Pick:** trunnion at (420, 90), Δ = (270, −185), d = 327 mm (82 % of reach).
 - **Place:** trunnion at (−120, 225 + 90 = 315), Δ = (−270, +40), d = 273 mm.
 - **Apex via-point:** (150, 515), straight above the shoulder.
-- **Stow:** hook in a stow cradle at (50, 305). Joint angles about q = [2.35, −2.55, 1.2] rad.
+- **Stow:** link 1 folded back over the deck, link 2 forward above it, hook in a stow cradle. q = [2.8, −2.8, 1.2] rad: elbow (−627, 5581) mm full scale = (−38.4, 342.0) mm prototype; hook point (2637, 5581) mm = **(161.5, 342.0) mm prototype**, hook angle ψ = 1.2 rad. The earlier "(50, 305) mm with q ≈ [2.35, −2.55, 1.2]" was inconsistent: that q gave (205, 377) mm, and (50, 305) mm is only reachable with the elbow at the shoulder column or below the deck. The hook tip is at x = 2.64 m, clear of the LiDAR plinths (x ≥ 3.43 m, y ≤ 4.67 m) and the avionics pod (z ±1.63 m, arm plane z ±2.86 m); the links stay ≥ 0.9 m above the deck.
+- **Joint limits (rad):** q1 [−1.05, 3.0], q2 [−3.0, 2.4], q3 [−2.8, 2.8] (were [−1.05, 2.8], [−2.8, 0.05], [−2.6, 2.6]).
+- **Two elbow branches (both "elbow up", higher elbow):** pick and apex use q2 < 0 (grasp q = [0.012, −1.225, 1.213], apex [2.498, −1.855, −0.644]). The place side needs q2 > 0 because the target is behind the shoulder: place q = [1.880, 2.113, 2.290], pre-place [1.665, 1.995, 2.623]. The IK formula above (q2 = −acos D) is the pick branch only; for a rear target it gives q1 = 3.94 rad, the elbow below the deck. `ik()` picks the branch by elbow height, so the mirror solution is q1 = θ − β, q2 = +acos D.
 - **Trunnion position:**
   ```
   p = S + L1·[cos q1, sin q1] + L2·[cos(q1+q2), sin(q1+q2)]
@@ -417,7 +430,7 @@ Check: W/4 = 972 N → p = 4050 Pa → z = 4050 / (1400/0.49 + 820000) = **4.9 m
 - `NAV.noSteerRatio` and yaw efficiency (healthy 0.4–0.55): re-measure in `tests/drive4.mjs`. The middle wheels sit at the yaw centre, so expect a small change.
 
 ### 5.8 Power (`_powerStep`)
-- `P.armW` = Σ actuator P_el, plus `ARM.hotelW` (120 W) whenever the arm is not asleep and stowed.
+- `P.armW` = Σ actuator P_el plus `ARM.hotelW` (120 W) while the arms are active (deploying, moving, holding, or carrying). Stowed in the deck cradles (settled 1.5 s, gates and deck latch at rest, any payload held by the closed deck latch) the cradles carry the weight: servos unpowered, no hold current, only `standbyW` = 3 W [ASSUMED] controller draw. Rover survival mode (`powered` false): 0 W. No arm heater is modelled (the plan has no arm thermal section).
 - `P.loadW += P.armW`. Add `armWh` to telemetry.
 - Prototype budget: update the `rover_bom.js` 'arm_pick' power mode to 25 W average and 90 W peak.
 
@@ -448,9 +461,9 @@ export const ARM = {
   L1:k(0.20), L2:k(0.20),
   links:{ m1:120, lc1:k(0.10), I1:110, mElbow:110, m2:120, lc2:k(0.10), I2:110, mWrist:40, mHook:40 },  // [ASSUMED]
   fixedMassPerArm:210,
-  limits:{ q1:[-1.05,2.8], q2:[-2.8,0.05], q3:[-2.6,2.6] },
+  limits:{ q1:[-1.05,3.0], q2:[-3.0,2.4], q3:[-2.8,2.8] },
   rateMax:0.12, accMax:0.05, substeps:8,
-  stow:{ q:[2.35,-2.55,1.2] }, apex:{ dy:k(0.24) },
+  stow:{ q:[2.8,-2.8,1.2] }, apex:{ dy:k(0.24) },
   pick:{ xBody:k(0.42), clearance:k(0.02), preBelow:k(0.02), preFwd:k(0.03), seatV:0.02 },
   hook:{ mouth:k(0.030), seatHalf:0.785, mu:0.3, fh:3, zeta:0.5, latchMaxN:2.5e4 },
   ctrl:{ kp:1/0.087, ki:0.2, kd:0.05, deadband:0.0017, gravityFF:true },
@@ -576,7 +589,7 @@ After the drive change, re-baseline long tests whose speeds or power shift (v17_
 - ACM cargo type (2,400 kg, 2.94 × 2.28 × 3.92 m, trunnions), Bekker/Mohr–Coulomb foot contact with
   plastic sinkage, creep settling and breakout adhesion.
 - Autonomy acquireArm / deliverArm (13-state machine); straddle pickup unchanged for cyl40/box20/pod4.
-- Deck pins + latch; DECK.placeX from the loaded-CG balance rule (−0.734 m).
+- Deck pins + latch; DECK.placeX from the loaded-CG balance rule (−0.695 m).
 - Stability includes arm links + suspended ACM; axleShare telemetry; power armW + 120 W hotel.
 - Render: animated arms, hooks, latches, deck latch, ACM; idler hubs grey.
 - Measured: <fill from tests: yaw efficiency, climb, pickup time, energy, min margin>.
@@ -657,7 +670,7 @@ Fusion executes scripts one at a time. Agents may *write* scripts in parallel, b
 | 20 | `PRT_MOTOR_MOUNT` ×4 (Ø`mot_d`+2·clr_slip clamp bore, 6 × M3 on `mot_bc_d`, 2 × M4 inserts to the rocker); `BUY_MOTOR_37D` ×4; `PRT_IDLER_HUB` ×2 + `BUY_608` ×4 | 4 orange pods at the outer corners, 2 grey idlers |
 | 25 | `WHEEL_DRIVEN` (Pololu hub pattern), `WHEEL_IDLER` (608 seats); 6 occurrences | Wheel centres match `ROVER.corners`/K |
 | 30 | Rocker and bogie links from GEO params (rb_P, rb_B), `PRT_JOINT_BLOCK` with bearing seats, differential bar placeholder | Rocker pivot above the middle wheel; bogie pivot at x −120 |
-| 40 | `PRT_BATTERY_TRAY` (pocket bat_L/W/H + 2·clr_slip, strap slots) at `bat_x`; `PRT_ELEC_TRAY` with M2.5 standoffs for Pi 5, ESP32-S3 cradle, MDD10A ×2, PCA9685, UBEC ×2, INA226 ×2, IMU; matching `BUY_` placeholders | Battery low at −80 |
+| 40 | `PRT_BATTERY_TRAY` (pocket bat_L/W/H + 2·clr_slip, strap slots) at `bat_x`; `PRT_ELEC_TRAY` with M2.5 standoffs for Pi 4, ESP32-S3 cradle, MDD10A ×2, PCA9685, UBEC ×2, 5.1 V buck, INA226 ×3, IMU; matching `BUY_` placeholders | Battery low at −80 |
 | 45 | `PRT_SENSOR_NOSE` (ASA; LiDAR low at y 150, cam), `PRT_LIDAR_MAST_REAR` (x −270) | Nothing inside `REF_SWEEP` |
 | 50 | `build_arm(±1)`: `PRT_TOWER` with srv_big pocket and M3 inserts, `PRT_UPPER_PLATE` ×2 (25T horn bolt circle), `PRT_ELBOW_CRADLE`, `PRT_FORE_PLATE` ×2, `PRT_WRIST_BRKT` (srv_std pocket), ToF mount; `BUY_SERVO_*` placeholders | Arms at z ±175; stow pose |
 | 60 | `PRT_HOOK` (V-seat `hook_seat_ang`, mouth `hook_mouth`, 30° cheeks, seat-switch pocket), `PRT_LATCH_GATE` + MG90S pocket, over-centre stop | Hook mouth faces up in pre-grasp |
@@ -694,7 +707,7 @@ Fusion executes scripts one at a time. Agents may *write* scripts in parallel, b
 | rb_tube | 12 | mm | Link section |
 | bat_L / bat_W / bat_H / bat_x / bat_y | 155 / 100 / 100 / −80 / 70 | mm | Battery envelope and position `[VERIFY]` |
 | ele_x | 50 | mm | Electronics tray centre |
-| pi_L / pi_W / pi_hdx / pi_hdy | 85 / 56 / 58 / 49 | mm | Pi 5 + holes |
+| pi_L / pi_W / pi_hdx / pi_hdy | 85 / 56 / 58 / 49 | mm | Pi 4 + holes (same outline and 58 × 49 hole pattern as Pi 5) |
 | esp_L / esp_W | 69 / 26 | mm | ESP32-S3 DevKitC-1 `[VERIFY]` |
 | mdd_L / mdd_W / mdd_H | 84 / 62 / 16 | mm | MDD10A `[VERIFY]` |
 | pca_L / pca_W | 62.5 / 25.4 | mm | PCA9685 |
@@ -758,16 +771,20 @@ Each phase lists its files. **A file has exactly one owner per phase.** Run `npm
 - **Two-arm fight under position mismatch.** Hook spring compliance plus a 1 mm latch gap keeps it bounded. The sim reports the twist torque.
 - **Rapier stiffness.** Arm sub-stepping is internal to `arm.js`. The ACM is kinematic while carried, and deck seating is analytic to avoid thin-pin contact jitter.
 - **Long-test drift from the drive change.** Re-baseline once in P1b and document it in CHANGES.
+- **Motor and Pi heat.** Stalled or pivoting 37D motors and a closed tub can overheat the windings, the PETG mounts and the Pi. Mitigations: ASA motor mounts, Pi 4 heatsink and fan, tub fan and intake, and the ESP32 `firmware/motion_guard/` protections. Analysis and fixes are in `docs/THERMAL_LOAD_PROTOTYPE.md`.
 
 ## 10. Firmware notes (prototype, outside this repo)
 - The ESP32-S3 runs the motion layer: 4 wheel PI loops on PCNT encoders, servo commands via PCA9685, switches, ToF.
 - **250 ms heartbeat watchdog:** drives PCA9685 OE high and the MDD10A PWM to 0. Frames are `0xAA 0x55` + CRC16, per CLAUDE.md.
 - Arm commands from the Pi are joint-space waypoints. Shaping and rate limiting run on the ESP32, using the same equations as `arm.js`.
+- **Power rules** (from PROTOTYPE_POWER_BUDGET.md §7): ramp drive PWM 0→target over ≥ 300 ms and never jump straight to full reverse; stall guard cuts a motor whose encoder reads ~0 with PWM > 50 % for 500 ms; no shoulder/elbow motion while wheels are commanded (holding is fine); if the main INA226 reads > 25 A for 200 ms, halve drive PWM.
+- **Motion guard:** the ESP32 runs `firmware/motion_guard`: stall cut at 1.5 s, I²t winding estimate with derate from 90 to 110 °C, duty cap 12 V / V_bat, pivot limit 3 s with a 10 s rest, servo hold timeout of 20 s, and PCA9685 off when the arm is stowed. MDD10A PWM runs at 20 kHz.
+- **Battery thresholds** (12.8 V LiFePO4, light load): warn at 12.4 V (~20 %), stop arm work at 12.0 V, return to dock at 11.6 V. Use INA226 amp-hour counting as the primary fuel gauge; LiFePO4 voltage is flat.
 
 ## 11. Open items (sizes the user will supply)
 1. Exact 60 kg-class servo model and its body, ear and spline dimensions (`srv_big_*`).
-2. Final wheel, motor and battery choices and sizes (`wh_*`, `mot_*`, `bat_*`).
-3. Board outlines and holes (Pi 5 stays; MDD10A, UBEC, IMU, LiDAR exact sizes).
+2. Final wheel and motor sizes (`wh_*`, `mot_*`). Battery is chosen (12.8 V 15 Ah LiFePO4, BMS ≥ 20/40 A); its exact case size (`bat_*`) and mass are still [VERIFY].
+3. Board outlines and holes (Pi 4 4 GB, same outline as Pi 5; MDD10A, UBEC, IMU, LiDAR exact sizes).
 4. Printer bed size (`bed_max`, `bed_z`).
 5. ACM size and mass for the demo (`acm_L/W/H`, `acm_mass`; defaults 180 × 240 × 140 mm, 1.0 kg).
-
+6. Bench measurements from PROTOTYPE_POWER_BUDGET.md §9: 60 kg servo stall current at 7.4 V, drive current on the real test surface, the pack's BMS rating, one logged demo-hour run.

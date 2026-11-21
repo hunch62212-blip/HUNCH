@@ -51,7 +51,10 @@ export const WORLD = {
 
 // AEGIS-V1 (the team's design: public/team/js/fusion_rover.js + rocker_bogie.js + module_carry.js; the
 // suspension.js and body_control.js files the strut model follows are not in this repo) at full scale. The team's
-// module is built at 1:16.3 (0.747 m model of the 12.192 m / 40 ft module), so every prototype dimension is x K.
+// prototype is printed at 1:8.16 (USER DECISION, Nov 2026: K = 8.16 for every print; the 12.192 m x 3.0 m module prints as
+// 1.494 m x 0.368 m), so every prototype dimension is x K. K_LEGACY (16.32) is the old 0.747 m module print: the full-scale
+// values below that were tuned at that scale (hard-coded metres, masses, stiffnesses, torques) are re-derived from it with
+// KS = K / K_LEGACY (lengths x KS, inertia ~ m L^2, torque ~ m L) so K stays the single source.
 // Provenance by field:
 //   [CAD]     corners, frame, wheel radius/width, ride set points, seatY, ringX, lidar/camera mounts, motor rpm
 //             (rocker_bogie.js GEO, module_carry.js CRADLE, lidar_mount.js, rover_bom.js; dims x K, rpm / sqrt(K))
@@ -59,30 +62,47 @@ export const WORLD = {
 //             motor torque/gains/thermal, speedLimitLoaded, accel limits, battery, hotel loads, lift rates,
 //             lidar channels/range/noise, camera FOV/range. Full-scale masses are NOT the BOM mass x K^3.
 //   [ASSUMED] solar = 0 panels: charging is at the dock station (dock_station.js); no on-board array.
-export const K = 12.192 / 0.747; // 16.32
+export const K = 8.16;                       // USER DECISION: 1:8.16 prototype for all prints
+export const K_LEGACY = 12.192 / 0.747;      // 16.32: the old module print; only used to re-derive the values tuned at that scale
+const KS = K / K_LEGACY;                      // 0.5: legacy full-scale metres -> current full-scale metres
 const k = (v) => +(v * K).toFixed(3);
+const ks = (v) => +(v * KS).toFixed(3);       // a full-scale length tuned at K_LEGACY, re-scaled to K
+// Mass budget [ASSUMED]: ~5 t full-scale rover (USER DECISION, Nov 2026: about 4.9 m and 5 t). The legacy 6200 + 6 x 300 kg
+// = 8000 kg rover sets the tuning reference: MR = mass ratio, so stiffness ~ MR (same ride frequency), torque ~ MR x KS.
+const SPRUNG_KG = 4100, UNSPRUNG_KG = 150, LEGACY_KG = 8000;
+const MR = (SPRUNG_KG + 6 * UNSPRUNG_KG) / LEGACY_KG;     // 0.625
+const MRs = SPRUNG_KG / 6200;                               // sprung-mass ratio (strut stiffness, body inertia)
+// Driven wheels (plan s0, s5.7: FL/FR/RL/RR; ML/MR passive idlers). Only these brake, so they bound the deceleration.
+const DRIVEN = ['FL', 'FR', 'RL', 'RR'];
+// [ASSUMED] regolith traction coefficient (tan 35 deg = 0.70 friction + ~0.09 cohesion share c A / W at this wheel load).
+// Only the driven wheels brake and they carry 4/6 of the weight: a_max = mu x (4 / 6) x g = 0.79 x 0.667 x 1.62 = 0.85 m/s^2.
+const TRACTION_MU = 0.79;
+const BRAKE_MAX = +(TRACTION_MU * DRIVEN.length / 6 * 1.62).toFixed(3); // 0.853 m/s^2, E-STOP ceiling
 export const ROVER = {
   name: 'AEGIS-V1',
   longName: 'AEGIS-V1 rocker-bogie cargo rover (team design, 1:1 of the 1:16.3 prototype)',
   scale: K,
   // body origin at the ground plane at ride 0 (the team model's root frame), +x forward, +y up
-  sprungMass: 6200,        // kg (structure, struts, 6 x hub motors, pack, avionics, ring clamps)
-  unsprungMassPerBogie: 300, // kg per corner: 2.1 m sand tyre + hub gearmotor + strut lower
-  comLocal: { x: 0.0, y: 2.25, z: 0.0 },
-  inertia: { x: 54000, y: 99000, z: 54000 },
+  sprungMass: SPRUNG_KG,   // kg (structure, struts, 4 x hub motors, pack, avionics, ring clamps) [ASSUMED]
+  unsprungMassPerBogie: UNSPRUNG_KG, // kg per corner: 1.06 m sand tyre + hub gearmotor + strut lower [ASSUMED]
+  comLocal: { x: 0.0, y: ks(2.25), z: 0.0 },
+  // sprung-body inertia about its own CoM ~ m L^2 (legacy 54000 / 99000 / 54000 kg m^2 at 6200 kg, K_LEGACY). The Rapier body gets
+  // the combined sprung + unsprung + held-load properties from Rover.massProps() (rover.js), not this alone.
+  inertia: { x: Math.round(54000 * MRs * KS * KS), y: Math.round(99000 * MRs * KS * KS), z: Math.round(54000 * MRs * KS * KS) },
   rideHeight: 0,
   // six corners (rocker-bogie wheel stations, rocker_bogie.js GEO: x +0.24 / 0 / -0.24, z +-0.235; wheelbase 7.83 m, was 7.02 m, widened for the loaded tip margin)
   corners: [[k(0.24), -k(0.235), 'FL'], [k(0.24), k(0.235), 'FR'], [0, -k(0.235), 'ML'], [0, k(0.235), 'MR'], [-k(0.24), -k(0.235), 'RL'], [-k(0.24), k(0.235), 'RR']],
   frame: { halfLen: k(0.30), halfWid: k(0.302), deckY: k(0.225), tubY0: k(0.065), tubZ: k(0.146) },
   bogie: {
-    hardpointY: 3.0,       // strut top (body frame); the active strut stands in for the slow rocker links + fast struts (body_control.js)
+    hardpointY: ks(3.0),   // strut top (body frame); the active strut stands in for the slow rocker links + fast struts (body_control.js)
     // travel = ride range (kneel -0.65 .. carry +0.82) plus the rocker-bogie articulation (+-1.1 m of wheel height difference)
-    Lnom: +(3.0 - k(0.065)).toFixed(3), Lmin: +(3.0 - k(0.065) - k(0.040) - 1.1).toFixed(3), Lmax: +(3.0 - k(0.065) + k(0.060) + 1.1).toFixed(3),
+    Lnom: +(ks(3.0) - k(0.065)).toFixed(3), Lmin: +(ks(3.0) - k(0.065) - k(0.040) - ks(1.1)).toFixed(3), Lmax: +(ks(3.0) - k(0.065) + k(0.060) + ks(1.1)).toFixed(3),
     wheelBelowPivot: 0, halfSpan: 0, maxBeamAngle: 0,
   },
   wheel: {
-    radius: k(0.065), width: k(0.075), mass: 180, inertia: 120,
-    tireK: 420000, tireC: 7000,   // woven steel hoop tyre with chevron cleats (rover_bom.js), scaled
+    // mass ~ unsprung ratio, inertia ~ m r^2; tyre: load ~ MR, deflection ~ KS so k ~ MR / KS, c keeps the legacy damping ratio
+    radius: k(0.065), width: k(0.075), mass: Math.round(180 * UNSPRUNG_KG / 300), inertia: +(120 * (UNSPRUNG_KG / 300) * KS * KS).toFixed(2),
+    tireK: Math.round(420000 * UNSPRUNG_KG / 300), tireC: Math.round(7000 * UNSPRUNG_KG / 300), // woven steel hoop tyre with chevron cleats (rover_bom.js). Scaled with the unsprung mass so the wheel-hop mode keeps its legacy 6 Hz and damping ratio 0.31 (omega dt 0.31 at 120 Hz; scaling by mass / length gave 9.4 Hz and chattered)
     effDiameterFactor: 2.0,
   },
   // Strut = roller-screw electromechanical actuator (CHANGES.md §17): brushless DC servomotor driving a planetary
@@ -96,7 +116,9 @@ export const ROVER = {
   //           the air strut's pump was 0.25
   //   screwLeadMm / peakServoW / backdriveBrake  [ASSUMED] actuator descriptors for the report; not used by the physics
   susp: {
-    k: 42000, c: 9500, sky: 0, bumpK: 1600000, bumpC: 60000, levelRange: 1.75, levelRate: 0.30, levelTd: 6,
+    // k, c ~ sprung mass (legacy 42000 / 9500 at 6200 kg): keeps the ~1.0 Hz ride and the damping ratio. bumpK, bumpC ~ mass too;
+    // the bump stop is integrated implicitly in rover.js (its explicit c dt / m was ~2, at the stability limit).
+    k: Math.round(42000 * MRs), c: Math.round(9500 * MRs), sky: 0, bumpK: Math.round(1600000 * MRs), bumpC: Math.round(60000 * MRs), levelRange: ks(1.75), levelRate: +(0.30 * KS).toFixed(3), levelTd: 6,
     kind: 'roller-screw EMA (BLDC servo, metal bellows seal)', eff: 0.6, screwLeadMm: 10, peakServoW: 1800, backdriveBrake: true,
   },
   // ride set points (module_carry.js CRADLE: kneelExt -40 mm, carryExt +50 mm at 1:16.3)
@@ -112,8 +134,10 @@ export const ROVER = {
     noLoadSpeed: 300 / Math.sqrt(K) * 2 * Math.PI / 60, capRpmWheel: +(280 / Math.sqrt(K)).toFixed(2),
     // v1.8.0 (ARM plan s0/s6.1): 4 driven wheels keep the old 6-motor budget: peakTorque 5600 -> 8400, brakeTorque 9000 -> 13500 (x1.5).
     // NOTE: until the P1b rover.js drive change, the two middle (idler) wheels still read these values too.
-    peakTorque: 5600, efficiency: 0.86,
-    kp: 9000, ki: 5000, brakeTorque: 9000, thermalR: 0.05, thermalC: 30000,
+    // Torques ~ m L (same acceleration capability per kg at wheel radius ~ KS): legacy 8400 / 13500 N m at 8000 kg, K_LEGACY.
+    // kp / ki scale the same way so the PI saturates at the same speed error (rad/s).
+    peakTorque: Math.round(8400 * MR * KS), efficiency: 0.86,
+    kp: Math.round(9000 * MR * KS), ki: Math.round(5000 * MR * KS), brakeTorque: Math.round(13500 * MR * KS), thermalR: 0.05, thermalC: 30000,
   },
   // [ASSUMED] gyro skid-scrub model (CHANGES.md §17): yaw_rate_est = yaw_rate_imu - kScrub sgn(wz) |vx wz| while turning loaded.
   // kScrub is in (rad/s) per (m/s x rad/s). Fitted with tests/scratch/gyro_turn.mjs: the sim gyro reads the true body
@@ -133,11 +157,14 @@ export const ROVER = {
   speedLimitLoaded: 2.5,
   // tip-safe acceleration limits (m/s^2, rad/s^2). Loaded static tip threshold is ~0.45 g_moon fore-aft, but the
   // passive (rocker-bogie) pitch lets the body nose over at ~0.4 m/s^2 of braking (less downhill): lonLoaded 0.2 (CHANGES.md §14)
-  // Traction bound: regolith gives at most c A + W tan(phi) ~ 0.70 W of shear, so no command may ask for more than
-  // ~0.7 x 1.62 = 1.13 m/s^2 in any direction. lon 0.9 / lat 0.8 keep the resultant inside that circle with margin;
-  // estopFactor 1.2 puts an empty E-STOP at 1.08 m/s^2 (was lon 1.6, lat 1.2, E-STOP 3.2 m/s^2 = 2 g_moon: impossible).
-  accel: { lon: 0.9, lonLoaded: 0.2, lat: 0.8, latLoaded: 0.35, yaw: 0.14, estopFactor: 1.2 },
-  battery: { capacityWh: 420000, nominalV: 400, internalR: 0.02 },
+  // Traction bound: only the 4 driven wheels drive and brake (ML/MR are idlers), and they carry 4/6 of the weight, so the
+  // longitudinal limit is BRAKE_MAX = TRACTION_MU x 4/6 x g = 0.85 m/s^2 (was derived for six braked wheels: 0.7 x g = 1.13).
+  // lon = min(0.75, BRAKE_MAX) for normal driving; estopFactor puts the E-STOP exactly at BRAKE_MAX (lon x estopFactor <= 0.85).
+  // lat 0.8 uses all six tyres' side force.
+  accel: { lon: Math.min(0.75, BRAKE_MAX), lonLoaded: 0.2, lat: 0.8, latLoaded: 0.35, yaw: 0.14, estopFactor: +(BRAKE_MAX / Math.min(0.75, BRAKE_MAX)).toFixed(3), brakeMax: BRAKE_MAX },
+  // USER DECISION (Nov 2026): 150 kWh pack. dockMaxW [ASSUMED]: full-scale charge power cap (rover.js _powerStep); a realistic
+  // surface charger is 10-20 kW, and 0.14 C of 150 kWh is 21 kW.
+  battery: { capacityWh: 150000, nominalV: 400, internalR: 0.02, dockMaxW: 20000 },
   solar: { panelArea: 0, panels: 0, efficiency: 0.30, mastHeight: 0 }, // charged at the AEGIS garage (dock_station.js)
   avionicsW: 900, heaterW: 600, lidarW: 22, cameraW: 6, commsW: 90,
   // ride-height stroke: `rate` is the fast path for small trims. A move longer than trimBand follows a minimum-jerk (quintic) S-curve,
@@ -177,17 +204,19 @@ export const ROVER = {
 // box20: [ASSUMED] ISO 668 20-ft external dimensions (6.06 x 2.44 x 2.59 m); mass, sled and lug layout are sim choices.
 export const CARGO_TYPES = {
   cyl40: {
-    label: '40-ft cargo module (team design, 12.19 x 7.96 m)', shape: 'cylinder',
+    // USER DECISION (Nov 2026): 12.192 m x 3.0 m diameter (prints at 1:8.16 as 1.494 x 0.368 m). Lugs keep their fraction of
+    // the length (legacy +-0.21 of 0.747); bands sit on the rover ring clamps (ROVER.ringX); mass [ASSUMED], unchanged.
+    label: '40-ft cargo module (team design, 12.19 x 3.0 m)', shape: 'cylinder',
     handling: 'straddle', // ARM plan s6.1
-    length: k(0.747), radius: k(0.244), mass: 14940, color: 0xd8dde3,
-    standY: k(0.310), lugXs: [-k(0.21), k(0.21)], lugZ: k(0.345), lugR: k(0.010), bands: [-k(0.085), k(0.085)], bandW: k(0.050), carryX: 0,
-    lugX: k(0.21),
+    length: 12.192, radius: 1.5, mass: 14940, color: 0xd8dde3,
+    standY: k(0.310), lugXs: [-+(12.192 * 0.21 / 0.747).toFixed(3), +(12.192 * 0.21 / 0.747).toFixed(3)], lugZ: k(0.345), lugR: k(0.010), bands: [-k(0.085), k(0.085)], bandW: k(0.050), carryX: 0,
+    lugX: +(12.192 * 0.21 / 0.747).toFixed(3),
   },
   // 20 ft ISO container in a ring-adapter sled, so the same ring clamps carry it (Mission 8)
   box20: {
     label: '20-ft ISO container in ring-adapter sled', shape: 'box', handling: 'straddle', // ARM plan s6.1
     length: 6.06, height: 2.59, width: 2.44, mass: 8500, color: 0xc9a227,
-    adapterR: k(0.244), adapterRings: [-k(0.085) - 0.15, k(0.085) - 0.15], adapterLen: 8.4, adapterX: -1.0,
+    adapterR: 1.5, adapterRings: [-k(0.085) - 0.15, k(0.085) - 0.15], adapterLen: 8.4, adapterX: -1.0,
     standY: k(0.310), lugXs: [-5.2, 2.2], lugZ: k(0.345), lugR: k(0.010), carryX: 0.15, lugX: 3.7,
   },
 };
@@ -210,8 +239,9 @@ CARGO_TYPES.pod4 = {
 
 // Plan s0, s5.7: FL/FR/RL/RR driven; ML/MR passive idlers (Tm = 0, never braked). ROVER.motor torque/brake raised x1.5 above.
 export const DRIVE = {
-  driven: ['FL', 'FR', 'RL', 'RR'],
+  driven: DRIVEN,
   idlerDragNm: 15,   // [ASSUMED] bearing Coulomb drag per idler wheel, N*m
+  degYawGain: 2.0,   // [ASSUMED] degraded-drive (dead driven motor) yaw-rate integral gain on commanded wz, 1/s per (rad/s*s)
   idlerViscous: 4,   // [ASSUMED] bearing viscous drag, N*m*s/rad
 };
 
@@ -239,10 +269,13 @@ export const ARM = {
   L1: k(0.20), L2: k(0.20),                              // [VERIFY] prototype 200 mm links
   links: { m1: 120, lc1: k(0.10), I1: 110, mElbow: 110, m2: 120, lc2: k(0.10), I2: 110, mWrist: 40, mHook: 40 }, // [ASSUMED] s4.2 masses x ~K^3-ish budget, kg / kg*m^2
   fixedMassPerArm: 210,                                  // [ASSUMED] s3.3 (tower + shoulder servo), kg; added to rover sprung mass
-  limits: { q1: [-1.05, 2.8], q2: [-2.8, 0.05], q3: [-2.6, 2.6] }, // [ASSUMED] rad
+  limits: { q1: [-1.05, 3.0], q2: [-3.0, 2.4], q3: [-2.8, 2.8] }, // [ASSUMED] rad. q2 > 0 is the place-side elbow-up branch (arm reaching back over the shoulder); q2 < 0 the pick/apex branch
   rateMax: 0.12, accMax: 0.05, substeps: 8,              // s4.3 full-scale rates (rad/s, rad/s^2); dt = 1/960 s
-  stow: { q: [2.35, -2.55, 1.2] }, apex: { dy: k(0.24) },// s4.1 [VERIFY]
+  stow: { q: [2.8, -2.8, 1.2] }, apex: { dy: k(0.24) },// s4.1 [VERIFY] stow: link 1 folded back over the deck, link 2 forward above it, hook tip clear of the LiDAR plinths and avionics pod
   pick: { xBody: k(0.42), clearance: k(0.02), preBelow: k(0.02), preFwd: k(0.03), seatV: 0.02 }, // s4.1 / s6.4 (seatV m/s)
+  prePlaceH: k(0.06),                                    // plan s6.4 step 10: the last k(0.06) above the pins is descended at seatV [ASSUMED] (no source for the value in the CAD)
+  releaseDrop: k(0.03), releaseSlide: k(0.03),           // plan s6.4: after the gates open the V-seat hooks go DOWN k(0.03) (it opens upward: rising would lift the trunnion again), then slide clear by k(0.03) [ASSUMED slide]
+  keepOutMargin: ks(0.06),                               // m (legacy 0.06 x KS: it scales with the hook mouth, half-disc radius mouth / 2 = 0.12 m), hook tip may not rise more than this above an un-seated trunnion centre (hook-trunnion interference check) [ASSUMED]
   hook: { mouth: k(0.030), seatHalf: 0.785, mu: 0.3, fh: 3, zeta: 0.5, latchMaxN: 2.5e4 }, // s5.4: V-seat 45 deg, f_h 3 Hz; mu, zeta, latchMaxN [ASSUMED]
   ctrl: { kp: 1 / 0.087, ki: 0.2, kd: 0.05, deadband: 0.0017, gravityFF: true }, // s5.2: kp = 1/theta_sat (5 deg) [ASSUMED]; ki, kd [ASSUMED]
   tipRatioMax: 0.75, minMarginDeg: 8, ratedKg: 3000, peakW: 6000, hotelW: 120,   // s0 / s4.3 (ASME B30.5-style 75 %); peakW, hotelW [ASSUMED]
@@ -250,9 +283,9 @@ export const ARM = {
 
 // Plan s6.4: acquireArm thresholds (full scale). [ASSUMED] unless noted.
 export const ACM_PICK = { standoff: k(0.25), creepV: 0.05, latTol: k(0.007), yawTolDeg: 3, alongTol: k(0.04),
-  retries: 2, overloadK: 1.6, seatTimeout: 20 };
+  retries: 2, overloadK: 1.15, seatTimeout: 20 }; // overloadK was 1.6 and could never trip (hook load peaks at 1.006 W nominal, 1.13 W for the hook spring at seatV); 1.15 W trips on stuck feet [ASSUMED]
 
-// Plan s3.3, s5.4: deck interface. placeX is computed at sim init from the balance rule (loaded CG -> x = 0; about -0.734 m).
+// Plan s3.3, s5.4: deck interface. placeX is computed at sim init from the balance rule (loaded CG -> x = 0; about -0.347 m at K = 8.16, was -0.734 m at 1:16.3).
 export const DECK = { placeX: null /* computed at init */, capture: k(0.006),
   pinSpan: k(0.14), latchTime: 0.6, seatedEps: k(0.002) };                // [VERIFY] pin geometry; latchTime [ASSUMED]
 
@@ -288,7 +321,7 @@ export const DOCK = {
 
 // PROTOTYPE-SCALE LUNAR POWER DOCK (CHANGES.md, docs/LUNAR_CHARGING.md). Electrical values are PROTOTYPE units
 // (V, A, Ah, W, Wh). Geometry is world metres: the dock is drawn at 1:1 of the 1:16.3 prototype dock (k()), like the rover.
-// Coupling to the 420 kWh sim pack is by state of charge: 1 Wh into the 128 Wh prototype pack = PROTO_TO_FULL_WH Wh
+// Coupling to the 150 kWh sim pack is by state of charge: 1 Wh into the 128 Wh prototype pack = PROTO_TO_FULL_WH Wh
 // (W -> W) into the sim pack. Rover charge current is the same C-rate (0.14 C) as the old 60 kW heat-limited charge,
 // so charge times match at both scales and the full-scale pack thermal model (health.js) stays valid.
 //  - array: 2 vertical azimuth-tracking masts (NASA VSAT-style), 2 x 0.2016 m^2 of 30 % triple-junction cells
@@ -302,7 +335,7 @@ export const PROTO_PACK = {
   cvCell: 3.65,  // LiFePO4 CV limit, V/cell (typical datasheet)
   R: 0.04,       // [ASSUMED] pack + BMS + harness, ohm
 };
-export const PROTO_TO_FULL_WH = ROVER.battery.capacityWh / PROTO_PACK.Wh; // 3281: prototype Wh (or W) -> full-scale
+export const PROTO_TO_FULL_WH = ROVER.battery.capacityWh / PROTO_PACK.Wh; // 1172 (150 kWh / 128 Wh): prototype Wh (or W) -> full-scale
 export const LFP_OCV = [[0, 2.50], [0.05, 3.00], [0.10, 3.20], [0.20, 3.25], [0.50, 3.30], [0.80, 3.33], [0.90, 3.35], [1, 3.40]]; // [ASSUMED] typical LiFePO4 rest OCV per cell
 export const POWER_DOCK = {
   padT: 44, padV: 22, couplerTol: 3.0,
@@ -329,7 +362,7 @@ export const POWER_DOCK = {
   //   C: [ASSUMED] J/K, ~22 kg of cells + box;  G: [ASSUMED] W/K, MLI box under a regolith berm (4 sigma T^3 x eps 0.02 x 0.6 m^2 ~ 0.04)
   //   rhuW: 1 W LWRHU-class radioisotope heater (Lunokhod / Yutu precedent; electric-only option: set 0)
   //   sinks: [ASSUMED] bermed-vault sink temperatures, day / night
-  chargeCC_A: 1.4,                                     // 0.14 C = old 60 kW / 420 kWh (C-rate similarity)
+  chargeCC_A: 1.4,                                     // 0.14 C (C-rate similarity: ~21 kW into the 150 kWh pack, capped at ROVER.battery.dockMaxW)
   linkEff: 0.85,                                       // [ASSUMED] inductive DC-DC at centre
   linkOffsetLoss: 0.25,                                // [ASSUMED] efficiency loss fraction at full couplerTol, quadratic
   linkMaxW: 125,                                       // Astrobotic/WiBotic UFPC commercial 125 W model
@@ -339,11 +372,12 @@ export const POWER_DOCK = {
 // [ASSUMED] AEGIS-V1 thermal control (src/sim/health.js), after the VIPER "warm box" layout: avionics on a
 // heat-spreader vault in the belly-tub nose, heat carried by loop heat pipes to two vertical louvered radiators
 // hung under the deck edges (port + starboard). Radiators are on the sides, not the top, because the carried
-// module (7.96 m dia.) covers the whole deck and would block a zenith view. Battery strings have their own
+// module (3.0 m dia.) covers most of the deck and would block a zenith view. Battery strings have their own
 // louvered radiator. Thermostatic film heaters (zone controllers A and B) hold the set points.
 //  - day, avionics ~1.0 kW, sink 230 K terrain / 3 K sky: louvers ~30 % open, vault ~19 C, heaters ~0 W
-//  - night or survival (drive off, 60 W in the vault): heaters ~0.15-0.2 kW in all, so a 354 h lunar night
-//    costs well under a quarter of the pack with no solar input (tests/fdir.mjs measures it)
+//  - night or survival (drive off, 60 W in the vault): heaters ~0.15-0.2 kW in all. Measured (Nov 2026, tests/fdir.mjs E
+//    procedure): ~154 W survival load -> a 354 h night costs ~55 kWh = ~36 % of the 150 kWh pack, with no solar input. That
+//    passes, but NOT "under a quarter" (it was, with the old larger pack): tests/fdir.mjs E asserts <= 25 % (docs/changes/A.md).
 export const THERMAL = {
   sigma: 5.670e-8,
   vault: { C: 120000, radArea: 12, emis: 0.85, louverMin: 0.12, louverOpenC: 15, louverFullC: 30, setC: 5, survivalSetC: -20, heaterMaxW: 800, hotC: 45 },
@@ -361,23 +395,25 @@ export const THERMAL = {
   // hub: lumped thermal state of one MLI-wrapped wheel end (health.js _thermal). All [ASSUMED].
   //   C       J/K, hub motor + gearbox + knuckle (WHL LRU 290 kg of Al / steel, ~0.4 kJ/kg/K)
   //   radArea m^2 radiating surface;  emis effective emissivity of the MLI-wrapped hub (blanket + open drive face)
-  //   solarW  W absorbed in daylight (sun + regolith IR);  motorW W dissipated while the drive is powered
+  //   motorW  W dissipated while the drive is powered (the hub's sun load is computed in health.js _thermal, not a constant)
   hubHeaterW: 25, hubFreezeC: -65, hubHystK: 5,
   // The drive motor's losses are real heat (hundreds of W per hub when loaded) and there is no air to carry it away.
   // Path: winding (rover.js w.temp, ROVER.motor.thermalC) -> conduction motor.thermalR -> this hub mass -> radiation.
   // The hub rejects through a radiator ring on its outboard face behind a passive thermal switch (paraffin actuator,
   // [ASSUMED]): effective emissivity emis (MLI-like) below switchLoC, rising to emisHot at switchHiC. Cold = insulated
   // (the 25 W freeze heater holds it), hot = radiating. motorW: controller idle dissipation while the drive is powered.
-  hub: { C: 120000, radArea: 1.2, emis: 0.05, emisHot: 0.8, switchLoC: 20, switchHiC: 60, solarW: 5, motorW: 8, initC: 10 },
+  hub: { C: 120000, radArea: 1.2, emis: 0.05, emisHot: 0.8, switchLoC: 20, switchHiC: 60, motorW: 8, initC: 10 },
 };
 
 // [ASSUMED] vault radiators (THERMAL.vault.radArea 12 m^2 = 2 x 7.2 x 0.85 m). Measured on the team body: the belly-tub
 // side walls are at z = +-2.23..2.33 m between y 1.6 and 3.4 m, and the 7.35 m deck overhangs them to z = +-3.09 m at
-// y 3.4..3.67 m. Each radiator is bolted to its tub wall on two rails, tucked under that overhang (which shades it from
-// sun and falling ejecta) and inboard of the rocker beams (z +-2.95 m) and the fenders (inner edge z +-3.09 m).
+// y 3.4..3.67 m. Each radiator is bolted to its tub wall on two rails, tucked under that overhang (which keeps falling
+// ejecta off it but does NOT shade it: at the ~9 deg polar sun the overhang casts only ~0.12 m, so a panel facing the sun is
+// almost fully lit; health.js _thermal applies the solar load, docs/changes/B.md) and inboard of the rocker beams (z +-2.95 m) and the fenders (inner edge z +-3.09 m).
 // (Earlier versions put them at z = +-4.86 m, sized from frame.halfWid; nothing on the body reaches out there.)
 //   len, h m panel size;  y m panel centre height;  z m panel centre off the centreline (|z|, port is -z)
-export const RADIATOR = { len: 7.2, h: 0.85, y: 2.95, z: 2.36 };
+// Legacy-scale metres (above) x KS: the radiators follow the body, which scales with K.
+export const RADIATOR = { len: ks(7.2), h: ks(0.85), y: ks(2.95), z: ks(2.36) };
 
 // [ASSUMED] wheel fenders (CHANGES.md §17, §20). A tyre throws regolith up and back (a "rooster tail", ballistic at
 // 1.62 m/s^2 gravity: a 1.2 m/s tread speed lofts it several metres) and sideways in turns, and it coats the radiator and
@@ -387,8 +423,8 @@ export const RADIATOR = { len: 7.2, h: 0.85, y: 2.95, z: 2.36 };
 //   clearance m gap tyre to fender;  arcDeg arc covered, centred on the top and biased aft;  width m (tyre width 1.22 m + margin)
 //   flapH m trailing flap;  deflector: len m, depth m (hinge to outer edge), angleDeg below horizontal, y m hinge height
 export const FENDER = {
-  clearance: 0.28, arcDeg: 150, aftBiasDeg: 15, width: 1.5, thickness: 0.03, flapH: 0.45,
-  deflector: { len: 7.2, depth: 0.45, angleDeg: 40, y: 2.5 },
+  clearance: ks(0.28), arcDeg: 150, aftBiasDeg: 15, width: ks(1.5), thickness: 0.03, flapH: ks(0.45),  // legacy metres x KS
+  deflector: { len: ks(7.2), depth: ks(0.45), angleDeg: 40, y: ks(2.5) },
 };
 
 // [ASSUMED] emergency keep-alive solar blanket (Lunokhod / Yutu-2 lesson: a rover with no on-board generation
@@ -396,7 +432,7 @@ export const FENDER = {
 // only while parked. Vertical, sun-tracking in azimuth. The mast must stand outside the carried module's plan
 // footprint (radius 3.98 m), so its canister sits at the end of an outrigger arm from the port-aft deck corner.
 // armY is the arm centre height: high enough to clear the rear fender at full kneel plus full bogie lift (~4.15 m).
-export const KEEPALIVE = { area: 12, efficiency: 0.30, deployS: 90, mastH: 6.5, massKg: 55, corner: { x: -4.6, z: -4.75 }, armY: 4.35 };
+export const KEEPALIVE = { area: 12, efficiency: 0.30, deployS: 90, mastH: 6.5, massKg: 55, corner: { x: ks(-4.6), z: ks(-4.75) }, armY: ks(4.35) }; // geometry: legacy metres x KS
 
 // [ASSUMED] random-failure generator: each catalogue MTBF is divided by rateX (realistic = 1, so a failure
 // every few thousand hours; demo = one every few minutes of sim time). Off by default.
@@ -436,11 +472,11 @@ export const MISSION = { preSurveyRoute: false, crawlApproachM: 15, crawlDockM: 
 export const NAV = {
   headingDeadbandDeg: 3, lookaheadMin: 10, lookaheadSpeedS: 3.5, yawDampErrDeg: 5, yawDampRate: 0.03, yawDampGain: 0.5, maxYawAccel: 0.1,
   unknownCoastSpeed: 0.5, unknownCoastM: 12, flatDeg: 5, dropoutHoldS: 2.5, replanBlockM: 25, replanCostGain: 0.3, commitM: 15,
-  inflateEmpty: 5.8, inflateLoaded: 6.5, // m, planner hard obstacle inflation (AEGIS-V1 half width 4.9 m + margin); loaded = 6.5 for a swinging 23 t module
+  inflateEmpty: ks(5.8), inflateLoaded: 6.5, // m, planner hard obstacle inflation (AEGIS-V1 half width 2.45 m + margin, legacy 5.8 x KS; loaded keeps 6.5: the 12.19 m module did not shrink); loaded = 6.5 for a swinging 23 t module
   straightenRoutes: true, // straighten stored routes over mapped ground (planner.js straighten)
   noSteerRatio: 0.1, // steering-authority check: 6 s mean yaw rate below this share of the command for 15 s = not steering (healthy 0.4-0.55, one wheel free-rolling 0.15-0.25)
   upsetDeg: 25, // [ASSUMED] pitch or roll beyond this = vehicle upset: navigation stops, no autonomous retry
-  // Slip-aware navigation (CHANGES.md §32). A skid-steer rover on regolith achieves ~0.5 of the commanded yaw rate (measured 0.51 in turns).
+  // Slip-aware navigation (CHANGES.md §32). A skid-steer rover on regolith achieves ~0.5 of the commanded yaw rate (measured 0.51 in turns on the 6WD rover; the 4WD rover with free-rolling middle idlers differs, re-measure before enabling).
   slip: {
     enabled: typeof process !== 'undefined' && !!process.env && process.env.SLIPNAV === '1', // [ASSUMED] master switch, OFF by default until it passes faults_m10 (env SLIPNAV=1 = on, for A/B benches)
     etaInit: 0.6, etaMin: 0.3, etaTau: 4, etaPlanMin: 0.6, etaFFMin: 0.75, // [ASSUMED] yaw-efficiency estimate: start, floor (a free-rolling wheel reads ~0.2), low-pass s

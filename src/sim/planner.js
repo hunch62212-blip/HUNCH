@@ -557,12 +557,20 @@ export class LocalPlanner {
     return this.last;
   }
 
-  pivotSafe(pose) {
+  pivotSafe(pose, creep = 0) {
     // the wheels sweep circles of radius ~5.3 m and ~7.3 m about the centre
     const S = this.slam;
     for (let a = 0; a < Math.PI * 2; a += 0.1) for (const r of [3.84, 4.6, 5.2, 5.9]) {
       const wh = S.wheelHazard(pose.x + Math.cos(a) * r, pose.z + Math.sin(a) * r);
       if (wh && wh.lethal) return false;
+    }
+    // degraded pivot (dead driven wheel): the rover creeps up to `creep` m fore / aft while it turns, so the track strip must be clear too
+    if (creep > 0) {
+      const c = Math.cos(pose.yaw), sn = Math.sin(pose.yaw);
+      for (let f = -creep; f <= creep; f += 1) for (const l of [-3.84, 0, 3.84]) {
+        const wh = S.wheelHazard(pose.x + c * f + sn * l, pose.z - sn * f + c * l);
+        if (wh && wh.lethal) return false;
+      }
     }
     return true;
   }

@@ -42,7 +42,7 @@ sim.slam.clear(); sim.slam.relocalize(R.pose());
 let hatchT = null; sim.on('hatch', () => { hatchT = sim.time; });
 A.start('M5 test', A.missionDeliver(c.dest));
 let last = 0;
-while (A.gen && sim.time < 2400) { sim.stepOnce(); if (sim.time - last > 15) { last = sim.time; console.log(`   ${A.phase} | ${A.detail.slice(0, 110)}`); } }
+while (A.gen && sim.time < 4800) { sim.stepOnce(); if (sim.time - last > 15) { last = sim.time; console.log(`   ${A.phase} | ${A.detail.slice(0, 110)}`); } }
 console.log('accuracy', JSON.stringify(A.metrics.accuracy), 'cargo state', c.state, 'port occupied', !!port.occupied);
 const rec = A.history[A.history.length - 1];
 check('M5 delivery mission OK', rec && rec.name === 'M5 test' && rec.ok, rec ? `${rec.name} ok=${rec.ok}` : 'no mission record');

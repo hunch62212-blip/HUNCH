@@ -28,7 +28,7 @@ const _q = new THREE.Quaternion(), _f = new THREE.Vector3(), _r = new THREE.Vect
 export function vehicleDynamics(R) {
   const g = MOON.g;
   const loaded = !!R.loaded;
-  const m = R.mass + (loaded ? R.lift.cargo.T.mass : 0);
+  const m = R.totalMass ?? (R.mass + (loaded ? R.lift.cargo.T.mass : 0)); // single mass path (rover.js massProps): incl. held arm / ACM loads
   const lv = R.body.linvel(), av = R.body.angvel(), rq = R.body.rotation();
   _q.set(rq.x, rq.y, rq.z, rq.w);
   _f.set(1, 0, 0).applyQuaternion(_q); _f.y = 0; _f.normalize();       // body forward, horizontal

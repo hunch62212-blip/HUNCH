@@ -10,6 +10,12 @@ function dotTexture() {
   return new THREE.CanvasTexture(c);
 }
 
+// In vacuum a grain keeps its brightness until it lands: no drag, no suspension, no fading. Flight time is 2 v_up / g
+// (<= ~4.5 s at the fastest wheel spray, ~7 s for a 5.7 m/s throw); the cap only frees grains that never meet the ground
+// (thrown off a ledge past the streamed terrain).
+const DUST_MAX_FLIGHT_S = 12;
+const DUST_ALPHA = 0.9;
+
 export class Dust {
   constructor(scene, terrain) {
     this.t = terrain; this.N = 4000;
@@ -47,7 +53,7 @@ export class Dust {
         const sp = vs * (0.4 + Math.random() * 0.9);
         const up = vs * (0.3 + Math.random() * 0.9);
         this.v[k * 3] = dir.x * sp + (Math.random() - 0.5) * 0.3; this.v[k * 3 + 1] = up; this.v[k * 3 + 2] = dir.z * sp + (Math.random() - 0.5) * 0.3;
-        this.life[k] = 1;
+        this.life[k] = DUST_MAX_FLIGHT_S;
       }
     }
   }
@@ -55,11 +61,11 @@ export class Dust {
     const g = MOON.g;
     for (let k = 0; k < this.N; k++) {
       if (this.life[k] <= 0) { this.alpha[k] = 0; continue; }
-      this.life[k] -= dt * 0.18; // ~5.5 s lifetime
+      this.life[k] -= dt; // seconds of flight left before the safety cap
       this.v[k * 3 + 1] -= g * dt;
       this.p[k * 3] += this.v[k * 3] * dt; this.p[k * 3 + 1] += this.v[k * 3 + 1] * dt; this.p[k * 3 + 2] += this.v[k * 3 + 2] * dt;
       if (this.v[k * 3 + 1] < 0 && this.life[k] > 0 && this.p[k * 3 + 1] < heightAt(this.t, this.p[k * 3], this.p[k * 3 + 2])) this.life[k] = 0; // no air: lands where the arc ends
-      this.alpha[k] = this.life[k] > 0 ? Math.min(0.9, this.life[k] * 2.5) : 0;
+      this.alpha[k] = this.life[k] > 0 ? DUST_ALPHA : 0;   // sharp until it lands (see DUST_MAX_FLIGHT_S)
     }
     this.points.geometry.attributes.position.needsUpdate = true;
     this.points.geometry.attributes.alpha.needsUpdate = true;

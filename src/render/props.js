@@ -2,7 +2,8 @@
 import * as THREE from 'three';
 import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry.js';
 import { rockShapes, rockTransform } from '../sim/rockShapes.js';
-import { WORLD, DOCK, CARGO_TYPES } from '../sim/config.js';
+import { WORLD, DOCK, CARGO_TYPES, DECK } from '../sim/config.js';
+import { acmGeom } from '../sim/cargoContact.js';
 import { heightAt, mulberry32 } from '../sim/terrain.js';
 import { LANDER_SCALE } from '../sim/world.js';
 import { cargoModuleCAD } from './cadModels.js';
@@ -309,6 +310,7 @@ export function buildHabitat(terrain, ports) {
 
 // ---------------- cargo ------------------------------------------------------
 export function buildCargo(c) {
+  if (c.T.handling === 'arm') return buildACM(c);
   const T = c.T, g = new THREE.Group();
   const id = c.tag0 ?? c.id.charCodeAt(3);
   if (T.shape === 'cylinder') {
@@ -355,6 +357,70 @@ export function buildCargo(c) {
   g.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   return g;
 }
+// ---------------- ACM (arm-handled cargo module) -----------------------------------------------------------------
+// Full-scale metres, origin at the CG (same frame as the Rapier body, see cargoContact.js acmGeom). Mirrors the CAD
+// (plan s7: acm_L/W/H, split PETG shell, 2 x D12 trunnions, 4 foot pads, round + slot bushings, keeper bar, fiducials):
+//   shell    lower half + upper half, mated at a tongue-and-groove seam with bolt heads along it
+//   trunnion gold pins on the +-z faces 20 mm (x K) above the CG, with a retaining collar and end cap
+//   feet     four square pads with a steel plate (group names 'foot0'..'foot3'; userData.feet holds the meshes)
+//   deck     round bushing + slot bushing under the shell at DECK.pinSpan, keeper bar across the underside
+export function buildACM(c) {
+  const T = c.T, G = acmGeom(T), g = new THREE.Group(); g.name = 'acm';
+  const id = c.tag0 ?? (c.id ? c.id.charCodeAt(c.id.length - 1) + 40 : 40);
+  const { L, H, W, footH, foot } = G, yMid = G.boxY, yBot = yMid - H / 2, yTop = yMid + H / 2;
+  const gold = new THREE.MeshStandardMaterial({ color: 0xd4a017, roughness: 0.3, metalness: 0.9 });
+  const shellMat = new THREE.MeshStandardMaterial({ color: 0xc9ccd0, roughness: 0.55, metalness: 0.15 });
+  const shellMat2 = new THREE.MeshStandardMaterial({ color: 0xb4b8be, roughness: 0.55, metalness: 0.15 });
+  const mk = (m, w, h, d, x, y, z) => { const b = box(w, h, d, m); b.position.set(x, y, z); g.add(b); return b; };
+  // shell halves split at the seam plane y = yMid + 0.12 H (open-side-up lower tray, lid on top)
+  const ySeam = yBot + H * 0.58, hLo = ySeam - yBot, hHi = yTop - ySeam;
+  mk(shellMat, L, hLo, W, 0, yBot + hLo / 2, 0).name = 'shellA';
+  mk(shellMat2, L, hHi, W, 0, ySeam + hHi / 2, 0).name = 'shellB';
+  // tongue-and-groove seam: a slightly proud dark flange band + bolt heads around the perimeter
+  const bandH = H * 0.045;
+  mk(MAT.dark, L + 0.06, bandH, W + 0.06, 0, ySeam, 0).name = 'seam';
+  const bolt = (x, z) => { const b = cyl(0.07, 0.07, 0.05, MAT.steel, 10); b.position.set(x, ySeam + bandH / 2 + 0.02, z); g.add(b); };
+  for (let i = -3; i <= 3; i++) { bolt(i * L / 7.5, W / 2 + 0.02); bolt(i * L / 7.5, -W / 2 - 0.02); }
+  for (let i = -2; i <= 2; i++) { bolt(L / 2 + 0.02, i * W / 6); bolt(-L / 2 - 0.02, i * W / 6); }
+  // edge ribs on the upper half (printed stiffeners show through the lid)
+  for (const sx of [-1, 1]) mk(shellMat2, 0.12, 0.05, W * 0.92, sx * L * 0.3, yTop + 0.025, 0);
+  for (const sz of [-1, 1]) mk(shellMat2, L * 0.92, 0.05, 0.12, 0, yTop + 0.025, sz * W * 0.3);
+  // trunnions: gold rod through the shell, retaining collar and end cap, gusset plate on the wall
+  const tr = T.trunnion;
+  g.userData.trunnions = [];
+  for (const sz of [-1, 1]) {
+    const rod = cyl(tr.r, tr.r, tr.len, gold, 24); rod.rotation.x = Math.PI / 2;
+    rod.position.set(0, G.trunY, sz * (W / 2 + tr.len / 2)); g.add(rod); g.userData.trunnions.push(rod);
+    const collar = cyl(tr.r * 1.5, tr.r * 1.5, 0.05, MAT.steel, 24); collar.rotation.x = Math.PI / 2; collar.position.set(0, G.trunY, sz * (W / 2 + 0.03)); g.add(collar);
+    const cap = cyl(tr.r * 1.2, tr.r * 1.2, 0.04, MAT.steel, 24); cap.rotation.x = Math.PI / 2; cap.position.set(0, G.trunY, sz * (W / 2 + tr.len + 0.01)); g.add(cap);
+    mk(MAT.dark, 0.9, 0.9, 0.05, 0, G.trunY, sz * (W / 2 + 0.025));
+  }
+  // feet: pad (rubber) + steel plate bonded to the shell underside
+  g.userData.feet = [];
+  G.feet.forEach((f, i) => {
+    const fg = new THREE.Group(); fg.name = 'foot' + i; fg.position.set(f.x, G.groundY + footH / 2, f.z);
+    const pad = box(foot, footH * 0.7, foot, MAT.rubber); pad.position.y = -footH * 0.15; fg.add(pad);
+    const plate = box(foot * 1.06, footH * 0.3, foot * 1.06, MAT.steel); plate.position.y = footH * 0.35; fg.add(plate);
+    g.add(fg); g.userData.feet.push(fg);
+  });
+  // deck interface on the underside: round + slot bushing on the centreline (3-2-1), keeper bar across
+  const bushY = yBot - 0.04, span = DECK.pinSpan;
+  const round = cyl(0.3, 0.3, 0.08, MAT.steel, 24); round.position.set(-span / 2, bushY, 0); g.add(round);
+  const hole = cyl(0.17, 0.17, 0.09, MAT.black, 24); hole.position.set(-span / 2, bushY - 0.005, 0); g.add(hole);
+  const slot = box(0.6, 0.08, 1.1, MAT.steel); slot.position.set(span / 2, bushY, 0); g.add(slot);
+  const slotHole = box(0.34, 0.09, 0.8, MAT.black); slotHole.position.set(span / 2, bushY - 0.005, 0); g.add(slotHole);
+  const keeper = cyl(0.11, 0.11, W * 0.55, gold, 16); keeper.rotation.x = Math.PI / 2; keeper.position.set(0, yBot - 0.16, 0); keeper.name = 'keeper'; g.add(keeper);
+  for (const sz of [-1, 1]) mk(MAT.steel, 0.22, 0.2, 0.16, 0, yBot - 0.08, sz * W * 0.26);
+  // fiducials on the +-x faces, label on the +-z faces (below the trunnion gusset)
+  for (const sx of [-1, 1]) { const t = tagMesh(id + (sx > 0 ? 0 : 1), Math.min(H, W) * 0.55); t.position.set(sx * (L / 2 + 0.012), yMid - 0.1, 0); t.rotation.y = sx > 0 ? Math.PI / 2 : -Math.PI / 2; g.add(t); }
+  const mass = Math.round(T.mass);
+  const labelMat = new THREE.MeshBasicMaterial({ map: labelTexture(`${c.id || 'ACM'}  ARM CARGO  ${mass} kg`, { color: '#1b1b1b', w: 1024, h: 160 }), transparent: true, side: THREE.DoubleSide });
+  for (const sz of [-1, 1]) { const lbl = new THREE.Mesh(new THREE.PlaneGeometry(W * 0.62, W * 0.62 * 160 / 1024), labelMat); lbl.position.set(0, yBot + hLo * 0.3, sz * (W / 2 + 0.015)); if (sz < 0) lbl.rotation.y = Math.PI; g.add(lbl); }
+  g.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  g.userData.acm = true;
+  return g;
+}
+
 // Ring-adapter sled for the 20-ft container (Mission 8): gives the box the same 7.96 m ring interface as the 40-ft
 // module, so the same saddles, ring jaws and stands carry it. Every part mirrors a collider in world.js:
 //   two clamp rings (0.82 m bands at T.adapterRings), the keel shroud under the box (the convex hull the under-module

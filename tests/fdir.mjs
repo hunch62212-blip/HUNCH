@@ -39,7 +39,7 @@ const settle = () => { cmd('clear faults'); cmd('stop'); if (R.estop) cmd('reset
 // stimulus: 'drive' = drive slowly during the window (detectors that need motion), 'bit' = force the periodic BIT,
 // 'pad' = put the rover on the dock pad and kneel
 const PLAN = {
-  mc: [3, 5], seize: [5, 15, 'drive'], cool: [2, 420], enc: [4, 15, 'drive'], strut: [6, 200], bat: [2, 10], runaway: [3, 120], pdu: ['A', 5],
+  mc: [1, 5], seize: [5, 15, 'drive'], idler_seize: [3, 15, 'drive'], cool: [2, 420], enc: [6, 15, 'drive'], strut: [6, 200], bat: [2, 10], runaway: [3, 120], pdu: ['A', 5],
   imd: [null, 10], fc: ['A', 5], seu: [null, 3], imu: ['A', 10], sun: [null, 15], lidar: [null, 5], ldust: [null, 120], cam: [null, 5], cdust: [null, 120],
   com: ['P', 5], htr: ['A', 5, 'bit'], louver: ['L', 5, 'bit'], clamp: [1, 5, 'bit'], lcell: [2, 5, 'bit'], estop: [null, 3], coupler: [null, 60, 'pad'],
 };
@@ -65,8 +65,9 @@ for (const m of MODES) {
   check(`detect ${m.id} (${m.name}) on ${key}`, good, hit ? `${(sim.time - t0).toFixed(1)} s: ${a.reading}` : `not detected in ${win} s`);
   if (sunEl0 != null) sim.setSun(sim.sunAz, sunEl0);
   // response checks
-  if (m.id === 'mc') check('mc: wheel 3 free-rolls', R.wheels[2].fault === 'motor');
+  if (m.id === 'mc') check('mc: wheel 1 free-rolls', R.wheels[0].fault === 'motor');
   if (m.id === 'seize') { run(4); check('seize: wheel 5 declutched to free-roll', R.wheels[4].fault === 'motor' && R.wheels[4].declutched); }
+  if (m.id === 'idler_seize') check('idler_seize: speed derated, wheel stays seized (no declutch)', H.fx.speedK <= 0.5 && R.wheels[2].fault === 'seized', `speedK ${H.fx.speedK}`);
   if (m.id === 'cool') check('cool: speed derated', H.fx.speedK < 1, `speedK ${H.fx.speedK}`);
   if (m.id === 'bat') within('bat: capacity on line', R.power.capK, 0.74, 0.76, '', 2);
   if (m.id === 'runaway') { run(130); check('runaway: string isolated and cooling', H.isOut(3) && H.active.get('runaway:3').dT < 7, `dT ${H.active.get('runaway:3')?.dT.toFixed(1)} C`); }
@@ -99,11 +100,13 @@ cmd('fault strut 6'); run(200, () => H.alarms.has('strut:6'));
 cmd('repair strut 6'); run(2);
 check('dock-only repair refused away from the dock', !H.job && H.alarms.has('strut:6'));
 settle();
-cmd('fault mc 3'); run(2);
+cmd('fault mc 1'); run(2);
 const kitMC = H.spares.kit.MC;
-cmd('repair mc 3'); run(LRUS.MC.min * 60 + 20);
-check('field repair (MC drawer, kit spare): alarm cleared, wheel driven again', !H.alarms.has('mc:3') && R.wheels[2].fault === null);
+cmd('repair mc 1'); run(LRUS.MC.min * 60 + 20);
+check('field repair (MC drawer, kit spare): alarm cleared, wheel driven again', !H.alarms.has('mc:1') && R.wheels[0].fault === null);
 equal('field repair used one kit spare', H.spares.kit.MC, kitMC - 1);
+cmd('fault mc 3'); run(1);
+check('mc on an idler (wheel 3) is refused: idlers have no motor controller', !H.alarms.has('mc:3') && !H.active.has('mc:3') && R.wheels[2].fault === null);
 settle();
 
 // ---- D. random failures ----
@@ -112,7 +115,7 @@ settle();
   H.setRandom(true, '300000'); run(300); H.setRandom(false);
   atLeast('random failures injected in 300 s at 3e5 x', H.stats.random - r0, 2);
   equal('random failures: spurious alarms', H.stats.spurious - s0, 0);
-  const latentOrMotion = new Set(['seize', 'enc', 'htr', 'louver', 'clamp', 'lcell', 'coupler', 'cool', 'strut', 'runaway', 'ldust', 'cdust', 'sun']);
+  const latentOrMotion = new Set(['seize', 'idler_seize', 'enc', 'htr', 'louver', 'clamp', 'lcell', 'coupler', 'cool', 'strut', 'runaway', 'ldust', 'cdust', 'sun']);
   const missed = [...H.active.values()].filter((f) => f.random && !latentOrMotion.has(f.id) && sim.time - f.t0 > 20 && !H.alarms.has(f.n == null ? f.id : `${f.id}:${f.n}`));
   equal('random failures (immediately observable) left undetected', missed.map((f) => f.id).join(',') || 'none', 'none');
   settle();

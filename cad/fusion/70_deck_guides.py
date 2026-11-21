@@ -63,20 +63,22 @@ def run(_context: str):
     A.union(body, A.cyly(sv_y0 + sp['H'], sv_y0 + sp['H'] + 1.0, xl, 0, 3.0))
     A.add_body(comp, 'SERVO_DECK_LATCH', body, 'buy', 'MG996R [VERIFY]')
     # ---- stow cradles -----------------------------------------------------------------------------------
-    ar = A.arm_layers()
-    sx = P('stow_x'); sy = P('stow_y')
+    # Wrist axis at stow = sim fk(stow q).tip / 16.32 = (stow_x, stow_y) = (161.5, 342); the hook seat is hook_off further along psi = 1.2.  The post stands INBOARD of the hook / gate
+    # plates (d 108..121, hook plate d 126..132, gate d 122..126) because the tower + wrist servo + forearm plates fill d >= 132 there;
+    # a pin cantilevers outboard from the post through the V seat (TPU sleeve over d 124.5..133).
+    sx, sy = A.stow_seat_xy()          # hook seat = wrist (161.5, 342) + hook_off along psi 1.2
     for s, tag in ((1, 'R'), (-1, 'L')):
         _, comp = A.fresh_component(asm, 'PRT_STOW_CRADLE_' + tag)
-        d0, d1 = 133.0, 149.0
+        d0, d1, dp = 108.0, 121.0, 133.0
         post = A.box(sx - 8, sx + 8, deck, sy, s * d0, s * d1)
-        A.union(post, A.rbox_y(sx - 18, sx + 18, deck, deck + 5, s * 130.0, s * 152.0, 4.0))
-        A.union(post, A.cylz(s * d0, s * 123.5, sx, sy, 4.5))                   # pin Ø9 under the 12 mm TPU sleeve
+        A.union(post, A.rbox_y(sx - 18, sx + 18, deck, deck + 5, s * 103.0, s * 125.0, 4.0))
+        A.union(post, A.cylz(s * d1, s * dp, sx, sy, 4.5))                      # pin dia 9 under the 12 mm TPU sleeve
         for x in (sx - 12, sx + 12):
-            for d in (134.0, 148.0):
+            for d in (109.0, 119.0):
                 A.cut(post, A.hole((x, deck + 5, s * d), (0, -1, 0), P('bolt_m3_clr'), 5))
-        A.cut(post, A.insert_hole((sx, sy, s * 123.5), (0, 0, s), 'm3'))
+        A.cut(post, A.insert_hole((sx, sy, s * dp), (0, 0, -s), 'm3'))
         A.add_body(comp, 'STOW_POST_' + tag, post, 'yellow', 'PETG 100% infill')
-        pad = A.tube_z(s * 124.5, s * d0, sx, sy, P('trun_d') / 2, 4.6)
+        pad = A.tube_z(s * 124.5, s * dp, sx, sy, P('trun_d') / 2, 4.6)
         A.add_body(comp, 'STOW_PAD_' + tag, pad, 'tpu', 'TPU 95A sleeve')
         A.report(comp)
     for o in asm.occurrences:

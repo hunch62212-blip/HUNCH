@@ -549,14 +549,17 @@ def arm_geom():
     S = (P('arm_sh_x'), P('arm_sh_y'))
     return S, P('arm_L1'), P('arm_L2')
 
-def ik2(tx, ty, up=True):
-    """Two-link IK for the wrist axis (tx, ty).  Returns (q1, q2) rad; picks the elbow-up (higher elbow) solution."""
+def ik2(tx, ty, up=True, branch=None):
+    """Two-link IK for the wrist axis (tx, ty).  Returns (q1, q2) rad.  branch=None picks the higher elbow; branch='neg' forces
+    q2 < 0 (pick / apex / stow side), branch='pos' forces q2 > 0 (place side, sim ARM.limits comment: arm reaching back over the shoulder)."""
     S, L1, L2 = arm_geom()
     dx, dy = tx - S[0], ty - S[1]
     d = math.hypot(dx, dy)
     D = max(-1.0, min(1.0, (d * d - L1 * L1 - L2 * L2) / (2 * L1 * L2)))
     best = None
     for sg in (-1, 1):
+        if (branch == 'neg' and sg > 0) or (branch == 'pos' and sg < 0):
+            continue
         q2 = sg * math.acos(D)
         q1 = math.atan2(dy, dx) - math.atan2(L2 * math.sin(q2), L1 + L2 * math.cos(q2))
         ey = S[1] + L1 * math.sin(q1)
@@ -564,16 +567,30 @@ def ik2(tx, ty, up=True):
             best = (ey, q1, q2)
     return best[1], best[2]
 
+# sim ARM.limits (rad): q1 [-1.05, 3.0], q2 [-3.0, 2.4], q3 [-2.8, 2.8]  (src/sim/config.js)
+ARM_LIM = ((-1.05, 3.0), (-3.0, 2.4), (-2.8, 2.8))
+# pose table: seat target (x, y) of the hook seat, hook angle psi (rad), elbow branch.  Stow = sim fk(ARM.stow.q) tip / 16.32, psi 1.2.
+STOW_Q = (2.8, -2.8, 1.2)       # sim ARM.stow.q (rad)
+def stow_seat_xy():
+    """Stowed hook SEAT (trunnion) = wrist axis (stow_x, stow_y) + hook_off along the hook (psi 1.2 rad): where the stow cradle pin goes."""
+    return P('stow_x') + P('hook_off') * math.cos(STOW_Q[0] + STOW_Q[1] + STOW_Q[2]), P('stow_y') + P('hook_off') * math.sin(sum(STOW_Q))
+
+def pose_target(pose):
+    return {'pregrasp': ((P('pick_x'), 90.0 - 50.0), 0.0, 'neg'), 'pick': ((P('pick_x'), 90.0), 0.0, 'neg'),
+            'apex': ((P('arm_sh_x'), 515.0), 0.0, 'neg'),
+            'place': ((P('dk_place_x'), P('ch_deckY') + P('acm_trun_y')), 0.0, 'pos')}[pose]
+
 def arm_pose_q(pose):
-    """Joint angles (q1, q2, q3) rad for a named pose; the hook seat (trunnion) hits the pose target with the mouth up (psi = 0)."""
+    """Joint angles (q1, q2, q3) rad for a named pose; the hook SEAT (trunnion) hits the pose target with hook angle psi
+    (the wrist axis sits hook_off behind it along the hook).  q3 is wrapped into the sim limit window (-pi, pi]."""
+    if pose == 'stow':
+        return STOW_Q                                   # sim ARM.stow.q exactly: wrist axis = sim fk tip (stow_x, stow_y), elbow (-38.4, 342)
     ho = P('hook_off')
-    T = {'stow': (P('stow_x'), P('stow_y')), 'pregrasp': (P('pick_x'), 90.0 - 50.0), 'pick': (P('pick_x'), 90.0),
-         'apex': (P('arm_sh_x'), 515.0), 'place': (P('dk_place_x'), P('ch_deckY') + P('acm_trun_y'))}
-    tx, ty = T[pose]
-    q1, q2 = ik2(tx - ho, ty)
-    q3 = math.degrees(-q1 - q2)
-    q3 = ((q3 - 60.0) % 360.0) + 60.0           # unwrap into the 60..420 deg window (one servo sweep covers all poses)
-    return q1, q2, math.radians(q3)
+    (tx, ty), psi, br = pose_target(pose)
+    q1, q2 = ik2(tx - ho * math.cos(psi), ty - ho * math.sin(psi), branch=br)
+    q3 = psi - q1 - q2
+    q3 = (q3 + math.pi) % (2 * math.pi) - math.pi
+    return q1, q2, q3
 
 def acm_pose_xy(pose):
     """ACM base-centre (x, y) for a pose (ACM carried by the hook from apex on; on the ground / deck otherwise)."""
@@ -604,8 +621,8 @@ def deck_mount_pts():
         for x in (sx - 58.0, sx + 23.0):
             for d in (ar['wall'][0] + 3.0, ar['srv'][1] - 3.0):
                 out.append((x, s * d))
-        for x in (P('stow_x') - 12.0, P('stow_x') + 12.0):
-            for d in (134.0, 148.0):
+        for x in (stow_seat_xy()[0] - 12.0, stow_seat_xy()[0] + 12.0):
+            for d in (109.0, 119.0):
                 out.append((x, s * d))
     pc = P('dk_place_x')
     for sg in (-1, 1):

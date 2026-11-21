@@ -31,3 +31,16 @@ export function shearFactor(x) {
   if (x < 1e-4) return x * 0.5;
   return 1 - (1 - Math.exp(-x)) / x;
 }
+
+// ---- Plate (foot) helpers for the ACM-on-regolith contact (cargoContact.js; plan s5.5) ---------------------------
+// Bekker pressure-sinkage for a square plate of side b: p = (kc/b + kphi) z^n.
+// Sinkage under a uniform pressure p (Pa).
+export function plateSinkage(p, b, soil = R) {
+  if (!(p > 0)) return 0;
+  return Math.pow(p / (soil.kc / b + soil.kphi), 1 / soil.n);
+}
+// Normal force (N) of a plate of area A and side b at sinkage z (m).
+export function plateLoad(z, b, A, soil = R) {
+  if (!(z > 0)) return 0;
+  return A * (soil.kc / b + soil.kphi) * Math.pow(z, soil.n);
+}

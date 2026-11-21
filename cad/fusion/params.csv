@@ -89,9 +89,9 @@ jb_w,mm,40 mm,40,Joint block boss OD,FALSE
 jb_web,mm,4 mm,4,Joint block web between bearing seats,FALSE
 jb_t,mm,2*brg_w + jb_web,18,Joint block thickness,FALSE
 jb_stub,mm,48 mm,48,Bogie block bar-stub length,FALSE
-bat_L,mm,155 mm,155,Battery length x [VERIFY],FALSE
-bat_W,mm,100 mm,100,Battery width z [VERIFY],FALSE
-bat_H,mm,100 mm,100,Battery height y [VERIFY],FALSE
+bat_L,mm,155 mm,155,Battery length x (15 Ah LiFePO4) [VERIFY],FALSE
+bat_W,mm,100 mm,100,Battery width z (15 Ah LiFePO4) [VERIFY],FALSE
+bat_H,mm,100 mm,100,Battery height y (15 Ah LiFePO4) [VERIFY],FALSE
 bat_x,mm,-80 mm,-80,Battery centre x (Option R),FALSE
 bat_y,mm,70 mm,70,Battery bottom y,FALSE
 bat_tray_wall,mm,3 mm,3,Tray wall,FALSE
@@ -104,11 +104,12 @@ ele_plate_t,mm,4 mm,4,Electronics plate thickness,FALSE
 ele_standoff_h,mm,8 mm,8,Board standoff height,FALSE
 ele_hole_inset,mm,3.5 mm,3.5,Generic board hole inset from edges,FALSE
 ele_upper_y,mm,96 mm,96,Upper electronics plate underside y,FALSE
-pi_L,mm,85 mm,85,Pi 5 length,FALSE
-pi_W,mm,56 mm,56,Pi 5 width,FALSE
-pi_H,mm,17 mm,17,Pi 5 height incl. headers,FALSE
-pi_hdx,mm,58 mm,58,Pi 5 hole pitch (long),FALSE
-pi_hdy,mm,49 mm,49,Pi 5 hole pitch (short),FALSE
+pi_L,mm,85 mm,85,Pi 4 length,FALSE
+pi_W,mm,56 mm,56,Pi 4 width,FALSE
+pi_H,mm,17 mm,17,Pi 4 height incl. headers,FALSE
+pi_hdx,mm,58 mm,58,Pi 4 hole pitch (long),FALSE
+pi_hdy,mm,49 mm,49,Pi 4 hole pitch (short),FALSE
+pi_cool_clear,mm,15 mm,15,Free air above the Pi 5 Active Cooler fan inlet [VERIFY],FALSE
 esp_L,mm,69 mm,69,ESP32-S3 DevKitC-1 length [VERIFY],FALSE
 esp_W,mm,26 mm,26,ESP32-S3 width,FALSE
 esp_H,mm,12 mm,12,ESP32-S3 height,FALSE
@@ -176,7 +177,7 @@ hook_cheek_ang,deg,30 deg,30,Lead-in cheek angle,FALSE
 latch_gap,mm,1.0 mm,1,Gate to trunnion,FALSE
 trun_d,mm,12 mm,12,ACM trunnion dia,FALSE
 trun_len,mm,15 mm,15,ACM trunnion length (20 -> 15: tip stays 0.7 mm clear of the forearm inner plate),FALSE
-dk_place_x,mm,-120 mm,-120,ACM centre on deck (balance rule),FALSE
+dk_place_x,mm,-42.6 mm,-42.6,ACM centre on deck (sim DECK.placeX -0.695 m / 16.32; balance rule),FALSE
 dk_pin_tip,mm,8 mm,8,Locating pin tip dia,FALSE
 dk_pin_base,mm,14 mm,14,Locating pin base dia,FALSE
 dk_pin_h,mm,15 mm,15,Locating pin height,FALSE
@@ -209,7 +210,7 @@ acm_split_dy,mm,25 mm,25,ACM shell split plane above trunnion axis,FALSE
 acm_post_d,mm,18 mm,18,ACM interior corner post dia,FALSE
 keeper_d,mm,6 mm,6,ACM keeper bar dia,FALSE
 dk_latch_gap,mm,12 mm,12,Latch hook to keeper clearance when open,FALSE
-stow_x,mm,50 mm,50,Stow cradle pin x,FALSE
-stow_y,mm,305 mm,305,Stow cradle pin y,FALSE
+stow_x,mm,161.5 mm,161.5,Stow wrist-axis x (sim fk(stow q).tip / 16.32; seat = +hook_off along psi),FALSE
+stow_y,mm,342 mm,342,Stow wrist-axis y (psi 1.2 rad; elbow (-38.4 342)),FALSE
 pick_x,mm,420 mm,420,ACM centre x at the ground pick pose,FALSE
-dk_latch_x,mm,dk_place_x - acm_L/2 - 16 mm,-226,Deck latch servo axis x,FALSE
+dk_latch_x,mm,dk_place_x - acm_L/2 - 16 mm,-148.6,Deck latch servo axis x,FALSE
