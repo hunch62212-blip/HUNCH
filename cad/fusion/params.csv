@@ -39,15 +39,15 @@ ch_brkt_arm,mm,44 mm,44,Corner bracket arm length,FALSE
 ch_brkt_w,mm,18 mm,18,Corner bracket arm width,FALSE
 ch_deck_bolt_pitch,mm,100 mm,100,Deck M5 bolt pitch along rails,FALSE
 ch_angle_t,mm,9 mm,9,Tub angle bracket thickness (insert depth + wall),FALSE
-wb_x,mm,240 mm,240,Front/rear axle x,FALSE
-tr_z,mm,235 mm,235,Track half-width (wheel centre plane),FALSE
+wb_x,mm,245 mm,245,Front/rear axle x (240 -> 245: review item 1 trade study; sim ROVER.corners),FALSE
+tr_z,mm,260 mm,260,Track half-width (wheel centre plane; 235 -> 260: review item 1 trade study; sim ROVER.corners),FALSE
 wh_r,mm,65 mm,65,Wheel radius (incl. cleats) [VERIFY],FALSE
 wh_w,mm,75 mm,75,Wheel width [VERIFY],FALSE
 wh_cleat_h,mm,8 mm,8,Cleat height (sim TIRE.cleatM),FALSE
 wh_cleats,,20,20,Cleats per wheel,FALSE
 wh_rim_t,mm,3 mm,3,Hoop wall thickness,FALSE
 wh_disc_t,mm,5 mm,5,Printed wheel disc thickness,FALSE
-wh_outer_z,mm,tr_z + wh_w/2,272.5,Outer face of wheel,FALSE
+wh_outer_z,mm,tr_z + wh_w/2,297.5,Outer face of wheel,FALSE
 whub_d,mm,22 mm,22,Pololu 6 mm hub OD [VERIFY],FALSE
 whub_L,mm,12 mm,12,Pololu hub length [VERIFY],FALSE
 whub_bc,mm,16 mm,16,Hub bolt circle (4x M3) [VERIFY],FALSE

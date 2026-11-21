@@ -93,9 +93,11 @@ export const ROVER = {
   // the combined sprung + unsprung + held-load properties from Rover.massProps() (rover.js), not this alone.
   inertia: { x: Math.round(54000 * MRs * KS * KS), y: Math.round(99000 * MRs * KS * KS), z: Math.round(54000 * MRs * KS * KS) },
   rideHeight: 0,
-  // six corners (rocker-bogie wheel stations, rocker_bogie.js GEO: x +0.24 / 0 / -0.24, z +-0.235; wheelbase 7.83 m, was 7.02 m, widened for the loaded tip margin)
-  corners: [[k(0.24), -k(0.235), 'FL'], [k(0.24), k(0.235), 'FR'], [0, -k(0.235), 'ML'], [0, k(0.235), 'MR'], [-k(0.24), -k(0.235), 'RL'], [-k(0.24), k(0.235), 'RR']],
-  frame: { halfLen: k(0.30), halfWid: k(0.302), deckY: k(0.225), tubY0: k(0.065), tubZ: k(0.146) },
+  // six corners (rocker-bogie wheel stations: x +0.245 / 0 / -0.245, z +-0.26 prototype m; CAD params.csv tr_x, tr_z). Review item 1
+  // (docs/STABILITY_TRADE.md): the track was 0.47 m (3.84 m full scale) and the wheelbase 0.48 m (3.92 m); the trade study widens the
+  // track to 0.52 m (4.24 m) and the wheelbase to 0.49 m (4.00 m) for the loaded tip angle (the module bottom is lowered with it, below).
+  corners: [[k(0.245), -k(0.26), 'FL'], [k(0.245), k(0.26), 'FR'], [0, -k(0.26), 'ML'], [0, k(0.26), 'MR'], [-k(0.245), -k(0.26), 'RL'], [-k(0.245), k(0.26), 'RR']],
+  frame: { halfLen: k(0.30), halfWid: k(0.327), deckY: k(0.225), tubY0: k(0.065), tubZ: k(0.146) },
   bogie: {
     hardpointY: ks(3.0),   // strut top (body frame); the active strut stands in for the slow rocker links + fast struts (body_control.js)
     // travel = ride range (kneel -0.65 .. carry +0.82) plus the rocker-bogie articulation (+-1.1 m of wheel height difference)
@@ -495,6 +497,25 @@ export const FAILURES = {
 //                    the loaded rover, which cannot point-turn, is left behind its own stand facing it, and it did not get 30 m away
 //                    in 25 min (4 boxed-in recoveries). Forward: 200 m clear in 3.4 min, 0 N stand contact, 2 cm lateral drift.
 export const MISSION = { preSurveyRoute: true, crawlApproachM: 15, crawlDockM: 20, standExitM: 12, standExitSpeed: 0.5, standExitKap: 0.05, standExitDir: 1 };
+
+// DESIGN envelope for loaded stability (review item 1; src/sim/stability.js derives the loaded slope limits and tilt reflex from it).
+// The margin is stated on the steepest loaded design slope, not on flat ground.
+//   tipTargetDeg / tipTargetMaxDeg  static tip angle target for the loaded vehicle (about the wheel centre line): 35-45 deg
+//                    (planetary rovers such as MSL are about 45 deg [from memory, verify]); M3 requires >= 25 deg measured margin
+//   slopeLoadedMaxDeg  steepest slope the loaded rover is routed over (planner lethal limit); slopeEmptyDeg the empty rover's
+//   slopeMarginDeg   static margin kept on that slope: slopeLethal = tip - 18.5 (it was 29 - 18.5 = 10.5 deg before this pass)
+//   reflexOverDeg    the tilt reflex trips this far above the loaded slope limit (14 = 10.5 + 3.5); emptyReflexDeg the empty limit (17)
+//   cautionFrac      slopeCaution / slopeLethal (6 / 10.5)
+//   target           the cradle height the trade study requires (module bottom 0.19 prototype m = 1.55 m above the ground, was 3.0 m with the
+//                    carry ride). NOT yet in the sim: the hook-lift redesign (review item 3) lowers ROVER.seatY to it. Until then the loaded
+//                    limits derive from the sim's actual geometry (stability.actualLimits), so they rise by themselves when it lands
+export const DESIGN = {
+  tipTargetDeg: 35, tipTargetMaxDeg: 45, slopeLoadedMaxDeg: 15, slopeEmptyDeg: 20,
+  slopeMarginDeg: 18.5, reflexOverDeg: 3.5, emptyReflexDeg: 17, cautionFrac: 0.571,
+  target: { cradleY: k(0.19) },
+  // raw tip-margin (deg of margin left) at which a loaded / empty rover stops reversing out (autonomy.js unwind); margins, not tilts
+  unwindMarginLoadedDeg: 15, unwindMarginEmptyDeg: 10,
+};
 
 // [ASSUMED] navigation smoothing (autonomy.js navTo / replan): all sim tuning values.
 //   headingDeadbandDeg  inside +-this heading error to the lookahead point, on a gentle path (|k| < 0.02 /m), wz is commanded 0

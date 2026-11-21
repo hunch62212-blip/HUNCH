@@ -2,7 +2,9 @@
 // generator one step, so mission scripts read like the procedure they implement.
 // All decisions use estimated (SLAM) state and sensor measurements, never ground truth.
 import * as THREE from 'three';
-import { ROVER, WORLD, DOCK, MOON, POWER_DOCK, MISSION, NAV } from './config.js';
+import { ROVER, WORLD, DOCK, MOON, POWER_DOCK, MISSION, NAV, DESIGN } from './config.js';
+import { actualLimits } from './stability.js';
+const LOADED_LIM = actualLimits();   // loaded slope limits and tilt reflex derived from the geometry (stability.js)
 import { Planner, LocalPlanner, LETHAL } from './planner.js';
 import { OrbitalDEM, matchToDEM } from './orbitalMap.js';
 import { armMissions } from './autonomyArm.js';
@@ -1100,9 +1102,9 @@ export class Autonomy {
       this.slam.setPayload(loaded);
       // tilt reflex: the ground ahead is steeper than the map said. Stop, mark it as a no-go, back out and replan.
       { const tiltDeg = Math.max(Math.abs(R.tilt.pitch), Math.abs(R.tilt.roll)) * 180 / Math.PI;
-        if (tiltDeg > (loaded ? 14 : 17) && this.sim.time - (this._tiltT || -99) > 20) {
+        if (tiltDeg > (loaded ? LOADED_LIM.tiltReflex : DESIGN.emptyReflexDeg) && this.sim.time - (this._tiltT || -99) > 20) {
           this._tiltT = this.sim.time;
-          this.log(`Tilt reflex: ${tiltDeg.toFixed(0)} deg (limit ${loaded ? 14 : 17}): steeper than mapped, marking slope, backing out`, 'warn');
+          this.log(`Tilt reflex: ${tiltDeg.toFixed(0)} deg (limit ${loaded ? LOADED_LIM.tiltReflex : DESIGN.emptyReflexDeg}): steeper than mapped, marking slope, backing out`, 'warn');
           for (const f of [4, 9, 14]) this.planner.blocked.push({ x: e.x + Math.cos(e.yaw) * f, z: e.z - Math.sin(e.yaw) * f, r: 5, t: this.sim.time, ttl: 900 });
           this.stop(); yield* this.recover(goal, 'steep slope'); lastReplan = 0; continue;
         } }
@@ -1482,7 +1484,7 @@ export class Autonomy {
         // raw tip margin, not the 0.8 s filtered one: reversing a loaded rover over a rim, the filtered value was still above 10 deg
         // when the vehicle had already gone over (v1.7.0 M6 run: tilt 36 deg, then 64 deg). Loaded stops at 15 deg (CoM 6.8 m up).
         const mgn = Math.min(R.tilt.margin, R.tilt.marginF ?? R.tilt.margin);
-        if (mgn < (R.loaded ? 15 : 10)) { this.log('Unwind: tilt margin too small to keep reversing, stopping here', 'warn'); break; }
+        if (mgn < (R.loaded ? DESIGN.unwindMarginLoadedDeg : DESIGN.unwindMarginEmptyDeg)) { this.log('Unwind: tilt margin too small to keep reversing, stopping here', 'warn'); break; }
         k = Math.max(-0.12, Math.min(0.12, -2 * rT / d2));
         proven++;
       }

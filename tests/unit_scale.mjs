@@ -69,3 +69,17 @@ within('peak drive torque: accel on flat (m/s^2) >= accel.lon', Tdrive, ROVER.ac
 // power
 within('surface charger cap dockMaxW (W)', ROVER.battery.dockMaxW, 10000, 20000, ' W', 0);
 within('charger C-rate at cap', ROVER.battery.dockMaxW / ROVER.battery.capacityWh, 0, 0.2, ' C', 3);
+
+// loaded stability (review item 1): the geometry in config.js, the trade study target and the limits derived from them
+import { actualTip, targetTip, targetGeometry, loadedLimits, actualLimits } from '../src/sim/stability.js';
+import { DESIGN } from '../src/sim/config.js';
+{
+  const tt = targetTip();
+  within('target loaded roll tip, wheel centre line (deg) >= 35', tt.rollCL, DESIGN.tipTargetDeg, 90, ' deg', 1);
+  within('target loaded pitch tip (deg) >= 35', tt.pitch, DESIGN.tipTargetDeg, 90, ' deg', 1);
+  within('target margin left on the 15 deg design slope after the 0.35 m/s^2 lean (deg) >= 8', tt.afterLean, 8, 90, ' deg', 1);
+  const lt = loadedLimits(Math.min(tt.rollCL, tt.pitch));
+  within('target loaded slope limit reaches the design slope (deg)', lt.slopeLethal, DESIGN.slopeLoadedMaxDeg, DESIGN.slopeLoadedMaxDeg, ' deg', 1);
+  const at = actualTip(), al = actualLimits();
+  within('actual limits never exceed what the tip angle allows (slopeLethal + 18.5 <= tip)', al.slopeLethal + DESIGN.slopeMarginDeg, 0, Math.min(at.rollCL, at.pitch) + 1e-6, ' deg', 1);
+}

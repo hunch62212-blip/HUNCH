@@ -3,7 +3,8 @@
 // classification for traversability, and a teach-and-repeat route memory.
 // Nothing here reads ground truth except the initial surveyed landing-site pose.
 import * as THREE from 'three';
-import { WORLD, ROVER } from './config.js';
+import { WORLD, ROVER, DESIGN } from './config.js';
+import { actualLimits } from './stability.js';
 
 export const RES = 0.5;
 export const TILE = 64;                 // cells per tile side (32 m)
@@ -184,9 +185,11 @@ export class Slam {
   setPayload(loaded) {
     if (!!this._payload === !!loaded) return;
     this._payload = !!loaded;
-    // loaded static tip angle ~29 deg (half-track 3.83 m / CoM 6.8 m); 10.5 deg keeps >= 18 deg of margin and stops
-    // the map's slope over-read (5-6 deg true reads ~9, CHANGES.md §9) from walling the loaded rover in (was 8.5 / 4.5)
-    this.limits.slopeLethal = loaded ? 10.5 : 20; this.limits.slopeCaution = loaded ? 6 : 9;
+    // loaded slope limits derive from the static tip angle (stability.js loadedLimits: lethal = tip - 18.5 deg, capped at the design
+    // 15 deg): they were 10.5 / 6 deg hand-set for a ~29 deg tip. 10.5 deg also stops the map's slope over-read (5-6 deg true reads ~9,
+    // CHANGES.md §9) from walling the loaded rover in (was 8.5 / 4.5)
+    const LL = actualLimits();
+    this.limits.slopeLethal = loaded ? LL.slopeLethal : DESIGN.slopeEmptyDeg; this.limits.slopeCaution = loaded ? LL.slopeCaution : 9;
     this.limits.stepLethal = loaded ? 0.6 : 0.85; this.limits.stepCaution = loaded ? 0.3 : 0.4;
     for (const t of this.tiles.values()) t.dirty = true;
   }
