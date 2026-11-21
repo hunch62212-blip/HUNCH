@@ -78,7 +78,7 @@ Before the review pass (item 6) the code divided wheel rpm by √K only, which h
 | Energy the rover may draw at night | | ${f((1 - D.nightReserveSoc) * D.bankWh / 1000 * D.bankEff * D.linkEff, 0)} kWh through the link | vs ~55 kWh rover survival load (docs/POWER_BUDGET.md) |
 | Refill from the floor | ~18 h of sun | ${f(D.bankWh * (1 - D.bankFloor) / D.bankEff / (arrayKW * 1000 - D.hotelW), 0)} h of full sun | 7 % of a 354 h lunar day |
 
-\`[ASSUMED]\`: no 20 kW lunar inductive link or 200 kWh lunar bank exists to cite. The lunar-qualified wireless-charger reference is the 125 W Astrobotic / WiBotic UFPC.
+\`[ASSUMED]\`: no 20 kW lunar inductive link or 250 kWh lunar bank exists to cite. The lunar-qualified wireless-charger reference is the 125 W Astrobotic / WiBotic UFPC.
 `;
 if (process.argv.includes('--print')) console.log(sheet);
 else { writeFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'docs', 'SCALING.md'), sheet); console.log(sheet.split('\n').slice(0, 52).join('\n')); }

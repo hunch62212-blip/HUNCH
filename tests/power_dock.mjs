@@ -3,7 +3,7 @@
 // Pass: the charge mission finishes OK and reaches 90 %; it takes 3.5-5.5 h (0.14 C CC-CV, 52.5 A into the 375 Ah pack, capped at the
 // 20 kW charger, tapering above 80 %); peak current <= 52.5 A; energy delivered to the 150 kWh pack matches the SoC gain; the pack
 // stays under 50 C; the link releases and the rover backs off; the bank never browns out (the 8.4 kW array cannot carry a 20 kW charge:
-// the 200 kWh bank does) and the array refills it from the floor in about a day and a half of sun; a cold bank is not charged; the
+// the 250 kWh bank does) and the array refills it from the floor in about a day and a half of sun; a cold bank is not charged; the
 // bank carries the dock's own night load for a full 354 h lunar night and the vault stays above its heater set point.
 import { check, within, atLeast, atMost } from './lib/check.mjs';
 import RAPIER from '@dimforge/rapier3d-compat';
@@ -55,5 +55,5 @@ atLeast('bank endurance on the dock night load (lunar night 354 h)', D.nightHour
 D.bankWh = POWER_DOCK.nightReserveSoc * POWER_DOCK.bankWh;
 for (let i = 0; i < 21240; i++) D.update(60);
 console.log('after a 354 h night from the reserve: bank', (D.soc * 100).toFixed(1), '%, vault', D.Tbank.toFixed(1), 'C');
-atLeast('bank state of charge after a 354 h night from the 46 % reserve', D.soc, POWER_DOCK.bankFloor, '', 3);
+atLeast('bank state of charge after a 354 h night from the 40 % reserve', D.soc, POWER_DOCK.bankFloor, '', 3);
 atLeast('vault temperature after the night', D.Tbank, POWER_DOCK.vault.setC - 2, ' C', 1);

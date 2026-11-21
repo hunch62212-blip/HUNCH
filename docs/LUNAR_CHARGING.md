@@ -1,7 +1,7 @@
 # Lunar power dock: precedent, mechanism and scale coupling
 
 The sim dock (`src/sim/powerDock.js`, `POWER_DOCK` / `PACK` in `src/sim/config.js`) is modelled at **full scale in real units**
-(400 V, 150 kWh rover pack, 200 kWh bank, 8.4 kW array; review item 6). It used to be modelled in prototype units and multiplied by 1172, which implied
+(400 V, 150 kWh rover pack, 250 kWh bank, 8.4 kW array; review item 6). It used to be modelled in prototype units and multiplied by 1172, which implied
 a 148 kW array and a 2.8 MWh bank; the bench dock now lives in `POWER_DOCK_PROTO` (not used by the sim). Figures marked [verify] come from
 memory or secondary sources and were not re-checked against a primary document.
 
@@ -44,12 +44,12 @@ drawn at 1:1 of the prototype dock via `k()`, like the rover, so the masts are 1
 
 * Array: 2 masts x 13.4 m^2 = 26.8 m^2 of 30 % triple-junction cells. 1361 W/m^2 x 26.8 x 0.30 = 10.9 kW AM0, x 0.80 derate (dust 0.93,
   cell temperature 0.90, wiring 0.97, ageing 0.98) x 0.96 MPPT = 8.4 kW at a sun-facing panel.
-* Refill: 200 kWh x 0.90 usable / 0.97 charge efficiency = 185 kWh, divided by about 8.3 kW net = about 22 h of sun (about 25 h with the rover charging). That is
-  under 7 % of a 354 h lunar day. A 20 kW rover charge is 2.4x the array: the bank carries the difference.
-* Night: 120 W avionics + vault heater (0.85 W/K x 55 K = 47 W, electric; `rhuW` 0) = 167 W x 354 h / 0.97 = 61 kWh = 31 % of the bank.
-* Night reserve SoC 0.46 = 0.10 BMS floor + 0.31 night load + 0.05 margin. At night the rover may draw the bank down to this level only
-  (about 89 kWh through the 85 % link, enough for the rover's ~55 kWh survival load with margin).
-* Bank: 400 V 500 Ah = 200 kWh. [ASSUMED] (no lunar-qualified 200 kWh bank exists to cite; about 1.5 t of LFP cells).
+* Refill: 250 kWh x 0.90 usable / 0.97 charge efficiency = 232 kWh, divided by about 8.3 kW net = about 28 h of sun (about 31 h with the rover charging). That is
+  8 % of a 354 h lunar day. A 20 kW rover charge is 2.4x the array: the bank carries the difference.
+* Night: 120 W avionics + vault heater (0.9 W/K x 55 K = 50 W, electric; `rhuW` 0) = 170 W x 354 h / 0.97 = 62 kWh = 25 % of the bank.
+* Night reserve SoC 0.40 = 0.10 BMS floor + 0.25 night load + 0.05 margin. At night the rover may draw the bank down to this level only
+  (about 124 kWh through the 85 % link, 1.5x the rover's steady-state 354 h survival load of 82 kWh, docs/THERMAL_BUDGET.md).
+* Bank: 400 V 625 Ah = 250 kWh. [ASSUMED] (no lunar-qualified bank of this size exists to cite; about 1.9 t of LFP cells).
 
 ## 4. Cold charging
 LiFePO4 must not be charged below 0 C. The bank: below `chargeMinBankC` the MPPT backs off (`curtailed`) while the vault heater (thermostat

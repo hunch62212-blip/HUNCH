@@ -1,5 +1,5 @@
 // AEGIS power dock, FULL-SCALE electrics (docs/LUNAR_CHARGING.md, docs/SCALING.md): two sun-tracking vertical solar masts
-// (VSAT-style, 8.4 kW of cells) feed a 200 kWh LiFePO4 bank in a heated, bermed vault; an INDUCTIVE pad (no exposed contacts,
+// (VSAT-style, 8.4 kW of cells) feed a 250 kWh LiFePO4 bank in a heated, bermed vault; an INDUCTIVE pad (no exposed contacts,
 // dust tolerant, after the Astrobotic / WiBotic lunar wireless charger concept) charges the rover's 150 kWh, 400 V pack.
 // Everything here is in real units (V, A, W, Wh) and R.power.dockW = chargeW directly. Until the review pass the dock was
 // modelled at prototype scale and multiplied by 1172 (150 kWh / 128 Wh), which implied a 148 kW array and a 2.8 MWh bank.

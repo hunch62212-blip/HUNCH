@@ -336,14 +336,15 @@ export const DOCK = {
 //    20 kW charger, ROVER.battery.dockMaxW): 30 -> 90 % in about 4.5-5 h.
 //  - array: 2 vertical azimuth-tracking masts (NASA VSAT-style), each a panelW x panelH wing at 1:K of the prototype mast
 //    (3.43 x 3.92 m = 13.4 m^2), 30 % triple-junction cells: 2 x 13.4 m^2 x 1361 W/m^2 x 0.30 x 0.80 x 0.96 = 8.4 kW AM0 at normal incidence.
-//    A 20 kW rover charge therefore comes mostly from the bank; the bank refills from the 10 % floor in about 25 h of full sun
+//    A 20 kW rover charge therefore comes mostly from the bank; the bank refills from the 10 % floor in about 28 h of full sun
 //    (7 % of a 354 h lunar day).
-//  - bank: 200 kWh (125S, 400 V, 500 Ah, about 1.5 t of LFP cells at ~130 Wh/kg) in a heated, bermed vault. [ASSUMED] vault: ~12 m^2 of
-//    MLI-wrapped skin, G = 4 sigma T^3 x eps 0.02 x 12 m^2 = 0.85 W/K, electric heaters only (rhuW 0; set 8 W x n for RHU units).
-//  - night: avionics 120 W + vault heater 0.85 W/K x 55 K = 47 W = 167 W; x 354 h / 0.97 = 61 kWh = 31 % of the bank.
-//    nightReserveSoc 0.46 = 0.10 floor + 0.31 + 0.05 margin. Above it the rover may draw (1 - 0.46) x 200 kWh x 0.97 x 0.85 = 89 kWh
-//    through the link: about 1.6x its 354 h survival load (~55 kWh, docs/POWER_BUDGET.md).
-// [ASSUMED] everything in this block except the geometry keys and cellEff: no 20 kW lunar inductive link or 200 kWh lunar bank exists
+//  - bank: 250 kWh (125S, 400 V, 625 Ah, about 1.9 t of LFP cells at ~130 Wh/kg) in a heated, bermed vault. [ASSUMED] vault: ~13 m^2 of
+//    MLI-wrapped skin, G = 4 sigma T^3 x eps 0.02 x 13 m^2 = 0.9 W/K, electric heaters only (rhuW 0; set 8 W x n for RHU units).
+//    Sized in review item 7 (docs/THERMAL_BUDGET.md): 200 kWh left the rover only 1.09x its 354 h survival need; 250 kWh gives 1.5x.
+//  - night: avionics 120 W + vault heater 0.9 W/K x 55 K = 50 W = 170 W; x 354 h / 0.97 = 62 kWh = 25 % of the bank.
+//    nightReserveSoc 0.40 = 0.10 floor + 0.25 + 0.05 margin. Above it the rover may draw (1 - 0.40) x 250 kWh x 0.97 x 0.85 = 124 kWh
+//    through the link: 1.5x its steady-state 354 h survival load (82 kWh, docs/THERMAL_BUDGET.md).
+// [ASSUMED] everything in this block except the geometry keys and cellEff: no 20 kW lunar inductive link or 250 kWh lunar bank exists
 // to cite; the commercial lunar-qualified wireless-charger reference is the 125 W Astrobotic / WiBotic UFPC (kept in POWER_DOCK_PROTO).
 export const PACK = {
   chem: 'LiFePO4 125S', cells: 125, Ah: ROVER.battery.capacityWh / ROVER.battery.nominalV, Vnom: ROVER.battery.nominalV, Wh: ROVER.battery.capacityWh,
@@ -362,19 +363,19 @@ export const POWER_DOCK = {
   arrayDerate: 0.80,                                   // [ASSUMED] dust 0.93 x cell temp 0.90 x wiring/mismatch 0.97 x ageing 0.98
   mpptEff: 0.96,                                       // [ASSUMED]
   nightSolarW: 130,                                    // [ASSUMED] ~1.5 % of the array: below this the dock is in night mode
-  bankV: 400, bankAh: 500, bankWh: 200000,
+  bankV: 400, bankAh: 625, bankWh: 250000,
   bankCells: 125,
   bankR: 0.05,                                         // [ASSUMED] ohm (about 2 % drop at 0.5 C)
   bankEff: 0.97,                                       // [ASSUMED] each way
   bankFloor: 0.10,                                     // [ASSUMED] BMS low-voltage cutoff margin
-  nightReserveSoc: 0.46,                               // derived above
-  bankMaxDischargeW: 100000,                           // [ASSUMED] 0.5 C BMS limit
-  bankMaxChargeA: 250,                                 // [ASSUMED] 0.5 C
+  nightReserveSoc: 0.40,                               // derived above
+  bankMaxDischargeW: 125000,                           // [ASSUMED] 0.5 C BMS limit
+  bankMaxChargeA: 312,                                 // [ASSUMED] 0.5 C
   chargeMinBankC: 0, dischargeMinBankC: -20,           // LiFePO4 typical datasheet
   hotelW: 120,                                         // [ASSUMED] BMS + MPPT + controller + beacon + habitat link relay, sleep
   padStandbyW: 30,                                     // [ASSUMED] inductive pilot / foreign-object detection while a rover is on the pad
-  vault: { C: 1.8e6, G: 0.85, rhuW: 0, setC: 5, heaterGain: 50, heaterMaxW: 400, sinkDayC: -10, sinkNightC: -50, initC: 10 },
-  //   C: [ASSUMED] J/K, ~1.5 t of cells + box x ~1.2 kJ/kg K;  G: [ASSUMED] W/K, MLI box under a regolith berm (4 sigma T^3 x eps 0.02 x ~12 m^2)
+  vault: { C: 2.2e6, G: 0.9, rhuW: 0, setC: 5, heaterGain: 50, heaterMaxW: 400, sinkDayC: -10, sinkNightC: -50, initC: 10 },
+  //   C: [ASSUMED] J/K, ~1.9 t of cells + box x ~1.2 kJ/kg K;  G: [ASSUMED] W/K, MLI box under a regolith berm (4 sigma T^3 x eps 0.02 x ~13 m^2)
   //   rhuW: electric-only; a radioisotope option (8 W GPHS-class units, Lunokhod / Yutu precedent for small ones) would offset G x 55 K
   //   sinks: [ASSUMED] bermed-vault sink temperatures, day / night
   chargeCC_A: 52.5,                                    // 0.14 C of 375 Ah (about 21.6 kW at 412 V, capped at ROVER.battery.dockMaxW = 20 kW)
@@ -398,6 +399,22 @@ export const POWER_DOCK_PROTO = {
   chargeCC_A: 1.4, linkEff: 0.85, linkOffsetLoss: 0.25, linkMaxW: 125,
 };
 
+// [ASSUMED] vault radiators (THERMAL.vault.radArea = 2 x len x h = 3.06 m^2 at K = 8.16; 12 m^2 = 2 x 7.2 x 0.85 m was the K_LEGACY size). Measured on the team body: the belly-tub
+// side walls are at z = +-2.23..2.33 m between y 1.6 and 3.4 m, and the 7.35 m deck overhangs them to z = +-3.09 m at
+// y 3.4..3.67 m. Each radiator is bolted to its tub wall on two rails, tucked under that overhang (which keeps falling
+// ejecta off it but does NOT shade it: at the ~9 deg polar sun the overhang casts only ~0.12 m, so a panel facing the sun is
+// almost fully lit; health.js _thermal applies the solar load, docs/changes/B.md) and inboard of the rocker beams (z +-2.95 m) and the fenders (inner edge z +-3.09 m).
+// (Earlier versions put them at z = +-4.86 m, sized from frame.halfWid; nothing on the body reaches out there.)
+//   len, h m panel size;  y m panel centre height;  z m panel centre off the centreline (|z|, port is -z)
+// Legacy-scale metres (above) x KS: the radiators follow the body, which scales with K.
+export const RADIATOR = { len: ks(7.2), h: ks(0.85), y: ks(2.95), z: ks(2.36) };
+
+// Pack thermal mass and radiating area (review item 7). The 2.4e6 J/K and 3 m^2 were tuned for the old 420 kWh pack; the pack is now 150 kWh.
+// Mass = capacity / system-level specific energy (the old numbers imply 175 Wh/kg: 2.4e6 J/K / 1000 J/kg K = 2400 kg = 420 kWh / 175 Wh/kg).
+// Area scales as mass^(2/3) (same pack shape). [ASSUMED] specific energy, cp.
+const PACK_WH_PER_KG = 175, PACK_CP = 1000;                   // J/kg K, LFP cells + structure + cold plate (about 1 kJ/kg K)
+const PACK_MASS_KG = Math.round(ROVER.battery.capacityWh / PACK_WH_PER_KG);   // 857 kg
+const OLD_PACK_MASS_KG = Math.round(420000 / PACK_WH_PER_KG), BATT_AREA_OLD = 3;
 // [ASSUMED] AEGIS-V1 thermal control (src/sim/health.js), after the VIPER "warm box" layout: avionics on a
 // heat-spreader vault in the belly-tub nose, heat carried by loop heat pipes to two vertical louvered radiators
 // hung under the deck edges (port + starboard). Radiators are on the sides, not the top, because the carried
@@ -409,13 +426,13 @@ export const POWER_DOCK_PROTO = {
 //    passes, but NOT "under a quarter" (it was, with the old larger pack): tests/fdir.mjs E asserts <= 25 % (docs/changes/A.md).
 export const THERMAL = {
   sigma: 5.670e-8,
-  vault: { C: 120000, radArea: 12, emis: 0.85, louverMin: 0.12, louverOpenC: 15, louverFullC: 30, setC: 5, survivalSetC: -20, heaterMaxW: 800, hotC: 45 },
-  battery: { C: 2.4e6, radArea: 3, emis: 0.85, louverMin: 0.12, louverOpenC: 25, louverFullC: 35, setC: 5, survivalSetC: -10, heaterMaxW: 1500, hotC: 50 },
+  vault: { C: 120000, radArea: +(2 * RADIATOR.len * RADIATOR.h).toFixed(2), emis: 0.85, louverMin: 0.12, louverOpenC: 15, louverFullC: 30, setC: 5, survivalSetC: -20, heaterMaxW: 800, hotC: 45 },
+  battery: { C: PACK_MASS_KG * PACK_CP, radArea: +(BATT_AREA_OLD * (PACK_MASS_KG / OLD_PACK_MASS_KG) ** (2 / 3)).toFixed(2), emis: 0.85, louverMin: 0.12, louverOpenC: 25, louverFullC: 35, setC: 5, survivalSetC: -10, heaterMaxW: 1500, hotC: 50 },
   heaterGainWperK: 200,
   sinkDayK: 230, sinkNightK: 100, skyViewFraction: 0.5,
   // louverMin 0.12: closed-louver effective emittance fraction (flight louvers close to ~0.10-0.15 of open; 0.06 was
   // optimistic). leakWperK: parasitic conduction through MLI seams, mounts and harness to the cold structure, per box.
-  leakWperK: { vault: 0.25, battery: 0.4 },
+  leakWperK: { vault: 0.25, battery: +(0.4 * (PACK_MASS_KG / OLD_PACK_MASS_KG) ** (2 / 3)).toFixed(3) }, // battery: per-box leak scales with the box area, like its radiator
   // battery internal resistance rises in the cold: R(T) = R0 x (1 + coldRperK x (refC - T)) below refC
   coldRperK: 0.03, coldRrefC: 20,
   // Wheel-end freeze protection (CHANGES.md §17). The hub gearbox lubricant (perfluoropolyether grease) must stay
@@ -434,15 +451,6 @@ export const THERMAL = {
   hub: { C: 120000, radArea: 1.2, emis: 0.05, emisHot: 0.8, switchLoC: 20, switchHiC: 60, motorW: 8, initC: 10 },
 };
 
-// [ASSUMED] vault radiators (THERMAL.vault.radArea 12 m^2 = 2 x 7.2 x 0.85 m). Measured on the team body: the belly-tub
-// side walls are at z = +-2.23..2.33 m between y 1.6 and 3.4 m, and the 7.35 m deck overhangs them to z = +-3.09 m at
-// y 3.4..3.67 m. Each radiator is bolted to its tub wall on two rails, tucked under that overhang (which keeps falling
-// ejecta off it but does NOT shade it: at the ~9 deg polar sun the overhang casts only ~0.12 m, so a panel facing the sun is
-// almost fully lit; health.js _thermal applies the solar load, docs/changes/B.md) and inboard of the rocker beams (z +-2.95 m) and the fenders (inner edge z +-3.09 m).
-// (Earlier versions put them at z = +-4.86 m, sized from frame.halfWid; nothing on the body reaches out there.)
-//   len, h m panel size;  y m panel centre height;  z m panel centre off the centreline (|z|, port is -z)
-// Legacy-scale metres (above) x KS: the radiators follow the body, which scales with K.
-export const RADIATOR = { len: ks(7.2), h: ks(0.85), y: ks(2.95), z: ks(2.36) };
 
 // [ASSUMED] wheel fenders (CHANGES.md §17, §20). A tyre throws regolith up and back (a "rooster tail", ballistic at
 // 1.62 m/s^2 gravity: a 1.2 m/s tread speed lofts it several metres) and sideways in turns, and it coats the radiator and

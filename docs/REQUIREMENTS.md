@@ -57,7 +57,7 @@ Verified by `fdir` (`tests/fdir.mjs`, `npm run test:fdir`):
 | B. Mode sweep | each of the 24 modes injected in turn (driving, parked BIT or on the pad as the mode needs): detected from sensor readings, right unit isolated, automatic response checked where it has one, 0 spurious alarms | <!--fdirB-->not run at 7729e75<!--/fdirB--> |
 | C. Repairs | dock repair with a dock spare; strut repair refused away from the dock; field motor-controller swap uses the on-board kit | <!--fdirC-->not run at 7729e75<!--/fdirC--> |
 | D. Random failures | switch on at a very high rate for 300 s: ≥ 2 failures happen, 0 spurious alarms, every immediately observable one is detected within 20 s (latent ones wait for motion or the BIT) | <!--fdirD-->not run at 7729e75<!--/fdirD--> |
-| E. Lunar night | survival mode holds the set points; a 354 h night costs ≤ 25 % of the pack (open: 36–45 % measured at 150 kWh, see Gaps) | <!--fdirE-->not run at 7729e75<!--/fdirE--> |
+| E. Lunar night | survival mode holds the set points; steady-state 354 h night (closed form, `docs/THERMAL_BUDGET.md`): docked, the dock bank carries it with ≥ 1.25× margin; stranded off the dock ≤ 60 % of the pack (the old ≤ 25 % needs ~100 W of isotope heat) | <!--fdirE-->not run at 7729e75<!--/fdirE--> |
 | F. Keep-alive array | deploys ≥ 3 kW parked, stows before driving | <!--fdirF-->not run at 7729e75<!--/fdirF--> |
 
 ## Last recorded by hand (history, not current results)
@@ -67,7 +67,7 @@ Verified by `fdir` (`tests/fdir.mjs`, `npm run test:fdir`):
 | M11 | pass 7/7 | 2026-11-11 | before the K = 8.16 rescale |
 | M12 levelling | pass 5/5 | 2026-11-11 | before the rescale; the hook-lift redesign (review item 3) removes active levelling |
 | Faults lidar/camera/comms/battery/shift/port | pass | v1.7.x | battery row quoted a ≈61 kW full-scale charge; the charger is 20 kW |
-| FDIR A–F | pass (E: 147 W, 12.4 %) | before the 150 kWh pack | E fails at 150 kWh: a 354 h night costs 36–45 % (tests/fdir.mjs E asserts ≤ 25 %) |
+| FDIR A–F | pass (E: 147 W, 12.4 %) | before the 150 kWh pack | the 147 W / 12.4 % was a transient on the old pack; steady state is 232 W (55 %) at 150 kWh, see E |
 | M6 | v1.7.0 "pass" at 17,000–18,000 s | 2026-11 | only with the cap at 24,000 s; the requirement is 12,000 s. Last full run at 7729e75: 0/3 delivered, boxed in |
 
 ## Assumptions the verification depends on
@@ -85,7 +85,7 @@ Verified by `fdir` (`tests/fdir.mjs`, `npm run test:fdir`):
 
 * M6 is not met: the last full run at 7729e75 delivered 0 of 3 cargos (stopped by the 14° loaded tilt reflex, then boxed in after 4 reverse recoveries). v1.7.0's pass needed 17,000–18,000 s against the 12,000 s requirement.
 * M7 is not met: `nav_bench` was boxed in on both legs in the last full run, and its "zero warnings" check already failed on HEAD (cargo-estimate warnings).
-* E (lunar night) fails at 150 kWh; the night solution is in docs/POWER_BUDGET.md (review item 7).
+* E (lunar night): the 25 % limit is not met stranded off the dock at 150 kWh (55 % steady state, 232 W); the night solution is to park on the dock (`docs/THERMAL_BUDGET.md`, review item 7). The earlier 36–45 % was an 11-minute transient, not the steady state.
 * M10's fault detection was true by construction for several modes (detectors read the injected value); see review item 8.
 * Not tested: the full ~22 h keep-alive recharge, docking the 20-ft container with a failed camera.
 * M4 is only covered through the full cycle.

@@ -69,3 +69,6 @@ never happens in any scenario (`tests/thermal.mjs`); with the brain off the LiDA
 | Motor windings | -60..125 C | warn above 90 C or below -30 C |
 | Wheel hubs (gear grease) | above -60 C | warn below -30 C |
 | Avionics vault | below 45 C | pre-cool above 30 C predicted |
+
+## Budget (review item 7)
+Vault radiator area (3.06 m², from `RADIATOR`), battery heat capacity (0.857e6 J/K for the 150 kWh pack), the closed-form hot-day and night budgets and the night solution (park on the dock) are in `docs/THERMAL_BUDGET.md` (`node scripts/thermal_budget.mjs`). The old 12 m² / 2.4e6 J/K were for the legacy body and the 420 kWh pack.

@@ -50,11 +50,11 @@ Before the review pass (item 6) the code divided wheel rpm by √K only, which h
 | Rover pack | 4S, 10 Ah, 128 Wh | 125S, 375 Ah, 150 kWh | `ROVER.battery` |
 | Charge | 1.4 A CC (0.14 C), 125 W link | 52.5 A CC (0.14 C), capped at 20 kW | 20 kW charger |
 | Array | 2 × 0.202 m² = 126 W | 2 × 13.4 m² = **8.4 kW** | the drawn masts (1:K prototype masts) |
-| Bank | 24 V 100 Ah = 2.4 kWh | 400 V 500 Ah = **200 kWh** | night + rover charge |
-| Dock night load | 0.8 W + vault | 167 W (avionics 120 W + vault heater 47 W) | G = 0.85 W/K |
-| 354 h night, dock only | 0.71 kWh | 61 kWh = 30 % of the bank | |
-| Night reserve | 50 % | 46 % | floor 10 % + night load + 5 % |
-| Energy the rover may draw at night | | 89 kWh through the link | vs ~55 kWh rover survival load (docs/POWER_BUDGET.md) |
-| Refill from the floor | ~18 h of sun | 22 h of full sun | 7 % of a 354 h lunar day |
+| Bank | 24 V 100 Ah = 2.4 kWh | 400 V 625 Ah = **250 kWh** | night + rover charge |
+| Dock night load | 0.8 W + vault | 170 W (avionics 120 W + vault heater 50 W) | G = 0.9 W/K |
+| 354 h night, dock only | 0.71 kWh | 62 kWh = 25 % of the bank | |
+| Night reserve | 50 % | 40 % | floor 10 % + night load + 5 % |
+| Energy the rover may draw at night | | 124 kWh through the link | vs ~55 kWh rover survival load (docs/POWER_BUDGET.md) |
+| Refill from the floor | ~18 h of sun | 28 h of full sun | 7 % of a 354 h lunar day |
 
-`[ASSUMED]`: no 20 kW lunar inductive link or 200 kWh lunar bank exists to cite. The lunar-qualified wireless-charger reference is the 125 W Astrobotic / WiBotic UFPC.
+`[ASSUMED]`: no 20 kW lunar inductive link or 250 kWh lunar bank exists to cite. The lunar-qualified wireless-charger reference is the 125 W Astrobotic / WiBotic UFPC.
