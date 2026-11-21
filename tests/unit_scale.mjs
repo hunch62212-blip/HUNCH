@@ -1,14 +1,35 @@
 // Scale audit: K = 8.16 prints, 3.0 m module, 150 kWh, 4WD, ~5 t rover (user decisions, Nov 2026). run: node tests/unit_scale.mjs
 // Pure config checks plus the derived quantities (ride frequency, braking limit, charger cap); no physics stepping.
 import { within, equal, check } from './lib/check.mjs';
-import { ROVER, K, K_LEGACY, MOON, CARGO_TYPES, DRIVE, PROTO_PACK, PROTO_TO_FULL_WH } from '../src/sim/config.js';
+import { ROVER, K, K_LEGACY, MOON, SCALE, CARGO_TYPES, DRIVE, PACK, POWER_DOCK, PROTO_PACK } from '../src/sim/config.js';
+import { froude, G_EARTH } from '../src/sim/scaling.js';
 import { brakeDecel } from '../src/sim/dynamics.js';
 
 const KS = K / K_LEGACY, g = MOON.g;
 equal('K (prototype print scale)', K, 8.16);
 within('K_LEGACY (old module print 12.192 / 0.747)', K_LEGACY, 16.32, 16.33, '', 3);
 equal('battery capacity (Wh)', ROVER.battery.capacityWh, 150000);
-within('PROTO_TO_FULL_WH = 150 kWh / prototype pack Wh', PROTO_TO_FULL_WH, 150000 / PROTO_PACK.Wh - 1e-9, 150000 / PROTO_PACK.Wh + 1e-9, '', 3);
+// Froude scaling includes gravity (review item 6, src/sim/scaling.js, docs/SCALING.md)
+{ const gR = MOON.g / G_EARTH, f = froude(K, MOON.g);
+  within('gR = g_moon / g_earth', gR, 0.1650, 0.1653, '', 4);
+  within('wheel rpm ratio full / prototype = sqrt(gR / K), not 1 / sqrt(K)', f.rpm, Math.sqrt(gR / K) - 1e-12, Math.sqrt(gR / K) + 1e-12, '', 4);
+  within('speed ratio = sqrt(K gR)', f.speed, 1.160, 1.162, '', 4);
+  const vProto = 300 * 2 * Math.PI / 60 * (ROVER.wheel.radius / K);   // 300 rpm no-load on the 0.065 m prototype wheel
+  within('prototype no-load speed (m/s)', vProto, 2.03, 2.05, ' m/s', 3);
+  within('full-scale no-load speed = prototype x sqrt(K gR) (m/s)', ROVER.motor.noLoadSpeed * ROVER.wheel.radius, 2.36, 2.38, ' m/s', 3);
+  equal('SCALE in config.js is the froude() sheet', SCALE.rpm, f.rpm);
+  check('power ratio = force x speed ratio', Math.abs(f.power - f.force * f.speed) < 1e-6 * f.power, `${f.power.toExponential(3)}`);
+}
+// the dock is sized at full scale (no x1172 from the 128 Wh bench pack)
+{ const D = POWER_DOCK, arrayKW = D.arrays.length * D.panelArea * D.cellEff * D.arrayDerate * D.mpptEff * MOON.solarConstant / 1000;
+  within('dock array (kW, from the drawn 1:K masts: 2 x 13.4 m^2)', arrayKW, 7, 10, ' kW', 2);
+  equal('rover pack in the dock model is the 150 kWh pack', PACK.Wh, ROVER.battery.capacityWh);
+  within('rover pack Ah x V = capacity', PACK.Ah * PACK.Vnom, 149999, 150001, ' Wh', 0);
+  within('dock bank Ah x V = Wh', D.bankAh * D.bankV, D.bankWh - 1, D.bankWh + 1, ' Wh', 0);
+  check('dock bank is not the bench-scaled 2.8 MWh', D.bankWh < 300000, `${D.bankWh / 1000} kWh`);
+  const nightKWh = (D.hotelW + D.vault.G * (D.vault.setC - D.vault.sinkNightC) - D.vault.rhuW) * 354 / 1000 / D.bankEff;
+  check('dock night reserve covers its own 354 h load (+ floor)', D.nightReserveSoc >= D.bankFloor + nightKWh / (D.bankWh / 1000), `reserve ${D.nightReserveSoc}, need ${(D.bankFloor + nightKWh / (D.bankWh / 1000)).toFixed(3)}`);
+  check('prototype bench pack stays 128 Wh', PROTO_PACK.Wh === 128); }
 const C = CARGO_TYPES.cyl40;
 equal('cyl40 length (m)', C.length, 12.192);
 equal('cyl40 diameter (m)', 2 * C.radius, 3.0);

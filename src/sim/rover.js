@@ -8,7 +8,7 @@
 //    (real contact) and locked by the two ring clamps (module_carry.js)
 //  - battery power bus (charged at the AEGIS garage), motor thermal model
 import * as THREE from 'three';
-import { ROVER, K, K_LEGACY, MOON, REGOLITH, CARGO_TYPES, GROUPS, THERMAL, KEEPALIVE, DRIVE, PHYS } from './config.js';
+import { ROVER, K, K_LEGACY, SCALE, MOON, REGOLITH, CARGO_TYPES, GROUPS, THERMAL, KEEPALIVE, DRIVE, PHYS } from './config.js';
 export const VEHICLE = ROVER;
 import { wheelSoil, shearFactor } from './terramechanics.js';
 import { ArmSystem } from './arm.js';
@@ -89,7 +89,7 @@ export class Rover {
     this.brake = true;           // parking brake engaged at power-up
     this.estop = false;
     this.powered = true;
-    // Drive limits. rpm values are PROTOTYPE motor rpm (300 no-load, 280 normal cap); wheel rpm = proto / sqrt(K).
+    // Drive limits. rpm values are PROTOTYPE motor rpm (300 no-load, 280 normal cap); wheel rpm = proto x sqrt(gR / K) (SCALE.rpm, scaling.js).
     // rpmMode 'auto' sets the rpm continuously between crawl 120 and the 280 cap (turbo 300) from the terrain (_smartRpm).
     this.limits = { rpmCeil: ROVER.motor.protoNoLoadRpm, speed: 99, torquePct: 100 };
     this.rpm = { mode: 'auto', fixed: ROVER.motor.protoCapRpm, tier: 'crawl', proto: ROVER.motor.protoCrawlRpm, wheel: ROVER.motor.crawlRpmWheel, rough: 0, why: 'starting', want: ROVER.motor.protoCrawlRpm };
@@ -198,7 +198,7 @@ export class Rover {
   //              so the outer wheels stay under the cap and the commanded curvature is kept exactly (see _allocate)
   //   motor temperature C below 95 C -> 150 at 120 C;  battery < 15 % -> 160;  thermal brain (thermalRpm)
   _smartRpm(dt) {
-    const M = ROVER.motor, k = 1 / Math.sqrt(K), S = this._smart, R = this.rpm;
+    const M = ROVER.motor, k = SCALE.rpm, S = this._smart, R = this.rpm;
     const C = M.protoCapRpm, c0 = M.protoCrawlRpm;
     const av = this.body.angvel();
     const rate = Math.hypot(av.x, av.z);

@@ -527,7 +527,7 @@ export class Autonomy {
     while (R.power.soc < target && PD.connected) {
       this.stop();
       const rem = PD.etaMin(target);
-      this.detail = `SoC ${(R.power.soc * 100).toFixed(1)}% -> ${(target * 100).toFixed(0)}% @ ${PD.chargeA.toFixed(2)} A / ${PD.chargeW.toFixed(1)} W proto (${(R.power.dockW / 1000).toFixed(0)} kW full-scale) | bank ${(PD.soc * 100).toFixed(1)}% ${PD.bankV.toFixed(1)} V | solar ${PD.solarW.toFixed(0)} W | ~${rem.toFixed(0)} min left`;
+      this.detail = `SoC ${(R.power.soc * 100).toFixed(1)}% -> ${(target * 100).toFixed(0)}% @ ${PD.chargeA.toFixed(1)} A / ${(PD.chargeW / 1000).toFixed(1)} kW | bank ${(PD.soc * 100).toFixed(1)}% ${PD.bankV.toFixed(0)} V | solar ${(PD.solarW / 1000).toFixed(1)} kW | ~${rem.toFixed(0)} min left`;
       if (!(PD.chargeW > 0) && PD.atFloor) this.detail += PD.night ? ' (bank at night reserve: waiting for sunrise)' : ' (bank at floor: waiting for sun)';
       yield;
     }

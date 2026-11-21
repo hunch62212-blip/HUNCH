@@ -1,5 +1,5 @@
 // Operator command console. Every capability of the rover is reachable from here.
-import { ROVER, WORLD, K, FAILURES } from './config.js';
+import { ROVER, WORLD, K, SCALE, FAILURES } from './config.js';
 import { PRIORITY } from './autonomy.js';
 import { MODES } from './health.js';
 import { COMMS } from './lunarParams.js';
@@ -146,7 +146,7 @@ export function runCommand(sim, ui, line, _uplinked = false) {
     case 'speed': { if ((a[0] || '') === 'auto') { A.speedSetting = 99; say('Autonomy cruise speed: AUTO (smart rpm decides)', 'ok'); } else { A.speedSetting = Math.max(0.1, Math.min(9, num(a[0], 1.2))); say(`Autonomy cruise speed ceiling ${A.speedSetting.toFixed(2)} m/s`, 'ok'); } break; }
     case 'rpm': case 'turbo': {
       const c = cmd;
-      // rpm are PROTOTYPE motor rpm: 300 no-load units capped at 280; wheel rpm = proto / sqrt(K)
+      // rpm are PROTOTYPE motor rpm: 300 no-load units capped at 280; wheel rpm = proto x sqrt(gR / K)
       const k = (a[0] || '').toLowerCase();
       if (c === 'turbo') {
         if (k === 'off') { R.rpm.mode = 'fixed'; R.rpm.fixed = ROVER.motor.protoCapRpm; say(`Turbo disabled: locked at ${ROVER.motor.protoCapRpm} rpm`, 'ok'); }
@@ -158,7 +158,7 @@ export function runCommand(sim, ui, line, _uplinked = false) {
     }
     case 'limit': {
       const k = (a[0] || '').toLowerCase(), v = num(a[1]);
-      if (k === 'rpm' && v != null) { R.limits.rpmCeil = Math.max(20, Math.min(300, v)); say(`Motor rpm ceiling ${R.limits.rpmCeil} (prototype rpm; 300 = no-load, 280 = normal cap) = ${(R.limits.rpmCeil / Math.sqrt(K) * 2 * Math.PI / 60 * ROVER.wheel.radius).toFixed(2)} m/s`, 'ok'); }
+      if (k === 'rpm' && v != null) { R.limits.rpmCeil = Math.max(20, Math.min(300, v)); say(`Motor rpm ceiling ${R.limits.rpmCeil} (prototype rpm; 300 = no-load, 280 = normal cap) = ${(R.limits.rpmCeil * SCALE.rpm * 2 * Math.PI / 60 * ROVER.wheel.radius).toFixed(2)} m/s`, 'ok'); }
       else if (k === 'speed' && v != null) { R.limits.speed = Math.max(0.05, Math.min(99, v)); say(`Ground speed limit ${R.limits.speed} m/s`, 'ok'); }
       else if (k === 'torque' && v != null) { R.limits.torquePct = Math.max(5, Math.min(100, v)); say(`Motor torque limit ${R.limits.torquePct}%`, 'ok'); }
       else say('usage: limit rpm <n> | limit speed <m/s> | limit torque <%>', 'warn');
@@ -374,7 +374,7 @@ export function runCommand(sim, ui, line, _uplinked = false) {
     }
     case 'dock': {
       const D = sim.powerDock;
-      say(`POWER DOCK ${D.status} | bank ${D.bankV.toFixed(1)} V ${D.bankAhNow.toFixed(1)}/${D.bankAhRated} Ah (${(D.soc * 100).toFixed(1)}%) ${D.bankA.toFixed(2)} A ${D.Tbank.toFixed(1)} C | solar ${D.solarW.toFixed(0)} W | load ${D.loadW.toFixed(1)} W | to rover ${D.chargeA.toFixed(2)} A ${D.chargeW.toFixed(1)} W (= ${(sim.rover.power.dockW / 1000).toFixed(0)} kW full-scale, x${D.scale.toFixed(0)}) | night endurance ${D.nightHours().toFixed(0)} h (lunar night 354 h) | refill ${D.refillHours().toFixed(1)} h`);
+      say(`POWER DOCK ${D.status} | bank ${D.bankV.toFixed(0)} V ${D.bankAhNow.toFixed(0)}/${D.bankAhRated} Ah (${(D.soc * 100).toFixed(1)}%) ${D.bankA.toFixed(1)} A ${D.Tbank.toFixed(1)} C | solar ${(D.solarW / 1000).toFixed(2)} kW | load ${D.loadW.toFixed(0)} W | to rover ${D.chargeA.toFixed(1)} A ${(D.chargeW / 1000).toFixed(1)} kW | night endurance ${D.nightHours().toFixed(0)} h (lunar night 354 h) | refill ${D.refillHours().toFixed(1)} h`);
       break;
     }
     case 'day': sim.lunar.on = false; sim.setSun(sim.sunAz, 9); say('Sun up (el 9 deg)', 'ok'); break;

@@ -1,3 +1,5 @@
+import { froude } from './scaling.js';
+
 // Engineering constants for the LLASO-P2-XPORT-2026 simulation.
 // Units are SI throughout (m, kg, s, N, W, rad). Body frame: +X forward, +Y up, +Z right.
 //
@@ -57,12 +59,13 @@ export const WORLD = {
 // KS = K / K_LEGACY (lengths x KS, inertia ~ m L^2, torque ~ m L) so K stays the single source.
 // Provenance by field:
 //   [CAD]     corners, frame, wheel radius/width, ride set points, seatY, ringX, lidar/camera mounts, motor rpm
-//             (rocker_bogie.js GEO, module_carry.js CRADLE, lidar_mount.js, rover_bom.js; dims x K, rpm / sqrt(K))
+//             (rocker_bogie.js GEO, module_carry.js CRADLE, lidar_mount.js, rover_bom.js; dims x K, rpm x sqrt(gR / K))
 //   [ASSUMED] sprungMass, unsprungMassPerBogie, comLocal, inertia, tyre/suspension stiffness and damping,
 //             motor torque/gains/thermal, speedLimitLoaded, accel limits, battery, hotel loads, lift rates,
 //             lidar channels/range/noise, camera FOV/range. Full-scale masses are NOT the BOM mass x K^3.
 //   [ASSUMED] solar = 0 panels: charging is at the dock station (dock_station.js); no on-board array.
 export const K = 8.16;                       // USER DECISION: 1:8.16 prototype for all prints
+export const SCALE = froude(K, MOON.g);        // Froude sheet incl. gravity (scaling.js, docs/SCALING.md): SCALE.rpm = sqrt(gR / K), not 1 / sqrt(K)
 export const K_LEGACY = 12.192 / 0.747;      // 16.32: the old module print; only used to re-derive the values tuned at that scale
 const KS = K / K_LEGACY;                      // 0.5: legacy full-scale metres -> current full-scale metres
 const k = (v) => +(v * K).toFixed(3);
@@ -128,10 +131,12 @@ export const ROVER = {
   // Team drive: 300 rpm gearmotors on 130 mm wheels. The normal cap was 180 rpm (1.22 m/s on the bench); v1.5.0 raises
   // it to 280 (operator request, v1.5.0). The torque-speed curve keeps ~27 % of peak torque at 280 (rover.js tAvail), so the
   // top of the range only opens on flat, firm, straight ground (rover.js _smartRpm). Froude scaling (same
-  // gravity-to-inertia ratio) maps the 1:16.3 prototype to full size: speed x sqrt(K), rpm / sqrt(K).
+  // gravity-to-inertia ratio) maps the 1:K prototype (Earth g) to full size (lunar g): speed x sqrt(K gR), wheel rpm x sqrt(gR / K)
+  // with gR = 1.62 / 9.807 (scaling.js). Until the review pass this was rpm / sqrt(K), which ignored the gravity change and made
+  // the full-scale rover 2.5x too fast (5.83 m/s at 300 rpm instead of 2.37 m/s).
   motor: {
-    protoNoLoadRpm: 300, protoCapRpm: 280, protoCrawlRpm: 120, turboRpmWheel: +(300 / Math.sqrt(K)).toFixed(2), crawlRpmWheel: +(120 / Math.sqrt(K)).toFixed(2),
-    noLoadSpeed: 300 / Math.sqrt(K) * 2 * Math.PI / 60, capRpmWheel: +(280 / Math.sqrt(K)).toFixed(2),
+    protoNoLoadRpm: 300, protoCapRpm: 280, protoCrawlRpm: 120, turboRpmWheel: +(300 * SCALE.rpm).toFixed(2), crawlRpmWheel: +(120 * SCALE.rpm).toFixed(2),
+    noLoadSpeed: 300 * SCALE.rpm * 2 * Math.PI / 60, capRpmWheel: +(280 * SCALE.rpm).toFixed(2),
     // v1.8.0 (ARM plan s0/s6.1): 4 driven wheels keep the old 6-motor budget: peakTorque 5600 -> 8400, brakeTorque 9000 -> 13500 (x1.5).
     // NOTE: until the P1b rover.js drive change, the two middle (idler) wheels still read these values too.
     // Torques ~ m L (same acceleration capability per kg at wheel radius ~ KS): legacy 8400 / 13500 N m at 8000 kg, K_LEGACY.
@@ -153,7 +158,10 @@ export const ROVER = {
   // stops in ~14 m at 0.9 m/s^2, so the autonomy's stopping-distance governor needs a clear, mapped 17 m+ ahead to
   // use it); loaded 2.5 m/s (stops in ~16 m at the 0.2 m/s^2 nose-over limit, same governor). Smart-rpm, the curve
   // speed limit and the tip governor trim these further.
-  speedLimitEmpty: 5.0,
+  // Review pass (item 6): with Froude-correct rpm scaling the wheels top out at 2.37 m/s (300 rpm, turbo) / 2.21 m/s (280 cap) in
+  // lunar gravity, so these are no longer the binding limits (the old 5.0 m/s was only reachable because rpm ignored gravity).
+  // speedLimitEmpty = 2.4 sits just above the motor top speed so the rpm governor decides.
+  speedLimitEmpty: 2.4,
   speedLimitLoaded: 2.5,
   // tip-safe acceleration limits (m/s^2, rad/s^2). Loaded static tip threshold is ~0.45 g_moon fore-aft, but the
   // passive (rocker-bogie) pitch lets the body nose over at ~0.4 m/s^2 of braking (less downhill): lonLoaded 0.2 (CHANGES.md §14)
@@ -319,54 +327,75 @@ export const DOCK = {
   bellows: { free: 0.06, k: 31000, c: 20000 }, captureGap: 0.036,
 };
 
-// PROTOTYPE-SCALE LUNAR POWER DOCK (CHANGES.md, docs/LUNAR_CHARGING.md). Electrical values are PROTOTYPE units
-// (V, A, Ah, W, Wh). Geometry is world metres: the dock is drawn at 1:1 of the 1:16.3 prototype dock (k()), like the rover.
-// Coupling to the 150 kWh sim pack is by state of charge: 1 Wh into the 128 Wh prototype pack = PROTO_TO_FULL_WH Wh
-// (W -> W) into the sim pack. Rover charge current is the same C-rate (0.14 C) as the old 60 kW heat-limited charge,
-// so charge times match at both scales and the full-scale pack thermal model (health.js) stays valid.
-//  - array: 2 vertical azimuth-tracking masts (NASA VSAT-style), 2 x 0.2016 m^2 of 30 % triple-junction cells
-//    = 165 W AM0 x 0.80 derate x 0.96 MPPT = 126 W. Refills the bank from the 10 % floor in ~18 h of sun (~22 h with the
-//    rover charging): < 7 % of a 354 h lunar day, margin for intermittent polar illumination.
-//  - night: 0.8 W avionics + ~1.2 W vault heater (0.04 W/K x 55 K - 1 W RHU) = 2.0 W x 354 h = 708 Wh = 30 % of the bank.
-//    nightReserveSoc 0.50 = 0.10 floor + 0.30 + 0.10 margin. The rover may draw the bank down to it at night
-//    (~1.2 kWh = ~12 prototype 30->90 % charges).
-export const PROTO_PACK = {
-  chem: 'LiFePO4 4S', cells: 4, Ah: 10, Vnom: 12.8, Wh: 128, // public/team/js/rover_bom.js BATTERY; ARM_CARGO_BUILD_PLAN BOM #7
+// LUNAR POWER DOCK, FULL SCALE (review item 6; CHANGES.md s37, docs/SCALING.md, docs/LUNAR_CHARGING.md). Until the review pass the
+// dock was modelled at prototype scale (24 V, 100 Ah, 126 W of array) and every watt was multiplied by 150 kWh / 128 Wh = 1172 on the
+// way to the rover pack. That made the full-scale dock a 148 kW array and a 2.8 MWh bank, while the masts drawn in the world are the
+// prototype masts at 1:K and give about 8 kW. The sim dock is now sized for the full-scale job in real units (V, A, W, Wh); the
+// prototype bench dock keeps its own spec below (POWER_DOCK_PROTO) and is not scaled up.
+//  - rover pack: 125S LiFePO4, 400 V nominal, 375 Ah = 150 kWh (ROVER.battery); charged CC-CV at 0.14 C = 52 A (about 21 kW, capped at the
+//    20 kW charger, ROVER.battery.dockMaxW): 30 -> 90 % in about 4.5-5 h.
+//  - array: 2 vertical azimuth-tracking masts (NASA VSAT-style), each a panelW x panelH wing at 1:K of the prototype mast
+//    (3.43 x 3.92 m = 13.4 m^2), 30 % triple-junction cells: 2 x 13.4 m^2 x 1361 W/m^2 x 0.30 x 0.80 x 0.96 = 8.4 kW AM0 at normal incidence.
+//    A 20 kW rover charge therefore comes mostly from the bank; the bank refills from the 10 % floor in about 25 h of full sun
+//    (7 % of a 354 h lunar day).
+//  - bank: 200 kWh (125S, 400 V, 500 Ah, about 1.5 t of LFP cells at ~130 Wh/kg) in a heated, bermed vault. [ASSUMED] vault: ~12 m^2 of
+//    MLI-wrapped skin, G = 4 sigma T^3 x eps 0.02 x 12 m^2 = 0.85 W/K, electric heaters only (rhuW 0; set 8 W x n for RHU units).
+//  - night: avionics 120 W + vault heater 0.85 W/K x 55 K = 47 W = 167 W; x 354 h / 0.97 = 61 kWh = 31 % of the bank.
+//    nightReserveSoc 0.46 = 0.10 floor + 0.31 + 0.05 margin. Above it the rover may draw (1 - 0.46) x 200 kWh x 0.97 x 0.85 = 89 kWh
+//    through the link: about 1.6x its 354 h survival load (~55 kWh, docs/POWER_BUDGET.md).
+// [ASSUMED] everything in this block except the geometry keys and cellEff: no 20 kW lunar inductive link or 200 kWh lunar bank exists
+// to cite; the commercial lunar-qualified wireless-charger reference is the 125 W Astrobotic / WiBotic UFPC (kept in POWER_DOCK_PROTO).
+export const PACK = {
+  chem: 'LiFePO4 125S', cells: 125, Ah: ROVER.battery.capacityWh / ROVER.battery.nominalV, Vnom: ROVER.battery.nominalV, Wh: ROVER.battery.capacityWh,
   cvCell: 3.65,  // LiFePO4 CV limit, V/cell (typical datasheet)
-  R: 0.04,       // [ASSUMED] pack + BMS + harness, ohm
+  R: ROVER.battery.internalR,
 };
-export const PROTO_TO_FULL_WH = ROVER.battery.capacityWh / PROTO_PACK.Wh; // 1172 (150 kWh / 128 Wh): prototype Wh (or W) -> full-scale
 export const LFP_OCV = [[0, 2.50], [0.05, 3.00], [0.10, 3.20], [0.20, 3.25], [0.50, 3.30], [0.80, 3.33], [0.90, 3.35], [1, 3.40]]; // [ASSUMED] typical LiFePO4 rest OCV per cell
+const DOCK_PANEL_W = k(0.42), DOCK_PANEL_H = k(0.48);
 export const POWER_DOCK = {
   padT: 44, padV: 22, couplerTol: 3.0,
   arrays: [[60, 10], [70, 30]],                        // [ASSUMED] 2 masts (habitat u, v)
-  mastH: k(1.35), panelW: k(0.42), panelH: k(0.48),    // [ASSUMED] prototype 1.35 m mast, 0.42 x 0.48 m wing (world 22.0 / 6.85 / 7.83 m)
-  bank: { w: k(0.56), d: k(0.34), h: k(0.26) },        // [ASSUMED] MLI vault round a ~522 x 268 x 220 mm 24 V 100 Ah module [VERIFY datasheet]
-  panelAreaProto: 0.42 * 0.48,                         // m^2 per mast (prototype)
+  mastH: k(1.35), panelW: DOCK_PANEL_W, panelH: DOCK_PANEL_H, // [ASSUMED] prototype 1.35 m mast and 0.42 x 0.48 m wing x K (world 11.0 m / 3.43 x 3.92 m)
+  bank: { w: k(0.56), d: k(0.34), h: k(0.26) },        // drawn vault (visual); the thermal skin area below is the physical one
+  panelArea: +(DOCK_PANEL_W * DOCK_PANEL_H).toFixed(3),// m^2 per mast, full scale
   cellEff: 0.30,                                       // triple-junction AM0 BOL (Spectrolab XTJ-class ~30 %)
   arrayDerate: 0.80,                                   // [ASSUMED] dust 0.93 x cell temp 0.90 x wiring/mismatch 0.97 x ageing 0.98
   mpptEff: 0.96,                                       // [ASSUMED]
-  nightSolarW: 2,                                      // [ASSUMED] below this the dock is in night mode
-  bankV: 24, bankAh: 100, bankWh: 2400,                // USER DECISION (nameplate; 8S LiFePO4 is 25.6 V nominal, so 2.4 kWh is ~6 % conservative)
-  bankCells: 8,
-  bankR: 0.02,                                         // [ASSUMED] ohm
+  nightSolarW: 130,                                    // [ASSUMED] ~1.5 % of the array: below this the dock is in night mode
+  bankV: 400, bankAh: 500, bankWh: 200000,
+  bankCells: 125,
+  bankR: 0.05,                                         // [ASSUMED] ohm (about 2 % drop at 0.5 C)
   bankEff: 0.97,                                       // [ASSUMED] each way
   bankFloor: 0.10,                                     // [ASSUMED] BMS low-voltage cutoff margin
-  nightReserveSoc: 0.50,                               // derived above
-  bankMaxDischargeW: 1200,                             // [ASSUMED] 0.5 C BMS limit
-  bankMaxChargeA: 50,                                  // [ASSUMED] 0.5 C
+  nightReserveSoc: 0.46,                               // derived above
+  bankMaxDischargeW: 100000,                           // [ASSUMED] 0.5 C BMS limit
+  bankMaxChargeA: 250,                                 // [ASSUMED] 0.5 C
   chargeMinBankC: 0, dischargeMinBankC: -20,           // LiFePO4 typical datasheet
-  hotelW: 0.8,                                         // [ASSUMED] BMS + MPPT + controller sleep + beacon
-  padStandbyW: 0.5,                                    // [ASSUMED] inductive pilot / foreign-object detection while a rover is on the pad
-  vault: { C: 25000, G: 0.04, rhuW: 1.0, setC: 5, heaterGain: 2, heaterMaxW: 10, sinkDayC: -10, sinkNightC: -50, initC: 10 },
-  //   C: [ASSUMED] J/K, ~22 kg of cells + box;  G: [ASSUMED] W/K, MLI box under a regolith berm (4 sigma T^3 x eps 0.02 x 0.6 m^2 ~ 0.04)
-  //   rhuW: 1 W LWRHU-class radioisotope heater (Lunokhod / Yutu precedent; electric-only option: set 0)
+  hotelW: 120,                                         // [ASSUMED] BMS + MPPT + controller + beacon + habitat link relay, sleep
+  padStandbyW: 30,                                     // [ASSUMED] inductive pilot / foreign-object detection while a rover is on the pad
+  vault: { C: 1.8e6, G: 0.85, rhuW: 0, setC: 5, heaterGain: 50, heaterMaxW: 400, sinkDayC: -10, sinkNightC: -50, initC: 10 },
+  //   C: [ASSUMED] J/K, ~1.5 t of cells + box x ~1.2 kJ/kg K;  G: [ASSUMED] W/K, MLI box under a regolith berm (4 sigma T^3 x eps 0.02 x ~12 m^2)
+  //   rhuW: electric-only; a radioisotope option (8 W GPHS-class units, Lunokhod / Yutu precedent for small ones) would offset G x 55 K
   //   sinks: [ASSUMED] bermed-vault sink temperatures, day / night
-  chargeCC_A: 1.4,                                     // 0.14 C (C-rate similarity: ~21 kW into the 150 kWh pack, capped at ROVER.battery.dockMaxW)
+  chargeCC_A: 52.5,                                    // 0.14 C of 375 Ah (about 21.6 kW at 412 V, capped at ROVER.battery.dockMaxW = 20 kW)
   linkEff: 0.85,                                       // [ASSUMED] inductive DC-DC at centre
   linkOffsetLoss: 0.25,                                // [ASSUMED] efficiency loss fraction at full couplerTol, quadratic
-  linkMaxW: 125,                                       // Astrobotic/WiBotic UFPC commercial 125 W model
+  linkMaxW: 30000,                                     // [ASSUMED] 20 kW delivered / 0.85 = 23.5 kW in, plus margin
   chargeMinCellC: 0,                                   // no charge below 0 C cell temperature (lithium plating): the pack heaters warm it first
+};
+
+// PROTOTYPE BENCH DOCK (not used by the sim; docs/PROTOTYPE_POWER_BUDGET.md, docs/LUNAR_CHARGING.md, the Fusion CAD): 24 V 100 Ah
+// bank, 2 x 0.2016 m^2 of cells = 126 W, 1.4 A CC into the 12.8 V 10 Ah (128 Wh) prototype pack, 125 W link limit. Bench units.
+export const PROTO_PACK = {
+  chem: 'LiFePO4 4S', cells: 4, Ah: 10, Vnom: 12.8, Wh: 128, // public/team/js/rover_bom.js BATTERY; ARM_CARGO_BUILD_PLAN BOM #7
+  cvCell: 3.65, R: 0.04,
+};
+export const POWER_DOCK_PROTO = {
+  panelAreaProto: 0.42 * 0.48, cellEff: 0.30, arrayDerate: 0.80, mpptEff: 0.96, nightSolarW: 2,
+  bankV: 24, bankAh: 100, bankWh: 2400, bankCells: 8, bankR: 0.02, bankEff: 0.97, bankFloor: 0.10, nightReserveSoc: 0.50,
+  bankMaxDischargeW: 1200, bankMaxChargeA: 50, hotelW: 0.8, padStandbyW: 0.5,
+  vault: { C: 25000, G: 0.04, rhuW: 1.0, setC: 5, heaterGain: 2, heaterMaxW: 10, sinkDayC: -10, sinkNightC: -50, initC: 10 },
+  chargeCC_A: 1.4, linkEff: 0.85, linkOffsetLoss: 0.25, linkMaxW: 125,
 };
 
 // [ASSUMED] AEGIS-V1 thermal control (src/sim/health.js), after the VIPER "warm box" layout: avionics on a

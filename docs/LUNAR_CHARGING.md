@@ -1,7 +1,8 @@
 # Lunar power dock: precedent, mechanism and scale coupling
 
-The sim dock (`src/sim/powerDock.js`, `POWER_DOCK` / `PROTO_PACK` in `src/sim/config.js`) is modelled in **prototype electrical units**
-(V, A, Ah, W, Wh) for the 1:16.3 prototype, and coupled to the 420 kWh full-scale pack by state of charge. Figures marked [verify] come from
+The sim dock (`src/sim/powerDock.js`, `POWER_DOCK` / `PACK` in `src/sim/config.js`) is modelled at **full scale in real units**
+(400 V, 150 kWh rover pack, 200 kWh bank, 8.4 kW array; review item 6). It used to be modelled in prototype units and multiplied by 1172, which implied
+a 148 kW array and a 2.8 MWh bank; the bench dock now lives in `POWER_DOCK_PROTO` (not used by the sim). Figures marked [verify] come from
 memory or secondary sources and were not re-checked against a primary document.
 
 ## 1. Lunar precedent
@@ -30,36 +31,33 @@ mechanical interface. Lunar regolith is abrasive and electrostatically sticky, a
 inductive link is the lowest-risk interface for a sustained dock. The cost is efficiency (about 85 %) and a power limit set by the coil
 (125 W commercial class, which this dock respects).
 
-## 2. Scale coupling
+## 2. Scale
+The dock is sized for the full-scale job (`docs/SCALING.md`); electrical quantities do not scale by the Froude ratios. The rover pack is the 125S
+LiFePO4, 400 V, 375 Ah (150 kWh) pack (`ROVER.battery`, `PACK`), charged CC-CV at 0.14 C = 52.5 A (about 21.7 kW) and capped at the 20 kW charger:
 
-The rover pack is treated as the 12.8 V 10 Ah (128 Wh) LiFePO4 4S prototype pack (`rover_bom.js` BATTERY; `ARM_CARGO_BUILD_PLAN.md` BOM #7),
-with prototype state of charge equal to `R.power.soc`.
+    R.power.dockW = min(chargeW, ROVER.battery.dockMaxW)
 
-    PROTO_TO_FULL_WH = ROVER.battery.capacityWh / PROTO_PACK.Wh = 420000 / 128 = 3281.25
-    R.power.dockW    = chargeW_proto x PROTO_TO_FULL_WH           (the only coupling line)
-
-Charge current is the same C-rate as the old heat-limited full-scale charge: 60 kW / 420 kWh = 0.14 C, so 1.4 A into 10 Ah (about 18.6 W
-at 13.3 V, equal to about 61 kW full-scale). Charge times are identical at both scales, and the full-scale pack thermal model in `health.js`
-(I^2 R from `P.netW / 400 V`) stays valid. Geometry is drawn at 1:1 of the prototype dock via `k()`, like the rover.
+The bench dock (12.8 V 10 Ah pack, 24 V 100 Ah bank, 126 W array, 125 W link) is the prototype's own spec (`POWER_DOCK_PROTO`, `PROTO_PACK`). Geometry is
+drawn at 1:1 of the prototype dock via `k()`, like the rover, so the masts are 11 m tall with 3.4 x 3.9 m wings (13.4 m^2 each).
 
 ## 3. Sizing
 
-* Array: 2 masts x 0.42 x 0.48 m = 0.4032 m^2 of 30 % triple-junction cells. 1361 W/m^2 x 0.4032 x 0.30 = 165 W AM0, x 0.80 derate (dust 0.93,
-  cell temperature 0.90, wiring 0.97, ageing 0.98) x 0.96 MPPT = 126 W at a sun-facing panel.
-* Refill: 2.4 kWh x 0.90 usable / 0.97 charge efficiency = 2.23 kWh, divided by about 124 W net = about 18 h of sun (about 22 h with the rover
-  charging). That is under 7 % of a 354 h lunar day.
-* Night: 0.8 W avionics + vault heater (0.04 W/K x 55 K = 2.2 W loss, minus the 1 W RHU = about 1.2 W) = 2.0 W x 354 h = 708 Wh = 30 % of the bank.
-* Night reserve SoC 0.50 = 0.10 BMS floor + 0.30 night load + 0.10 margin. At night the rover may draw the bank down to this level only
-  (about 1.2 kWh, about 12 prototype 30 to 90 % charges).
-* Bank: 24 V 100 Ah nameplate = 2.4 kWh (user decision; 8S LiFePO4 is 25.6 V nominal, so this is about 6 % conservative).
+* Array: 2 masts x 13.4 m^2 = 26.8 m^2 of 30 % triple-junction cells. 1361 W/m^2 x 26.8 x 0.30 = 10.9 kW AM0, x 0.80 derate (dust 0.93,
+  cell temperature 0.90, wiring 0.97, ageing 0.98) x 0.96 MPPT = 8.4 kW at a sun-facing panel.
+* Refill: 200 kWh x 0.90 usable / 0.97 charge efficiency = 185 kWh, divided by about 8.3 kW net = about 22 h of sun (about 25 h with the rover charging). That is
+  under 7 % of a 354 h lunar day. A 20 kW rover charge is 2.4x the array: the bank carries the difference.
+* Night: 120 W avionics + vault heater (0.85 W/K x 55 K = 47 W, electric; `rhuW` 0) = 167 W x 354 h / 0.97 = 61 kWh = 31 % of the bank.
+* Night reserve SoC 0.46 = 0.10 BMS floor + 0.31 night load + 0.05 margin. At night the rover may draw the bank down to this level only
+  (about 89 kWh through the 85 % link, enough for the rover's ~55 kWh survival load with margin).
+* Bank: 400 V 500 Ah = 200 kWh. [ASSUMED] (no lunar-qualified 200 kWh bank exists to cite; about 1.5 t of LFP cells).
 
 ## 4. Cold charging
 LiFePO4 must not be charged below 0 C. The bank: below `chargeMinBankC` the MPPT backs off (`curtailed`) while the vault heater (thermostat
-5 C, up to 10 W) warms it. Discharge is allowed down to -20 C. The rover pack: `chargeMinCellC` 0 C cold-hold and the 40 to 50 C taper are
+5 C, up to 400 W) warms it. Discharge is allowed down to -20 C. The rover pack: `chargeMinCellC` 0 C cold-hold and the 40 to 50 C taper are
 unchanged from the previous dock.
 
 ## 5. Known limitation
-The compressed `lunar` command (15-minute day) scales time, not energy: the prototype-scale arrays and bank do not follow it, so a compressed
+The compressed `lunar` command (15-minute day) scales time, not energy: the arrays and bank are in real units and do not follow it, so a compressed
 night drains the bank at the real hourly rate over a much shorter span. Use `night` / `day` or the real-time soak test for dock energy.
 
 ## Sources

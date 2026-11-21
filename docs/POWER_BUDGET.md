@@ -6,9 +6,9 @@ Hand estimates, not new measurements.
 | Item | Value | Source |
 |---|---|---|
 | Battery | 150 kWh, 400 V, 4 strings (user decision, Nov 2026; was 420 kWh) | `ROVER.battery` |
-| Dock charger (inductive, prototype units) | 1.4 A CC (0.14 C) into the 12.8 V 10 Ah pack = about 18.6 W, link 85 % at centre, 125 W link limit; full-scale equivalent about 21.8 kW (150 kWh / 128 Wh = 1172 x 18.6 W), capped at the 20 kW charger rating (`ROVER.battery.dockMaxW`, applied in `powerDock.js` and `rover.js`) | `POWER_DOCK.chargeCC_A`, `linkEff`, `linkMaxW`; `power_dock` test peak 1.4 A |
-| Dock solar (prototype units) | 2 masts x 0.2016 m² x 30 % x 0.80 x 0.96 MPPT = 126 W; full-scale equivalent about 148 kW | `POWER_DOCK.panelAreaProto`, `cellEff`, `arrayDerate`, `mpptEff` |
-| Dock bank | 24 V 100 Ah = 2.4 kWh (full-scale equivalent about 2.8 MWh), floor 10 %, night reserve 50 % | `POWER_DOCK.bankWh`, `bankFloor`, `nightReserveSoc` |
+| Dock charger (inductive, full scale) | 52.5 A CC (0.14 C of 375 Ah) at about 412 V = 21.7 kW, link 85 % at centre, capped at the 20 kW charger rating (`ROVER.battery.dockMaxW`, applied in `powerDock.js` and `rover.js`); 23.5 kW into the link. [ASSUMED]: no 20 kW lunar inductive link exists (the lunar-qualified reference is the 125 W Astrobotic / WiBotic unit, kept as the bench spec in `POWER_DOCK_PROTO`) | `POWER_DOCK.chargeCC_A`, `linkEff`, `linkMaxW`; `docs/SCALING.md` |
+| Dock solar (full scale) | 2 masts x 13.4 m² (the drawn 1:K masts) x 30 % x 0.80 x 0.96 MPPT x 1361 W/m² = about 8.4 kW at a sun-facing panel. (The earlier prototype-units model multiplied 126 W by 1172 and implied 148 kW; the drawn masts never gave that.) | `POWER_DOCK.panelArea`, `cellEff`, `arrayDerate`, `mpptEff` |
+| Dock bank | 400 V 500 Ah = 200 kWh (about 1.5 t of LFP cells), floor 10 %, night reserve 46 %. Dock's own night load 167 W (avionics 120 W + vault heater 47 W) x 354 h / 0.97 = 61 kWh = 31 % of the bank; the rover may draw 89 kWh through the link above the reserve (its survival load is about 55 kWh, `docs/changes/A.md`). [ASSUMED] | `POWER_DOCK.bankWh`, `bankFloor`, `nightReserveSoc`, `vault` |
 | Rover array | 12 m², 30 %, 4.8 kW at noon; opens by itself when parked idle in sunlight | `KEEPALIVE`; `tests/logistics.mjs` (4,839 W) |
 | Arm pair, cradled standby (arms stowed and settled, servos unpowered) | 3 W | `ARM_ASSUMED.standbyW` (`src/sim/arm.js`) |
 | Arm pair, active (hotel + servos) | 120 W hotel plus servos; about 465 W while moving, measured in `tests/arm.mjs` | `ARM.hotelW` (`src/sim/config.js`), `rover.js` `P.armW` |
@@ -17,16 +17,16 @@ Hand estimates, not new measurements.
 | One full cycle (3 deliveries) | about 26 kWh per two deliveries in the 2-cargo cycle (17.3 km) | `CHANGES.md` §27 |
 
 Recharge-time estimates
-* Dock, 20 % to 90 % (105 kWh full-scale at 20 kW, i.e. 89.6 Wh into the 128 Wh prototype pack at 18.6 W): about 5.3 h with the CC-CV taper. The `power_dock` test shows the same slope (about 0.25 % SoC per simulated minute).
+* Dock, 20 % to 90 % (105 kWh at the 20 kW cap): about 5.3 h with the CC-CV taper. The `power_dock` test shows the same slope (about 0.25 % SoC per simulated minute).
 * Rover array alone, same 105 kWh at 4.8 kW: about 22 h of full sun, i.e. under one lunar day (about 354 h of sunlight).
 * One two-delivery cycle (26 kWh): about 5.4 h on the array, or about 80 min at the 20 kW dock.
 * The array is a keep-alive and top-up source, not the primary charger. The dock is.
 
-Scale coupling (dock)
-* The dock is modelled in prototype units (12.8 V 10 Ah LiFePO4 pack, 128 Wh) and coupled to the 150 kWh sim pack by state of charge:
-  `PROTO_TO_FULL_WH = 150000 / 128 = 1171.875`, `R.power.dockW = min(chargeW_proto x 1171.875, 20 kW)`. The C-rate is the same (0.14 C), so charge times match
-  at both scales. See `docs/LUNAR_CHARGING.md`.
-* Dock bank refill from the 10 % floor: 2.4 kWh x 0.9 / 0.97 / about 124 W = about 18 h of sun (a lunar day is about 354 h). Night load 2.0 W x 354 h = 708 Wh = 30 % of the bank.
+Dock sizing (full scale; the prototype-units coupling and `PROTO_TO_FULL_WH` were removed in the review pass, item 6)
+* The dock is modelled in real units (125S LFP, 400 V, 150 kWh rover pack; 200 kWh bank; 8.4 kW array) and `R.power.dockW = chargeW` (capped at 20 kW). The bench dock (24 V 100 Ah bank, 126 W array, 128 Wh pack) is its own spec (`POWER_DOCK_PROTO`, `docs/PROTOTYPE_POWER_BUDGET.md`) and is not scaled up. See `docs/SCALING.md`.
+* A 20 kW charge is more than twice the array (8.4 kW): the bank covers the difference. After one 30 to 90 % charge (90 kWh into the pack, about 109 kWh from the bank and array over about 4.7 h) the bank is down about 70 kWh and needs about 25 h of full sun from its floor, 7 % of a 354 h lunar day. The old "solar covers the charge" result came from the x1172 multiplication.
+* Dock bank refill from the 10 % floor: 200 kWh x 0.9 / 0.97 / about 8.3 kW = about 22 to 25 h of sun.
+* Night: see the energy and thermal review (item 7) for the rover side; the dock side is 167 W x 354 h = 61 kWh (31 % of the bank).
 
 Night survival at 150 kWh (open decision)
 * Measured with the `tests/fdir.mjs` section E procedure: survival load about 154 W, a 354 h night costs about 55 kWh = 36 % of the 150 kWh pack (45 % with hub heaters). The old 420 kWh pack made this under 25 %; `tests/fdir.mjs` E still asserts 25 % and fails. The mechanism heaters (`docs/changes/B.md`) add about 15 to 40 W of night average on top.

@@ -1,5 +1,5 @@
 // Operator HUD: telemetry, SLAM map, camera feed overlay, missions, faults, console, E-STOP.
-import { ROVER, WORLD, MOON, K, FAILURES, ARM, CARGO_TYPES } from '../sim/config.js';
+import { ROVER, WORLD, MOON, K, SCALE, PACK, FAILURES, ARM, CARGO_TYPES } from '../sim/config.js';
 import { CLS, RES, TILE } from '../sim/slam.js';
 import { runCommand, requestEstop } from '../sim/commands.js';
 import { DelayLine } from '../sim/commsLink.js';
@@ -559,15 +559,15 @@ export class HUD {
     $('#vSoc').textContent = `${fmt(seen.soc * 100, 1)} %  (${fmt(seen.wh / 1000, 1)} kWh, ${fmt(R.power.voltage, 0)} V)`;
     const sb = $('#bSoc'); sb.style.width = seen.soc * 100 + '%'; sb.style.background = seen.soc < A.reserveSoc ? 'var(--err)' : seen.soc < 0.4 ? 'var(--warn)' : 'var(--ok)';
     $('#vPow').textContent = `${fmt((R.power.dockW || 0) / 1000, 1)} / ${fmt(R.power.loadW / 1000, 2)} kW`;
-    { const D = sim.powerDock; $('#vDock').textContent = `bank ${fmt(D.bankV, 1)} V · ${fmt(D.bankAhNow, 0)}/${D.bankAhRated} Ah (${fmt(D.soc * 100, 0)}%) · ${fmt(D.bankA, 1)} A · sun ${fmt(D.solarW, 0)} W · ${fmt(D.Tbank, 0)} °C · ${D.status}`;
-      $('#vDockChg').textContent = D.connected ? `${fmt(D.chargeA, 2)} A @ ${fmt(D.packV, 1)} V = ${fmt(D.chargeW, 1)} W · pack ${fmt(R.power.soc * 10, 1)} Ah · link ${fmt(D.linkEff * 100, 0)}% · ≙ ${fmt((R.power.dockW || 0) / 1000, 0)} kW` : 'not coupled'; }
+    { const D = sim.powerDock; $('#vDock').textContent = `bank ${fmt(D.bankV, 1)} V · ${fmt(D.bankAhNow, 0)}/${D.bankAhRated} Ah (${fmt(D.soc * 100, 0)}%) · ${fmt(D.bankA, 1)} A · sun ${fmt(D.solarW / 1000, 1)} kW · ${fmt(D.Tbank, 0)} °C · ${D.status}`;
+      $('#vDockChg').textContent = D.connected ? `${fmt(D.chargeA, 1)} A @ ${fmt(D.packV, 0)} V = ${fmt(D.chargeW / 1000, 1)} kW · pack ${fmt(R.power.soc * PACK.Ah, 0)} Ah · link ${fmt(D.linkEff * 100, 0)}%` : 'not coupled'; }
     $('#vDrive').textContent = `${fmt(R.power.driveW / 1000, 2)} kW  regen ${fmt(R.power.regenWh, 1)} Wh`;
     $('#vOdo').textContent = `${fmt(R.odo.dist / 1000, 3)} km / ${fmt(R.power.energyUsedWh / 1000, 2)} kWh`;
     $('#vLoad').textContent = R.loaded ? `${R.lift.cargo.id} ${(R.lift.cargo.T.mass / 1000).toFixed(0)} t (${(R.lift.cargo.T.mass * MOON.g / 1000).toFixed(1)} kN)` : 'none';
     $('#vLift').textContent = `${fmt(R.lift.pos, 2)} m  (target ${fmt(R.lift.target, 2)})`;
     $('#vClamp').textContent = `${R.lift.clamp} ${R.lift.clamp === 'closing' || R.lift.clamp === 'opening' ? (R.lift.clampT * 100).toFixed(0) + '%' : ''}`;
     $('#vLim').textContent = `${R.rpm.proto.toFixed(0)} rpm ${R.rpm.tier} · ${R.rpm.why} · cap ${R.speedCap().toFixed(1)} m/s`;
-    const names = ['FL', 'FR', 'ML', 'MR', 'RL', 'RR']; const kS = Math.sqrt(K);
+    const names = ['FL', 'FR', 'ML', 'MR', 'RL', 'RR']; const kS = 1 / SCALE.rpm; // wheel rpm -> prototype motor rpm
     // ML / MR (driven: false) are passive idlers: no motor, so torque shows IDLE and the row is dimmed
     $('#wheelRows').innerHTML = R.wheels.map((w, i) => `<tr class="${w.driven === false ? 'idle' : ''}"><td class="${w.fault ? 'f' : ''}">${i + 1} ${names[i]}${w.driven === false ? ' <small>idler</small>' : ''}</td><td>${fmt(w.omega * 60 / (2 * Math.PI) * kS, 0)}</td><td>${w.driven === false ? 'IDLE' : fmt(w.torque, 0)}</td><td>${fmt(w.slip * 100, 0)}%</td><td>${fmt(w.sink * 1000, 0)}</td><td>${fmt(w.load / 1000, 2)}</td><td>${fmt(w.temp, 0)}</td></tr>`).join('');
     this.updateArm(R);
