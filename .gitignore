@@ -10,3 +10,27 @@ tests/out/
 # graphify output (rebuild with: graphify update .)
 graphify-out/
 .claude/settings.json.graphify-bak
+
+# Secrets: API keys, tokens, credentials (never commit)
+.env
+.env.*
+!.env.example
+*.env
+secrets/
+.secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+*.token
+*credentials*.json
+service-account*.json
+.npmrc
+.netrc
+.aws/
+.vercel/
+.claude/settings.local.json
