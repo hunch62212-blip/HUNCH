@@ -63,10 +63,10 @@ def run(_context: str):
     A.union(body, A.cyly(sv_y0 + sp['H'], sv_y0 + sp['H'] + 1.0, xl, 0, 3.0))
     A.add_body(comp, 'SERVO_DECK_LATCH', body, 'buy', 'MG996R [VERIFY]')
     # ---- stow cradles -----------------------------------------------------------------------------------
-    # Wrist axis at stow = sim fk(stow q).tip / 16.32 = (stow_x, stow_y) = (161.5, 342); the hook seat is hook_off further along psi = 1.2.  The post stands INBOARD of the hook / gate
+    # Wrist axis at stow = sim fk(stow q).tip / 8.16 (K) = (stow_x, stow_y) = (161.56, 342); the hook seat is hook_off further along psi = 1.2.  The post stands INBOARD of the hook / gate
     # plates (d 108..121, hook plate d 126..132, gate d 122..126) because the tower + wrist servo + forearm plates fill d >= 132 there;
     # a pin cantilevers outboard from the post through the V seat (TPU sleeve over d 124.5..133).
-    sx, sy = A.stow_seat_xy()          # hook seat = wrist (161.5, 342) + hook_off along psi 1.2
+    sx, sy = A.stow_seat_xy()          # hook seat = wrist (161.56, 342) + hook_off along psi 1.2 = (173.9, 373.7)
     for s, tag in ((1, 'R'), (-1, 'L')):
         _, comp = A.fresh_component(asm, 'PRT_STOW_CRADLE_' + tag)
         d0, d1, dp = 108.0, 121.0, 133.0

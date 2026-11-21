@@ -3,8 +3,10 @@
 #                      drilled: pivot holes, M4 pod-ear holes at every wheel end, M3 cross-bolt holes in the bogie ends
 #   PRT_JOINT_BLOCK_P_R/L, _B_R/L   2 x rocker pivot block (on the tub wall, 4 x M3 inserts) + 2 x bogie block (bearing seats both faces,
 #                      two bar tunnels with clr_slip fit and M3 cross bolts into heat-set inserts)
-#   PRT_BOGIE_SPACER   4 x 16 mm riser between bogie bar and pod ear (so every pod sits on the z = rb_face_z plane)
-#   BUY_608            8 x 608 (2 per pivot), BUY_ROCKER_SHAFT_R/L + BUY_DIFF_HOUSING (differential placeholder), BUY_BOGIE_PIN x2
+#   PRT_BOGIE_SPACER_R/L   2 x 16 mm riser per side between bogie bar and pod ear (so every pod sits on the z = rb_face_z plane)
+#   BUY_608_P (4 x 608 in the rocker pivot blocks), BUY_608_B_R/L (2 x 608 per bogie block), BUY_ROCKER_SHAFT_R/L,
+#   BUY_DIFF_HOUSING (differential placeholder), BUY_BOGIE_PIN_R/L.  Spacers, 608s and pins are split per side / per pivot so
+#   90_assembly_joints.py can tie each one to the link it rides on (tub, rocker or bogie).
 # Bogie plane centre rb_bogie_z = 159 (sim 157 +2 mm so the joint block keeps >= 1.8 mm walls) - noted in params.csv.
 import math
 import adsk.core, adsk.fusion
@@ -16,7 +18,7 @@ def run(_context: str):
     P = A.P
     asm = A.asm('ASM_SUSPENSION')
     for o in list(asm.occurrences):
-        if A.bn(o.component.name) in ('BUY_RB_LINK', 'PRT_JOINT_BLOCK', 'BUY_ROCKER_SHAFT'):
+        if A.bn(o.component.name) in ('BUY_RB_LINK', 'PRT_JOINT_BLOCK', 'BUY_ROCKER_SHAFT', 'PRT_BOGIE_SPACER', 'BUY_608', 'BUY_BOGIE_PIN'):
             o.deleteMe()
     W = A.wheels()
     Px, Py = P('rb_P_x'), P('rb_P_y'); Bx, By = P('rb_B_x'), P('rb_B_y')
@@ -104,26 +106,29 @@ def run(_context: str):
         _, c = A.fresh_component(asm, 'PRT_JOINT_BLOCK_B_' + tg)
         A.add_body(c, 'JOINT_BLOCK_B_' + sn, b, 'petg', 'PETG 6 walls')
 
-    # ---------------------------------------------------------------- spacers
-    _, c = A.fresh_component(asm, 'PRT_BOGIE_SPACER')
-    for k in ('ML', 'MR', 'RL', 'RR'):
-        w = W[k]; s = w['side']
-        d = A.dir_xy(w['arm_ang'])
-        end = (w['x'] + d[0] * (off + pitch + 9), w['y'] + d[1] * (off + pitch + 9))
-        b = A.bar_xy((w['x'], w['y']), end, lh, s * zbl1, s * zf)
-        for q_ in range(2):
-            q = (w['x'] + d[0] * (off + q_ * pitch), w['y'] + d[1] * (off + q_ * pitch))
-            A.cut(b, A.hole((q[0], q[1], s * zbl1), (0, 0, s), P('bolt_m4_clr'), zf - zbl1 + 1, over=1.0))
-        A.add_body(c, 'BOGIE_SPACER_' + k, b, 'petg', 'PETG 5 walls')
+    # ---------------------------------------------------------------- spacers (one component per side: each rides on its bogie)
+    for tg in ('R', 'L'):
+        _, c = A.fresh_component(asm, 'PRT_BOGIE_SPACER_' + tg)
+        for k in ('M' + tg, 'R' + tg):
+            w = W[k]; s = w['side']
+            d = A.dir_xy(w['arm_ang'])
+            end = (w['x'] + d[0] * (off + pitch + 9), w['y'] + d[1] * (off + pitch + 9))
+            b = A.bar_xy((w['x'], w['y']), end, lh, s * zbl1, s * zf)
+            for q_ in range(2):
+                q = (w['x'] + d[0] * (off + q_ * pitch), w['y'] + d[1] * (off + q_ * pitch))
+                A.cut(b, A.hole((q[0], q[1], s * zbl1), (0, 0, s), P('bolt_m4_clr'), zf - zbl1 + 1, over=1.0))
+            A.add_body(c, 'BOGIE_SPACER_' + k, b, 'petg', 'PETG 5 walls')
 
-    # ---------------------------------------------------------------- bought pivots
-    _, c = A.fresh_component(asm, 'BUY_608')
+    # ---------------------------------------------------------------- bought pivots (608s: rocker pivots on the tub, bogie pivots per bogie)
     bw = P('brg_w')
     def brg(s, x, y, zc):
         return A.tube_z(s * zc, s * (zc + bw), x, y, P('brg_od') / 2, P('brg_id') / 2)
+    _, c = A.fresh_component(asm, 'BUY_608_P')
     for s, sn in ((1, 'STBD'), (-1, 'PORT')):
-        A.add_body(c, 'BRG_P_OUT_' + sn, brg(s, Px, Py, tz + jb_t - bw if False else tz + jb_t - bw), 'buy', '608-2RS')
+        A.add_body(c, 'BRG_P_OUT_' + sn, brg(s, Px, Py, tz + jb_t - bw), 'buy', '608-2RS')
         A.add_body(c, 'BRG_P_IN_' + sn, brg(s, Px, Py, tz), 'buy', '608-2RS')
+    for s, sn in ((1, 'STBD'), (-1, 'PORT')):
+        _, c = A.fresh_component(asm, 'BUY_608_B_' + ('R' if s > 0 else 'L'))
         z0 = zbl0 - 2.0
         A.add_body(c, 'BRG_B_IN_' + sn, brg(s, Bx, By, z0), 'buy', '608-2RS')
         A.add_body(c, 'BRG_B_OUT_' + sn, brg(s, Bx, By, z0 + jb_t - bw), 'buy', '608-2RS')
@@ -134,8 +139,8 @@ def run(_context: str):
     _, c = A.fresh_component(asm, 'BUY_DIFF_HOUSING')
     hs = A.box(Px - 25, Px + 25, Py - 18, Py + 18, -28, 28)
     A.add_body(c, 'DIFF_HOUSING', hs, 'buy', 'bevel-gear differential placeholder [VERIFY]')
-    _, c = A.fresh_component(asm, 'BUY_BOGIE_PIN')
     for s, sn in ((1, 'STBD'), (-1, 'PORT')):
+        _, c = A.fresh_component(asm, 'BUY_BOGIE_PIN_' + ('R' if s > 0 else 'L'))
         A.add_body(c, 'BOGIE_PIN_' + sn, A.cylz(s * (zbl0 - 2.0), s * (zr + lt / 2 + 2), Bx, By, P('rb_pin_d') / 2), 'steel', '8 mm pin')
 
     seen = set()

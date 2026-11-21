@@ -569,14 +569,19 @@ def ik2(tx, ty, up=True, branch=None):
 
 # sim ARM.limits (rad): q1 [-1.05, 3.0], q2 [-3.0, 2.4], q3 [-2.8, 2.8]  (src/sim/config.js)
 ARM_LIM = ((-1.05, 3.0), (-3.0, 2.4), (-2.8, 2.8))
-# pose table: seat target (x, y) of the hook seat, hook angle psi (rad), elbow branch.  Stow = sim fk(ARM.stow.q) tip / 16.32, psi 1.2.
+# pose table: seat target (x, y) of the hook seat, hook angle psi (rad), elbow branch.  Stow = sim fk(ARM.stow.q) tip / 8.16 (K), psi 1.2.
 STOW_Q = (2.8, -2.8, 1.2)       # sim ARM.stow.q (rad)
 def stow_seat_xy():
     """Stowed hook SEAT (trunnion) = wrist axis (stow_x, stow_y) + hook_off along the hook (psi 1.2 rad): where the stow cradle pin goes."""
     return P('stow_x') + P('hook_off') * math.cos(STOW_Q[0] + STOW_Q[1] + STOW_Q[2]), P('stow_y') + P('hook_off') * math.sin(sum(STOW_Q))
 
+PRE_FWD, PRE_BELOW = 30.0, 20.0   # sim ARM.pick.preFwd k(0.03) m, preBelow k(0.02) m (src/sim/config.js:275) / 8.16 (K), in mm
+
 def pose_target(pose):
-    return {'pregrasp': ((P('pick_x'), 90.0 - 50.0), 0.0, 'neg'), 'pick': ((P('pick_x'), 90.0), 0.0, 'neg'),
+    """Hook SEAT (trunnion) target (x, y) mm, hook angle psi (rad), elbow branch: the sim arm.js poses / 8.16 (K).
+    preGrasp = (xBody - preFwd, TRUN_Y - preBelow) = (390, 70); grasp = (xBody, TRUN_Y) = (420, 90); place = (placeX, deckY + TRUN_Y)."""
+    return {'pregrasp': ((P('pick_x') - PRE_FWD, P('acm_trun_y') - PRE_BELOW), 0.0, 'neg'),
+            'pick': ((P('pick_x'), P('acm_trun_y')), 0.0, 'neg'),
             'apex': ((P('arm_sh_x'), 515.0), 0.0, 'neg'),
             'place': ((P('dk_place_x'), P('ch_deckY') + P('acm_trun_y')), 0.0, 'pos')}[pose]
 
@@ -714,16 +719,16 @@ def _replace(parent, old, m):
     raise RuntimeError('could not place %s at the requested matrix' % comp.name)
 
 def apply_pose(name, gate_open=None):
-    """Move both arms (links re-placed by delete+add) and the ACM to a named pose.  Returns the joint angles (deg)."""
+    """Move both arms (link proxies re-placed through transform2) and the ACM to a named pose.  Removes the motion links and joints
+    of 90_assembly_joints.py first (clear_joints; re-run 90 afterwards).  Returns the joint angles (deg)."""
     q = arm_pose_q(name)
     mats, E, W = link_mats(q)
     if gate_open is None:
         gate_open = (name == 'pregrasp')
     g = hook_geom()
-    # NOTE: as-built joints (90_assembly_joints.py) use fixed sketch-point origins, so a chained joint pose is not valid;
-    # poses are applied by re-placing the link occurrences, which requires removing the joints (re-run 90 afterwards).
-    for jn in list(all_joints()):
-        jn.deleteMe()
+    # NOTE: the as-built joints of 90_assembly_joints.py are chained (each child's axis point lives in its parent link's component),
+    # but poses are applied here by re-placing the link occurrences, which requires removing the joints (re-run 90 afterwards).
+    clear_joints()
     # transform overrides can only be set on root-context proxies (root.allOccurrences)
     for o in list(root().allOccurrences):
         fp = o.fullPathName
@@ -755,8 +760,16 @@ def get_joint(name):
             return j
     return None
 
+def clear_joints():
+    """Delete the root motion links (they reference joints, e.g. ML_DIFFERENTIAL), then every as-built joint."""
+    for ml in list(getattr(root(), 'motionLinks', None) or []):
+        ml.deleteMe()
+    for j in list(all_joints()):
+        j.deleteMe()
+
 def find_prox(comp_name, asm_prefix=None):
-    """All assembly-context occurrence proxies (root.allOccurrences) of a component name (prefix match, e.g. 'WHEEL_DRIVEN')."""
+    """All assembly-context occurrence proxies (root.allOccurrences) of a component name (exact name, or Fusion's 'NAME (N)'
+    duplicates, e.g. 'WHEEL_DRIVEN'); asm_prefix filters on the fullPathName start (e.g. 'ASM_ARM_R')."""
     out = []
     for o in root().allOccurrences:
         if (o.component.name == comp_name or o.component.name.startswith(comp_name + ' (')) and (asm_prefix is None or o.fullPathName.startswith(asm_prefix)):
@@ -777,9 +790,68 @@ def joint_sketch():
     return sk
 
 def joint_pt(sk, x, y):
-    """Sketch point at sim (x, y) (the revolute axis is the sim z direction = Fusion -Y)."""
+    """Sketch point at sim (x, y, 0) on the root J_POINTS (xZ) sketch.  A revolute through it turns about the sketch normal
+    (Fusion +Y = sim -z, see make_joint).  Fixed in the root: use it only when the parent part does not move (tub, tower)."""
     p = sk.modelToSketchSpace(adsk.core.Point3D.create(x * MM, 0.0, y * MM))
     return sk.sketchPoints.add(adsk.core.Point3D.create(p.x, p.y, 0))
+
+_JPTS = {}
+
+def clear_comp_joint_pts():
+    """Delete every 'J_PTS' sketch (made by comp_joint_pt) in the design; 90_assembly_joints.py calls it before rebuilding."""
+    _JPTS.clear()
+    for c in design().allComponents:
+        for s in list(c.sketches):
+            if s.name == 'J_PTS':
+                s.deleteMe()
+
+def comp_joint_pt(occ, x, y, z=0.0):
+    """Joint point that travels WITH occ (a root-context proxy, the parent link of a chained joint): a point in a 'J_PTS' sketch on
+    occ's own component xZ plane, on the lateral (sim z) line through world sim (x, y), returned as a proxy in occ's context.
+    The line is followed along the component's Y axis onto its xZ plane, so occ's Y axis must be lateral (checked).  One point
+    per component and position is shared by all occurrences of that component (e.g. the 4 motor mounts at their origin)."""
+    comp = occ.component
+    m = occ.transform2
+    ay = adsk.core.Vector3D.create(m.getCell(0, 1), m.getCell(1, 1), m.getCell(2, 1))
+    if abs(ay.y) < 0.999:
+        print('WARNING comp_joint_pt: %s Y axis (%.3f, %.3f, %.3f) is not lateral' % (occ.fullPathName, ay.x, ay.y, ay.z))
+    inv = m.copy(); inv.invert()
+    p = adsk.core.Point3D.create(x * MM, -z * MM, y * MM)
+    p.transformBy(inv)                                  # world -> component space
+    p = adsk.core.Point3D.create(p.x, 0.0, p.z)          # slide along the component Y (= the joint axis) onto its xZ plane
+    key = (comp.name, round(p.x, 5), round(p.z, 5))
+    sp = _JPTS.get(key)
+    if sp is None or not sp.isValid:
+        sk = next((s for s in comp.sketches if s.name == 'J_PTS'), None)
+        if sk is None:
+            sk = comp.sketches.add(comp.xZConstructionPlane)
+            sk.name = 'J_PTS'
+        q = sk.modelToSketchSpace(p)
+        sp = sk.sketchPoints.add(adsk.core.Point3D.create(q.x, q.y, 0))
+        if _jpt_err(sp.createForAssemblyContext(occ), x, y) > 0.001:       # fallback: plain xZ-sketch mapping (x, -z)
+            sp.deleteMe()
+            sp = sk.sketchPoints.add(adsk.core.Point3D.create(p.x, -p.z, 0))
+        _JPTS[key] = sp
+    px = sp.createForAssemblyContext(occ)
+    err = _jpt_err(px, x, y)
+    if err > 0.001:
+        w = px.worldGeometry
+        print('WARNING comp_joint_pt: %s point at sim (%.3f, %.3f), wanted (%.3f, %.3f)' % (occ.fullPathName, w.x * 10, w.z * 10, x, y))
+    return px
+
+def _jpt_err(px, x, y):
+    """Distance (mm, in the sim xy plane) between a sketch-point proxy and sim (x, y)."""
+    w = px.worldGeometry
+    return math.hypot(w.x - x * MM, w.z - y * MM) * 10.0
+
+def joint_sim_sign(j, vertical=False):
+    """+1 / -1 such that sim angle = sign * Fusion rotationValue.  Lateral joints turn about sim +z = Fusion -Y, vertical ones
+    about sim +y = Fusion +Z (V()).  Warns when the joint axis is not along that direction."""
+    v = j.jointMotion.rotationAxisVector
+    c = v.z if vertical else -v.y
+    if abs(c) < 0.999:
+        print('WARNING %s axis (%.3f, %.3f, %.3f) is not along sim %s' % (j.name, v.x, v.y, v.z, 'y' if vertical else 'z'))
+    return 1 if c >= 0 else -1
 
 def joint_sketch_y():
     for sk in list(root().sketches):
@@ -794,20 +866,23 @@ def joint_pt_y(sk, x, z):
     return sk.sketchPoints.add(adsk.core.Point3D.create(x * MM, -z * MM, 0))
 
 def make_joint(name, moving, fixed, pt=None, lo=None, hi=None, vertical=False):
-    """As-built joint: revolute about sim z through sketch point pt (limits in deg, sim sign), or rigid when pt is None."""
+    """As-built joint: revolute through sketch point pt about the sketch NORMAL, or rigid when pt is None.  Limits lo..hi in deg,
+    sim sign: about sim +z for lateral joints (points on xZ sketches), about sim +y when vertical (xY sketch).
+    JointGeometry.createByPoint(sketch point) takes the sketch frame: Z = sketch normal, X / Y = sketch x / y.  So the axis must be
+    ZAxisJointDirection; the YAxisJointDirection used up to v1.8 turned every lateral joint about the VERTICAL (sketch y = -Z)."""
     g = adsk.fusion.JointGeometry.createByPoint(pt) if pt is not None else None
     inp = root().asBuiltJoints.createInput(moving, fixed, g)
     if pt is not None:
-        inp.setAsRevoluteJointMotion(adsk.fusion.JointDirections.ZAxisJointDirection if vertical else adsk.fusion.JointDirections.YAxisJointDirection)
+        inp.setAsRevoluteJointMotion(adsk.fusion.JointDirections.ZAxisJointDirection)
     else:
         inp.setAsRigidJointMotion()
     j = root().asBuiltJoints.add(inp)
     j.name = name
-    if pt is not None and lo is not None:
-        lim = j.jointMotion.rotationLimits
-        lim.isMinimumValueEnabled = True; lim.isMaximumValueEnabled = True
-        if vertical:
-            lim.minimumValue = math.radians(lo); lim.maximumValue = math.radians(hi)
-        else:
-            lim.minimumValue = math.radians(-hi); lim.maximumValue = math.radians(-lo)       # Fusion +Y = sim -z
+    if pt is not None:
+        s = joint_sim_sign(j, vertical)
+        if lo is not None:
+            lim = j.jointMotion.rotationLimits
+            lim.isMinimumValueEnabled = True; lim.isMaximumValueEnabled = True
+            a, b = (lo, hi) if s > 0 else (-hi, -lo)
+            lim.minimumValue = math.radians(a); lim.maximumValue = math.radians(b)
     return j

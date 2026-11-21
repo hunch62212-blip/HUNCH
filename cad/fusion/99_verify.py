@@ -33,8 +33,7 @@ def run(_context: str):
         return
     P = A.P
     fails = 0
-    for j in list(A.all_joints()):
-        j.deleteMe()
+    A.clear_joints()            # motion links + as-built joints (the poses below re-place the links): re-run 90 afterwards
     # ---------------------------------------------------------------- 1,2 naming / bed / mass / inserts
     seen = {}
     for o in A.root().allOccurrences:

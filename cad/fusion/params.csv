@@ -41,8 +41,8 @@ ch_deck_bolt_pitch,mm,100 mm,100,Deck M5 bolt pitch along rails,FALSE
 ch_angle_t,mm,9 mm,9,Tub angle bracket thickness (insert depth + wall),FALSE
 wb_x,mm,240 mm,240,Front/rear axle x,FALSE
 tr_z,mm,235 mm,235,Track half-width (wheel centre plane),FALSE
-wh_r,mm,65 mm,65,Wheel radius (incl. cleats) [VERIFY],FALSE
-wh_w,mm,75 mm,75,Wheel width [VERIFY],FALSE
+wh_r,mm,65 mm,65,Wheel radius (incl. cleats) = sim / team GEO wheelR 0.065 m,FALSE
+wh_w,mm,75 mm,75,Wheel width = sim / team GEO wheelW 0.075 m,FALSE
 wh_cleat_h,mm,8 mm,8,Cleat height (sim TIRE.cleatM),FALSE
 wh_cleats,,20,20,Cleats per wheel,FALSE
 wh_rim_t,mm,3 mm,3,Hoop wall thickness,FALSE
@@ -177,7 +177,7 @@ hook_cheek_ang,deg,30 deg,30,Lead-in cheek angle,FALSE
 latch_gap,mm,1.0 mm,1,Gate to trunnion,FALSE
 trun_d,mm,12 mm,12,ACM trunnion dia,FALSE
 trun_len,mm,15 mm,15,ACM trunnion length (20 -> 15: tip stays 0.7 mm clear of the forearm inner plate),FALSE
-dk_place_x,mm,-42.6 mm,-42.6,ACM centre on deck (sim DECK.placeX -0.695 m / 16.32; balance rule),FALSE
+dk_place_x,mm,-42.57 mm,-42.57,ACM centre on deck (sim computeDeckPlaceX() -0.3474 m / 8.16 (K) = -42.569; balance rule),FALSE
 dk_pin_tip,mm,8 mm,8,Locating pin tip dia,FALSE
 dk_pin_base,mm,14 mm,14,Locating pin base dia,FALSE
 dk_pin_h,mm,15 mm,15,Locating pin height,FALSE
@@ -210,7 +210,7 @@ acm_split_dy,mm,25 mm,25,ACM shell split plane above trunnion axis,FALSE
 acm_post_d,mm,18 mm,18,ACM interior corner post dia,FALSE
 keeper_d,mm,6 mm,6,ACM keeper bar dia,FALSE
 dk_latch_gap,mm,12 mm,12,Latch hook to keeper clearance when open,FALSE
-stow_x,mm,161.5 mm,161.5,Stow wrist-axis x (sim fk(stow q).tip / 16.32; seat = +hook_off along psi),FALSE
+stow_x,mm,161.56 mm,161.56,Stow wrist-axis x (sim fk(stow q).tip / 8.16 (K) = 161.556; seat = +hook_off along psi),FALSE
 stow_y,mm,342 mm,342,Stow wrist-axis y (psi 1.2 rad; elbow (-38.4 342)),FALSE
 pick_x,mm,420 mm,420,ACM centre x at the ground pick pose,FALSE
-dk_latch_x,mm,dk_place_x - acm_L/2 - 16 mm,-148.6,Deck latch servo axis x,FALSE
+dk_latch_x,mm,dk_place_x - acm_L/2 - 16 mm,-148.57,Deck latch servo axis x,FALSE

@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/nhharshan/.local/bin/graphify hook-guard search",
+            "command": "/Users/harshan/.local/bin/graphify hook-guard search",
             "timeout": 10
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/nhharshan/.local/bin/graphify hook-guard read",
+            "command": "/Users/harshan/.local/bin/graphify hook-guard read",
             "timeout": 10
           }
         ]
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/nhharshan/.local/bin/graphify hook-guard compact",
+            "command": "/Users/harshan/.local/bin/graphify hook-guard compact",
             "timeout": 10
           }
         ]
